@@ -73,7 +73,7 @@ Python 3.12+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ 也可用�
 
 ```bash
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
 只有要爬「用 JavaScript 動態產生內容」的網站時，才需要多裝一次瀏覽器：
@@ -88,6 +88,25 @@ python -m venv .venv
 |---|---|
 | `start.bat` | 開啟視窗介面 |
 | `console.bat` | 開啟已啟用虛擬環境的命令列 |
+
+### 搬動或改名資料夾之後
+
+`start.bat` 與 `console.bat` 都以自己所在的位置推算路徑，搬到哪都能用。
+
+但 Python 的虛擬環境**本身**不可搬移，這是 `venv` 模組的已知行為、不是本專案
+的設定：`.venv\Scripts\activate.bat` 會把建立當下的絕對路徑寫死，`pip.exe`、
+`pytest.exe` 這類啟動器也在檔案裡嵌入了絕對路徑，搬動後就失效（`.venv\Scripts\
+python.exe` 本身不受影響，所以 `start.bat` 照常運作）。
+
+因此本專案一律用 `python -m pip`、`python -m pytest` 這種寫法，而 `console.bat`
+不呼叫 `activate.bat`、自己設定環境變數。真的搬過位置之後如果想回到完全乾淨的
+狀態，重建虛擬環境即可：
+
+```bash
+rmdir /s /q .venv
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+```
 
 ---
 
@@ -576,9 +595,9 @@ Aborted`——沒有例外可以接。控制器用的是延遲 import，所以�
 格式化在那邊做。
 
 ```bash
-pytest                                            # 全部測試
-pytest --cov=core --cov=crawler --cov=database \
-       --cov=exporter --cov=verifier --cov=gmail  # 覆蓋率
+python -m pytest                                            # 全部測試
+python -m pytest --cov=core --cov=crawler --cov=database \
+                 --cov=exporter --cov=verifier --cov=gmail  # 覆蓋率
 ```
 
 測試不連網、不查 DNS、不需要 Gmail 帳號、不寫入系統憑證保管庫，全部以 stub 取代。

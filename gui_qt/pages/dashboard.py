@@ -1,13 +1,13 @@
 """儀表板：headline 數字、業務階段分布、最近爬取紀錄。
 
-這是這次遷移唯一完整移植的頁面，直接對照 ``gui/pages/dashboard.py``。其餘
-8 頁目前是 ``gui_qt/pages/placeholder.py`` 產生的佔位頁。
+這是當初第一個移植的頁面，其餘 8 頁照著它的模式做，所以下面這份「該照抄
+什麼」保留下來——新增頁面時仍然適用。
 
-## 給後續移植其餘 8 頁的人：這頁示範了什麼、該照抄什麼
+## 這頁示範了什麼、新增頁面時該照抄什麼
 
     1. **只透過 controller 存資料。** 這頁只 import 了
-       ``gui.controllers.DashboardController`` 和 ``gui.i18n.label``
-       （純字典查表，沒有 Tk 相依，兩套介面共用同一份中英對照，不要自己
+       ``controllers.DashboardController`` 和 ``core.i18n.label``
+       （純字典查表，不依賴任何 GUI 框架，中英對照只維護一份，不要自己
        另刻一份）。不要 import ``database.repository`` 或自己開 session。
     2. **``build()`` 只建元件、``refresh()`` 才查資料。** ``on_show()`` 是
        ``BasePage`` 提供的，會依「資料版本」決定要不要呼叫 ``refresh()``

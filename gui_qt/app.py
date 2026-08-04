@@ -1,10 +1,8 @@
 """應用程式外殼：側邊導覽 + 頁面容器 + 狀態列。
 
-這是 ``gui/app.py`` 的 PySide6 版本，設計哲學完全對照：
+前身是 customtkinter 版的 ``gui/app.py``（已刪除），設計哲學完全沿用：
 
-    * 側邊欄 9 個項目，對應 ``gui/app.py`` 的 ``PAGE_CLASSES``。目前只有
-      「儀表板」是真正移植好的頁面，其餘 8 個是 ``placeholder_page()``
-      產生的佔位頁——見該函式的 docstring，說明後續怎麼把佔位頁換成真頁面。
+    * 側邊欄 9 個項目，全部都是真正的頁面——移植已經完成，沒有佔位頁。
     * **頁面延遲建立**：啟動時把全部 9 個頁面物件建出來、放進
       ``QStackedWidget``（這一步很便宜——一個空的 ``QWidget`` 幾乎不花時間，
       跟 customtkinter 「每個 widget 都要畫一次圓角矩形、耗時 ~1ms」完全不
@@ -12,7 +10,7 @@
       去長出裡面真正的元件。
     * **換頁只是 ``QStackedWidget.setCurrentWidget()``**，對照 Tk 版的
       ``tkraise()``——兩者的共同點是都不會重新計算/重建整個頁面的版面，
-      這正是換頁延遲能压到 20ms 以內的關鍵之一。
+      這正是換頁延遲能壓到 20ms 以內的關鍵之一。
 """
 
 from __future__ import annotations
@@ -55,22 +53,22 @@ from gui_qt.widgets import StatusBar
 
 log = get_logger(LogCategory.GUI)
 
-#: 順序與標題對照 gui/app.py 的 PAGE_CLASSES（Tk 版頁面的 title/icon）：
+#: 側邊欄的排列直接跟著這個 tuple 走，順序沿用 Tk 版：
 #:
-#:     Tk 頁面（gui/pages/*.py）      title   icon
-#:     -----------------------------  ------  ----
-#:     dashboard.DashboardPage        儀表板  📊   -- 已移植，見 pages/dashboard.py
-#:     companies.CompaniesPage        公司    🏢
-#:     contacts.ContactsPage          聯絡人  👤
-#:     crawler.CrawlerPage            爬取    🕷️
-#:     import_page.ImportPage         匯入    📥
-#:     export_page.ExportPage         匯出    📤
-#:     mail.MailPage                  郵件    ✉
-#:     logs.LogsPage                  日誌    📜
-#:     settings.SettingsPage          設定    ⚙️
+#:     頁面（gui_qt/pages/*.py）  title   icon
+#:     -------------------------  ------  ----
+#:     dashboard.DashboardPage    儀表板  📊
+#:     companies.CompaniesPage    公司    🏢
+#:     contacts.ContactsPage      聯絡人  👤
+#:     crawler.CrawlerPage        爬取    🕷️
+#:     import_page.ImportPage     匯入    📥
+#:     export_page.ExportPage     匯出    📤
+#:     mail.MailPage              郵件    ✉
+#:     logs.LogsPage              日誌    📜
+#:     settings.SettingsPage      設定    ⚙️
 #:
-#: 移植好一頁，就把對應位置的 ``placeholder_page(...)`` 換成真正的頁面類別，
-#: **順序不要變動**——側邊欄的排列跟著這個 tuple 走。
+#: title 是頁面的識別字串（``show_page()``、``self.pages``、``nav_buttons``
+#: 都拿它當 key），改字等於改 key，要一起改。
 PAGE_CLASSES: tuple[type[BasePage], ...] = (
     DashboardPage,
     CompaniesPage,
