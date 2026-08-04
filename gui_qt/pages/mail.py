@@ -44,6 +44,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -291,10 +292,13 @@ class MailPage(BasePage):
         self.campaign_name_entry = LabeledEntry(
             "活動名稱", value=f"開發信-{date.today().isoformat()}"
         )
-        campaign_row.addWidget(self.campaign_name_entry)
+        campaign_row.addWidget(self.campaign_name_entry, 1)
         self.build_plan_button = QPushButton("產生名單")
         self.build_plan_button.clicked.connect(self._start_build_plan)
-        campaign_row.addWidget(self.build_plan_button)
+        # 靠下對齊。LabeledEntry 是「說明文字在上、輸入框在下」的直向堆疊，
+        # 按鈕預設會對齊整個堆疊的垂直中心，看起來就卡在說明文字與輸入框
+        # 之間、跟輸入框沒有對齊。
+        campaign_row.addWidget(self.build_plan_button, 0, Qt.AlignmentFlag.AlignBottom)
         section.body_layout.addLayout(campaign_row)
 
         # 欄寬總和刻意收斂到明顯小於這個面板的實際寬度：這個面板是跟「郵件
