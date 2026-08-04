@@ -1,0 +1,172 @@
+# 名單匠 Roster 設定檔。
+# 這裡的值由 core/config.py（pydantic）驗證，路徑相對於本檔案所在資料夾。
+
+app:
+  name: "名單匠"
+  locale: "zh_TW"
+  theme: "system"          # system | light | dark
+
+database:
+  url: "sqlite:///./data/crm.db"
+  echo: false
+  # 加密個資欄位（信箱／電話／地址／聯絡人／備註／信件內文）。
+  # 金鑰存在系統憑證保管庫，不在專案資料夾內。改成 false 並重新啟動，
+  # 程式會自動把資料轉回明文；改回 true 則自動加密回去。
+  encrypt: true
+
+logging:
+  level: "INFO"            # DEBUG | INFO | WARNING | ERROR
+  dir: "./logs"
+  rotation: "10 MB"
+  retention: "30 days"
+  console: true
+
+crawler:
+  # Identify yourself honestly. {contact} is filled from CRM_CRAWLER_CONTACT.
+  user_agent: "Roster/1.0 (+contact: {contact})"
+  engine: "httpx"          # httpx | playwright
+  respect_robots: true     # never set false for sites you do not own
+  delay_seconds: 2.0       # polite delay between requests
+  delay_jitter: 0.5        # random 0..jitter added to each delay
+  request_timeout: 20.0
+  max_retries: 3
+  retry_backoff: 2.0       # exponential base, seconds
+  max_pages: 10            # global page cap per source
+  stop_on_empty_page: true
+  playwright:
+    headless: true
+    wait_until: "networkidle"
+    nav_timeout_ms: 30000
+
+  # Each source is a named, independently enabled crawl target.
+  # type: "sample"       -> bundled offline fixture, safe for demos and tests
+  # type: "generic_html" -> config-driven CSS-selector scraper
+  sources:
+    - name: "sample"
+      type: "sample"
+      enabled: true
+
+    # Template. Point start_url at a directory you are permitted to crawl,
+    # then map its markup to fields below. Disabled until you fill it in.
+    - name: "example_directory"
+      type: "generic_html"
+      enabled: false
+      start_url: "https://example.com/companies?page={page}"
+      page_start: 1
+      max_pages: 5
+      list_selector: "div.company-card"
+      pagination:
+        type: "query"      # query | next_link | none
+        next_selector: "a.next-page"
+      fields:
+        company_name: { selector: "h3.name" }
+        email: { selector: "a[href^='mailto:']", attr: "href" }
+        phone: { selector: ".tel" }
+        website: { selector: "a.site", attr: "href" }
+        address: { selector: ".addr" }
+        industry: { selector: ".industry" }
+        contact_person: { selector: ".contact" }
+        tax_id: { selector: ".tax-id" }
+
+    # 實際在用的名錄來源放在 custom_sources.yaml（不進版本控制），
+    # 程式載入設定時會自動併進來。要新增來源，用「爬取」頁的自訂網址
+    # 精靈，或照上面的範本自己寫一段。
+
+verifier:
+  check_mx: true
+  mx_timeout: 5.0
+  mx_cache_hours: 168      # re-check a domain's MX at most weekly
+  reject_disposable: true
+  disposable_domains:
+    - "mailinator.com"
+    - "10minutemail.com"
+    - "guerrillamail.com"
+    - "tempmail.com"
+    - "yopmail.com"
+
+exporter:
+  output_dir: "./output"
+  excel_sheet_name: "Companies"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  columns:
+    - "id"
+    - "company_name"
+    - "tax_id"
+    - "email"
+    - "phone"
+    - "website"
+    - "address"
+    - "industry"
+    - "contact_person"
+    - "pipeline_stage"
+    - "priority"
+    - "status"
+    - "tags"
+    - "source"
+    - "follow_up_date"
+    - "created_at"
+    - "updated_at"
+    - "remark"
+
+backup:
+  dir: "./backups"
+  daily: true
+  weekly: true
+  keep_daily: 14
+  keep_weekly: 8
+
+# 自動排程爬取。
+# 注意：這是桌面程式，沒有背景服務——排程只在本程式開啟時才會執行。
+scheduler:
+  enabled: false
+  mode: "daily"            # daily（每天固定時間）| hourly（每小時）| interval（固定間隔）
+  at: "03:00"              # mode=daily 時的執行時間，24 小時制
+  every_minutes: 360       # mode=interval 時的間隔分鐘數
+  sources: []              # 要爬的來源名稱；留空代表所有已啟用的來源
+  verify_after_crawl: true # 每次爬完自動重新驗證信箱
+  catch_up: true           # 開啟程式時，若已錯過執行時間就立刻補跑一次
+
+gmail:
+  enabled: false
+  imap_host: "imap.gmail.com"
+  imap_port: 993
+  mailbox: "INBOX"
+  search: "UNSEEN"
+  max_messages: 50
+  # Only harvest contacts from senders whose domain is not in this list.
+  ignore_domains:
+    - "gmail.com"
+    - "yahoo.com.tw"
+    - "hotmail.com"
+    - "outlook.com"
+
+# -----------------------------------------------------------------------------
+# mailer: 從你自己的 Gmail 帳號寄送開發信（郵件合併）。
+#
+# 帳號密碼與 gmail 區段共用同一組 .env 變數：GMAIL_ADDRESS / GMAIL_APP_PASSWORD
+# （Google 應用程式密碼，需先在 Google 帳戶開啟兩步驟驗證後於
+#  https://myaccount.google.com/apppasswords 產生）。
+#
+# 法律與合規注意事項（個人資料保護法 / 台灣個資法）：
+#   - 僅可寄送給你有正當來源（如公開網站、名片、既有往來）取得的商業聯絡資訊，
+#     且必須是與工作相關的用途（B2B 開發），避免用於與職務無關的行銷。
+#   - 每封信都必須提供明確、可執行的退訂方式（見 unsubscribe_note），
+#     收到退訂要求後應立即透過「請勿聯絡」機制停止聯絡，且不得再次寄送。
+#   - 請保留寄送紀錄（email_messages 資料表）作為稽核與申訴依據。
+#   - 大量或高頻率寄送可能違反 Gmail 服務條款並導致帳號被封鎖；
+#     daily_limit、delay_seconds 的預設值刻意保守，不建議任意調高。
+mailer:
+  enabled: false          # 總開關；false 時 GUI/排程都不應觸發任何寄送
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  use_tls: true
+  sender_name: ""         # 顯示在收件者信箱「寄件人」欄位的名稱，留空則只顯示地址
+  reply_to: ""            # 留空則使用寄件帳號本身
+  dry_run: true           # true：只寫入資料庫並標記為「Dry Run」，不會真的寄出
+  daily_limit: 100        # 每日寄送上限，以今天已標記為「Sent」的封數計算
+  delay_seconds: 8.0      # 每封信之間的間隔秒數，避免被 Gmail 判定為垃圾郵件來源
+  resend_after_days: 30   # 同一間公司在這麼多天內寄過信，就不會重複寄送
+  require_verified_email: true   # 只寄給通過 MX 驗證（Valid）的信箱
+  unsubscribe_note: >-
+    若不希望再收到本信件，請直接回覆本信並註明「取消訂閱」，我們會立即將您移除。
+  templates_dir: "./templates/mail"

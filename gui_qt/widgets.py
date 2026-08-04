@@ -1,0 +1,395 @@
+"""共用元件，對應 ``gui/widgets.py`` 的 Tk 元件。
+
+給接手其餘 8 頁的人看的行為對照表：
+
+    Tk（gui/widgets.py）        Qt（這個檔案）                用途
+    --------------------------  -----------------------------  --------------------------------
+    Section                     Section                        標題 + 內容區塊的卡片
+    StatCard                    StatCard                       儀表板的單一數字卡
+    DataTable（ttk.Treeview）   DataTable（QTableView + Model） 見下方「為什麼不用 QTableWidget」
+    LabeledEntry                LabeledEntry                   說明文字疊在單行輸入框上面
+    CaptionedControl            CaptionedControl               說明文字疊在任何一個控制項上面
+    StatusBar                   StatusBar                       視窗最下面那條：訊息 + 不定進度條
+    WrappingLabel                （不需要）                     直接用 ``QLabel.setWordWrap(True)``
+
+``WrappingLabel`` 在 Tk 版存在，是因為 ``CTkLabel(wraplength=...)`` 的換行寬度
+是建立時就寫死的猜測值，猜錯了要嘛裁字要嘛提早換行；Qt 的
+``QLabel.setWordWrap(True)`` 本來就是照當下版面實際寬度換行，不需要另外補一層。
+
+## 為什麼 DataTable 用 QTableView + QAbstractTableModel，不用 QTableWidget
+
+``QTableWidget`` 每一格都是一個 ``QTableWidgetItem`` Python 物件；公司頁有
+215+ 筆、7、8 欄，``set_rows()`` 一次呼叫就要 new 出上千個物件，且無論畫面上
+看不看得到都會全部建出來——這正是 customtkinter 每個 widget 都要花 ~1ms
+建置、換頁 200ms 的同一種問題，只是換了一個框架重犯。
+
+``QAbstractTableModel`` 只保存資料本身（這裡是一份 ``list[dict]``），
+``data()`` 是 view 要畫第幾格「當下」才會被呼叫一次，view 也只會替看得到
+的那幾列建立顯示用的暫時物件，不會在 ``set_rows()`` 那一刻就把整張表具現化
+成 Qt 物件。這就是本次遷移換頁能压到 5ms 等級的關鍵之一：不管表格有幾百筆，
+填資料的成本只跟「畫面上看得到幾列」成正比，而不是跟總筆數成正比。
+
+之後任何頁面的表格都必須走這個 ``DataTable``，不要另外建 ``QTableWidget``
+或直接裸用 ``QTableView``。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from typing import Any
+
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QProgressBar,
+    QTableView,
+    QVBoxLayout,
+    QWidget,
+)
+
+from gui_qt import theme
+
+#: Caption 字級，跟 Tk 版的 CAPTION_SIZE 一致，讓兩套介面的控制項高度看起來一樣。
+CAPTION_SIZE = 12
+
+#: DataTable 預設的單行高度（像素），跟 Tk 版 ttk.Treeview 的 rowheight=30 一致。
+ROW_HEIGHT = 28
+
+
+def _display(value: Any) -> str:
+    """把一個儲存格的值轉成顯示字串，跟 gui/widgets.py 的 ``_display`` 一致。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
+def _sort_value(value: Any) -> tuple[int, Any]:
+    """排序鍵：空值排最後，數字用數值比較，其餘用小寫字串比較。"""
+    if value is None or value == "":
+        return (2, "")
+    if isinstance(value, (int, float)):
+        return (0, value)
+    text = str(value)
+    try:
+        return (0, float(text))
+    except ValueError:
+        return (1, text.lower())
+
+
+class Section(QFrame):
+    """有標題的卡片，其他元件放進 ``body_layout`` 裡——對應 gui.widgets.Section。"""
+
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("Section")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 12, 14, 12)
+        outer.setSpacing(6)
+
+        heading = QLabel(title)
+        heading.setObjectName("SectionTitle")
+        outer.addWidget(heading)
+
+        #: 頁面把自己的內容加進這裡，不要直接加進 ``Section`` 本身的 layout。
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.body, 1)
+
+
+class StatCard(QFrame):
+    """單一數字加說明，用在儀表板——對應 gui.widgets.StatCard。"""
+
+    def __init__(
+        self, title: str, value: str = "-", hint: str = "", parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatCard")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(2)
+
+        self._title = QLabel(title)
+        self._title.setObjectName("MutedLabel")
+        layout.addWidget(self._title)
+
+        self._value = QLabel(value)
+        value_font = self._value.font()
+        value_font.setPointSize(20)
+        value_font.setBold(True)
+        self._value.setFont(value_font)
+        layout.addWidget(self._value)
+
+        self._hint = QLabel(hint)
+        self._hint.setObjectName("MutedLabel")
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
+
+    def update_values(self, value: Any, hint: str | None = None) -> None:
+        self._value.setText(str(value))
+        if hint is not None:
+            self._hint.setText(hint)
+
+    @property
+    def value_text(self) -> str:
+        """目前顯示的數字文字。主要給測試用，頁面程式碼不需要讀回這個值。"""
+        return self._value.text()
+
+    @property
+    def hint_text(self) -> str:
+        """目前顯示的說明文字，理由同 :attr:`value_text`。"""
+        return self._hint.text()
+
+
+class DataTableModel(QAbstractTableModel):
+    """:class:`DataTable` 背後的資料模型。列永遠是純 dict，不是 Qt 物件。
+
+    ``columns`` 是 ``(key, heading, width)`` 的序列，跟 Tk 版 ``DataTable``
+    的參數形狀完全一樣——頁面從 Tk 換成 Qt 時，呼叫 ``set_rows()`` 的方式不必改。
+    """
+
+    def __init__(self, columns: Sequence[tuple[str, str, int]], parent: Any = None) -> None:
+        super().__init__(parent)
+        self._keys = [key for key, _, _ in columns]
+        self._headings = [heading for _, heading, _ in columns]
+        self._rows: list[dict[str, Any]] = []
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008
+        return 0 if parent.isValid() else len(self._keys)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+        if not index.isValid():
+            return None
+        if role == Qt.ItemDataRole.DisplayRole:
+            row = self._rows[index.row()]
+            return _display(row.get(self._keys[index.column()]))
+        return None
+
+    def headerData(
+        self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole
+    ) -> Any:
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal:
+            return self._headings[section]
+        return str(section + 1)
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder) -> None:
+        """點表頭排序時 Qt 會呼叫這個（``QTableView.setSortingEnabled(True)``）。"""
+        if not self._rows:
+            return
+        key = self._keys[column]
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(
+            key=lambda row: _sort_value(row.get(key)),
+            reverse=order == Qt.SortOrder.DescendingOrder,
+        )
+        self.layoutChanged.emit()
+
+    # ---------------------------------------------------- 給頁面用的資料存取
+
+    def set_rows(self, rows: Sequence[dict[str, Any]]) -> None:
+        """整批換掉表格內容。``rows`` 是以欄位 key 為鍵的 dict 序列。"""
+        self.beginResetModel()
+        self._rows = [dict(row) for row in rows]
+        self.endResetModel()
+
+    def row_at(self, row_index: int) -> dict[str, Any]:
+        return self._rows[row_index]
+
+    def row_count(self) -> int:
+        return len(self._rows)
+
+
+class DataTable(QWidget):
+    """可排序、可捲動的表格，包著 :class:`DataTableModel`。
+
+    ``on_select``/``on_activate`` 收到的是列的 dict（跟 Tk 版一樣），不是
+    Qt 的 ``QModelIndex``——頁面程式碼原本怎麼處理一列資料，搬過來不用改。
+    """
+
+    def __init__(
+        self,
+        columns: Sequence[tuple[str, str, int]],
+        on_select: Callable[[dict[str, Any]], None] | None = None,
+        on_activate: Callable[[dict[str, Any]], None] | None = None,
+        selectmode: str = "browse",
+        min_rows: int = 3,
+        parent: QWidget | None = None,
+    ) -> None:
+        """``selectmode``："browse"（單選，預設）或 "extended"（可複選）。
+
+        ``min_rows`` 只設表格的最小高度，不設上限——跟 Tk 版
+        ``ttk.Treeview(height=min_rows)`` 的用意一樣：表格仍然會撐滿外層
+        ``Section`` 給它的空間，這裡只是避免視窗太矮時被壓縮到看不見幾列。
+        """
+        super().__init__(parent)
+        self.on_select = on_select
+        self.on_activate = on_activate
+
+        self.model = DataTableModel(columns)
+        self.view = QTableView(self)
+        self.view.setModel(self.model)
+        self.view.setAlternatingRowColors(True)
+        self.view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.view.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+            if selectmode == "extended"
+            else QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.view.setSortingEnabled(True)
+        self.view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.view.verticalHeader().setVisible(False)
+        self.view.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
+        self.view.horizontalHeader().setStretchLastSection(True)
+        self.view.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Interactive
+        )
+        self.view.setMinimumHeight(min_rows * ROW_HEIGHT + self.view.horizontalHeader().height())
+
+        for index, (_, _, width) in enumerate(columns):
+            self.view.setColumnWidth(index, width)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.view)
+
+        self.view.selectionModel().currentRowChanged.connect(self._handle_select)
+        self.view.activated.connect(self._handle_activate)
+        self.view.doubleClicked.connect(self._handle_activate)
+
+    # ---------------------------------------------------------------- 資料
+
+    def set_rows(self, rows: Sequence[dict[str, Any]]) -> None:
+        self.model.set_rows(rows)
+
+    def selected_rows(self) -> list[dict[str, Any]]:
+        rows_by_index = {
+            index.row(): self.model.row_at(index.row())
+            for index in self.view.selectionModel().selectedRows()
+        }
+        return [rows_by_index[key] for key in sorted(rows_by_index)]
+
+    def selected_row(self) -> dict[str, Any] | None:
+        rows = self.selected_rows()
+        return rows[0] if rows else None
+
+    def row_count(self) -> int:
+        return self.model.row_count()
+
+    def clear(self) -> None:
+        self.set_rows([])
+
+    # ------------------------------------------------------------- 事件
+
+    def _handle_select(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        if self.on_select and current.isValid():
+            self.on_select(self.model.row_at(current.row()))
+
+    def _handle_activate(self, index: QModelIndex) -> None:
+        if self.on_activate and index.isValid():
+            self.on_activate(self.model.row_at(index.row()))
+
+
+def caption(text: str = "") -> QLabel:
+    """一個控制項的說明文字標籤，用共用的 caption 字級。"""
+    label = QLabel(text)
+    label.setObjectName("MutedLabel")
+    font = label.font()
+    font.setPointSize(CAPTION_SIZE)
+    label.setFont(font)
+    return label
+
+
+class CaptionedControl(QWidget):
+    """說明文字疊在任何一個控制項上面，兩者當成一個 widget 使用。
+
+    對應 gui.widgets.CaptionedControl：``attach()`` 之後把要疊的控制項放進來。
+    """
+
+    def __init__(self, label_text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(caption(label_text))
+        self.control: QWidget | None = None
+
+    def attach(self, control: QWidget) -> None:
+        self.control = control
+        self.layout().addWidget(control)
+
+
+class LabeledEntry(QWidget):
+    """說明文字疊在單行輸入框上面，這支專案每個表單都用這個排版。"""
+
+    def __init__(
+        self,
+        label_text: str,
+        value: str = "",
+        placeholder: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(caption(label_text))
+
+        self.entry = QLineEdit(value)
+        self.entry.setPlaceholderText(placeholder)
+        layout.addWidget(self.entry)
+
+    def get(self) -> str:
+        return self.entry.text().strip()
+
+    def set(self, value: str | None) -> None:
+        self.entry.setText(value or "")
+
+
+class StatusBar(QWidget):
+    """視窗最下面那條：左邊一則訊息，右邊一個可隱藏的不定進度條。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatusBar")
+        self.setFixedHeight(34)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 4, 12, 4)
+
+        self.message = QLabel("Ready")
+        layout.addWidget(self.message, 1)
+
+        self.progress = QProgressBar()
+        self.progress.setFixedWidth(180)
+        self.progress.setRange(0, 0)  # 不定進度：跟 Tk 版 mode="indeterminate" 一樣
+        self.progress.hide()
+        layout.addWidget(self.progress)
+
+    def set_message(self, text: str, tone: str = "normal") -> None:
+        """``tone``："normal" | "error" | "success" | "muted"。"""
+        colours = {"error": theme.DANGER, "success": theme.SUCCESS, "muted": theme.MUTED}
+        colour = colours.get(tone)
+        self.message.setText(text)
+        self.message.setStyleSheet(f"color: {theme.pick(colour)};" if colour else "")
+
+    def start_progress(self) -> None:
+        self.progress.show()
+
+    def stop_progress(self) -> None:
+        self.progress.hide()

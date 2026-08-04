@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# 機密與個資：以下絕對不可進入版本控制。
+# 這些規則刻意寫得比需要的更寬——漏掉一個客戶資料檔的代價，
+# 遠高於多忽略一個無關緊要的檔案。
+# ---------------------------------------------------------------------------
+
+# 密碼與環境設定
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+
+# 資料庫與其附屬檔（含客戶個資）
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 備份（等同整份資料庫）
+backups/
+
+# 匯出檔（含客戶名單、信箱、電話）
+output/
+
+# 附件（客戶提供的檔案）
+attachments/
+
+# 日誌（可能含公司名稱、信箱、網址）
+logs/
+
+# 使用者自訂的爬取來源（含你自己整理的目標網站）
+custom_sources.yaml
+
+# 從設定畫面存下來的個人設定（寄件開關等）
+user_settings.yaml
+
+# 郵件樣板中的個人內容（範例樣板保留）
+templates/mail/*
+!templates/mail/範例-*.txt
+
+# ---------------------------------------------------------------------------
+# 一般 Python / 開發環境
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.mypy_cache/
+.ruff_cache/
+
+# 打包產出。roster.spec 要進版控（它是打包設定），build/ 與 dist/ 不要。
+build/
+dist/
+
+# 編輯器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 保留空目錄結構
+!**/.gitkeep
+
+# 自己整理的名錄研究：哪些公協會可以爬、robots.txt 各自怎麼規定、
+# 各站的已知限制。實際的來源設定在 custom_sources.yaml（同樣不進版控）。
+docs/
+crash.log

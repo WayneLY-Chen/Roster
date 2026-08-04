@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<!--
+  Offline fixture for the "sample" crawl source. Every company below is
+  fictional. The markup deliberately contains the mess real directories emit:
+  full-width characters, +886 prefixes, mailto: links, missing fields, a
+  malformed address, and a record repeated on page 2 with extra detail.
+-->
+<html lang="zh-TW">
+<head><meta charset="utf-8"><title>台灣B2B廠商名錄 - 第 1 頁</title></head>
+<body>
+<div id="results">
+
+  <div class="company-card">
+    <h3 class="name">宏達精密機械股份有限公司</h3>
+    <span class="tax-id">統一編號：69081935</span>
+    <p class="industry">金屬加工</p>
+    <p class="tel">TEL：+886-4-2359-1234</p>
+    <p class="addr">407台中市西屯區工業區一路 25 號</p>
+    <a class="site" href="http://www.hongda-precision.com.tw/?utm_source=directory">公司網站</a>
+    <a href="mailto:sales@hongda-precision.com.tw">業務信箱</a>
+    <p class="contact">聯絡人：陳建志</p>
+  </div>
+
+  <div class="company-card">
+    <h3 class="name">日新電子（股）公司</h3>
+    <span class="tax-id">統編 04595257</span>
+    <p class="industry">電子零組件</p>
+    <p class="tel">（02）2723-8899 分機 210</p>
+    <p class="addr">110 臺北市信義區松高路 11 號 8 樓</p>
+    <a class="site" href="https://nissin-electronics.com.tw">nissin-electronics.com.tw</a>
+    <a href="mailto:info@nissin-electronics.com.tw">info</a>
+    <p class="contact">聯絡人：林佩玲</p>
+  </div>
+
+  <div class="company-card">
+    <h3 class="name">全泰化工有限公司</h3>
+    <p class="industry">化學原料</p>
+    <p class="tel">07-3812345</p>
+    <p class="addr">806高雄市前鎮區復興三路 8 號</p>
+    <p class="contact">王大明</p>
+  </div>
+
+  <div class="company-card">
+    <h3 class="name">綠光紡織企業社</h3>
+    <!-- Deliberately fails its checksum: exercises the "keep, but unverified" path. -->
+    <span class="tax-id">99999999</span>
+    <p class="industry">紡織</p>
+    <p class="tel">0912345678</p>
+    <a class="site" href="www.greenlight-textile.tw">網址</a>
+    <a href="mailto:contact (at) greenlight-textile.tw">來信洽詢</a>
+  </div>
+
+  <div class="company-card">
+    <h3 class="name">海通物流股份有限公司</h3>
+    <p class="industry">運輸倉儲</p>
+    <p class="tel">0800-091-091</p>
+    <p class="addr">基隆市中山區文化路 3 號</p>
+    <a href="mailto:not-an-email@@broken">聯絡我們</a>
+  </div>
+
+</div>
+
+<div class="pager">
+  <a class="next-page" href="sample_directory_page2.html">下一頁</a>
+</div>
+</body>
+</html>
