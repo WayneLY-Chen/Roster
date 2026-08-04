@@ -520,6 +520,8 @@ git commit -m "初始版本"
 | 寄送按鈕是灰的 | `mailer.enabled` 還是 `false`，或帳號尚未在「設定」頁設定完成 |
 | 排程沒有執行 | 排程只在程式開著時運作。要無人值守請用 `python main.py schedule` |
 | 改了 `config.yaml` 沒生效 | 需要重新啟動程式 |
+| `DLL load failed ... 應用程式控制原則已封鎖此檔案` | Windows 11 的**智慧型應用程式控制**擋掉了剛下載、還沒有信譽的套件二進位檔（實際遇過 pandas 3.0.5）。改裝有信譽的舊版本即可，例如 `python -m pip install "pandas>=2.2,<3.0"` |
+| VS Code 顯示套件「未安裝」但指令列正常 | 編輯器還指著舊的直譯器。`Ctrl+Shift+P` → `Python: Select Interpreter` → 選目前資料夾的 `.venv\Scripts\python.exe` |
 
 ---
 

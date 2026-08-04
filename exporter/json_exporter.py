@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from core.constants import VERSION
+from core.constants import PROJECT_NAME, VERSION
 from core.schemas import CompanyView
 from exporter.base import BaseExporter, resolve_columns
 
@@ -38,7 +38,7 @@ class JsonExporter(BaseExporter):
         if self.wrap:
             payload = {
                 "exported_at": datetime.now().isoformat(timespec="seconds"),
-                "generator": f"TaiwanB2BCRM {VERSION}",
+                "generator": f"{PROJECT_NAME} {VERSION}",
                 "count": len(records),
                 "columns": columns,
                 "companies": records,

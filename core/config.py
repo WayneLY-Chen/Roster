@@ -17,6 +17,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from core.constants import PROJECT_NAME
 from core.errors import ConfigError
 
 def _project_root() -> Path:
@@ -268,7 +269,10 @@ class SourceConfig(_Base):
 
 
 class CrawlerSection(_Base):
-    user_agent: str = "TaiwanB2BCRM/1.0 (+contact: {contact})"
+    #: 爬蟲對外表明身分用的。``{contact}`` 由設定檔的聯絡信箱填入——對方站長
+    #: 要抱怨或要求停止時找得到人，是「只爬公開資料」以外的基本禮貌。
+    #: 名稱走 PROJECT_NAME，改名時不會像以前那樣漏掉這裡。
+    user_agent: str = f"{PROJECT_NAME}/1.0 (+contact: {{contact}})"
     engine: Literal["httpx", "playwright"] = "httpx"
     respect_robots: bool = True
     delay_seconds: float = Field(default=2.0, ge=0.0)

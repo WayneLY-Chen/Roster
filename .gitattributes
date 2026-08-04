@@ -1,0 +1,31 @@
+# 換行字元由這裡決定，不要依賴每個人的 core.autocrlf 設定。
+#
+# 這對 .sh 是硬性要求：帶 CRLF 的 shell script 在 macOS/Linux 上會直接失敗，
+# 錯誤訊息是 `bad interpreter: /usr/bin/env bash^M`，非常難懂。
+# 反過來 .bat 需要 CRLF，cmd.exe 對 LF 的多行結構解析會出錯。
+
+* text=auto
+
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.ini  text eol=lf
+*.cfg  text eol=lf
+*.txt  text eol=lf
+*.spec text eol=lf
+
+# 二進位檔不要碰。
+*.png  binary
+*.ico  binary
+*.icns binary
+*.xlsx binary
+*.xls  binary
+*.db   binary
+*.sqlite3 binary

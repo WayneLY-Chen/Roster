@@ -1,4 +1,4 @@
-# Taiwan B2B CRM - runtime dependencies
+# Roster（名單匠）- runtime dependencies
 # Python 3.12+
 
 # --- crawling ---
@@ -12,7 +12,10 @@ tenacity>=8.3.0
 truststore>=0.9.0
 
 # --- data / export ---
-pandas>=2.2.0
+# 上限是刻意的：pandas 3.0 是有破壞性變更的大版本（寫時複製、字串 dtype
+# 等），本專案的測試從未在上面跑過，不要讓 pip 自動跳上去。要升級請先
+# 把整套測試在 3.0 跑過一次再放寬。
+pandas>=2.2.0,<3.0
 openpyxl>=3.1.2
 
 # --- persistence ---
@@ -29,8 +32,18 @@ dnspython>=2.6.1
 # Manager / macOS Keychain) instead of a plaintext .env in the project folder.
 keyring>=25.0.0
 
-# --- cli / logging / ui ---
+# 資料庫欄位加密（AES-GCM），見 core/crypto.py。
+# 這行以前也漏掉了，而且失敗方式很安靜：缺了它 core/crypto.py 會丟
+# EncryptionUnavailable，程式照常啟動、只是 database.encrypt 形同虛設。
+cryptography>=42.0.0
+
+# --- cli / logging ---
 typer>=0.12.3
 rich>=13.7.0
 loguru>=0.7.2
-customtkinter>=5.2.2
+
+# --- 桌面介面 ---
+# 介面全部在 gui_qt/。開發與測試用的是 6.11.1（Qt 6.11.1）。
+# 這行以前漏掉了：舊介面是 customtkinter，換成 PySide6 之後忘了一起改，
+# 結果照著 requirements.txt 裝完會缺 PySide6、start.bat 直接 ImportError。
+PySide6>=6.11.0

@@ -246,7 +246,7 @@ def test_analysis_missing_company_name_expands_advanced_section(qt_app):
 
 def test_analysis_error_shows_friendly_robots_message(qt_app):
     controller = _FakeSourceController(
-        analyse_result=RobotsDisallowedError("https://example.test/companies", "TaiwanB2BCRM/1.0")
+        analyse_result=RobotsDisallowedError("https://example.test/companies", "Roster/1.0")
     )
     dialog = SourceWizardDialog(None, controller)
 

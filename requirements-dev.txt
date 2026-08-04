@@ -3,3 +3,7 @@
 pytest>=8.2.0
 pytest-cov>=5.0.0
 pytest-mock>=3.14.0
+
+# 打包成 exe 用的，設定檔是專案根目錄的 roster.spec：
+#     python -m PyInstaller roster.spec
+pyinstaller>=6.0.0
