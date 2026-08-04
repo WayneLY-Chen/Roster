@@ -174,7 +174,9 @@ class MailPage(BasePage):
         limit_row.addWidget(caption("每日寄送上限"))
         self.daily_limit_spin = QSpinBox()
         self.daily_limit_spin.setRange(1, 2000)
-        self.daily_limit_spin.setFixedWidth(90)
+        self.daily_limit_spin.setFixedWidth(theme.input_width(7, has_spin_buttons=True))
+        # QSpinBox 的 sizeHint 比其他控制項高 4px，QSS 改不動——見該函式說明。
+        theme.match_control_height(self.daily_limit_spin)
         limit_row.addWidget(self.daily_limit_spin)
         save_limit_button = QPushButton("儲存上限")
         save_limit_button.clicked.connect(self._save_daily_limit)

@@ -367,7 +367,7 @@ class StatusBar(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("StatusBar")
-        self.setFixedHeight(34)
+        self.setFixedHeight(theme.status_bar_height())
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 12, 4)

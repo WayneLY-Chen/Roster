@@ -243,7 +243,7 @@ class CompanyDetailDialog(QDialog):
 
         grid.addWidget(caption("備註"), 7, 0, 1, 2)
         self.remark_box = QTextEdit()
-        self.remark_box.setFixedHeight(100)
+        self.remark_box.setFixedHeight(theme.text_box_height(6))
         grid.addWidget(self.remark_box, 8, 0, 1, 2)
 
         save_button = QPushButton("儲存")
@@ -425,7 +425,7 @@ class CompanyDetailDialog(QDialog):
 
         form.addWidget(caption("備註"), 1, 0, 1, 3)
         self.activity_body_box = QTextEdit()
-        self.activity_body_box.setFixedHeight(70)
+        self.activity_body_box.setFixedHeight(theme.text_box_height(4))
         form.addWidget(self.activity_body_box, 2, 0, 1, 3)
 
         layout.addLayout(form)

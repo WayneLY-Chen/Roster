@@ -125,7 +125,7 @@ class LogsPage(BasePage):
         controls.addSpacing(12)
         controls.addWidget(caption("行數"))
         self.lines_entry = QLineEdit(str(DEFAULT_LINES))
-        self.lines_entry.setFixedWidth(70)
+        self.lines_entry.setFixedWidth(theme.input_width(6))
         controls.addWidget(self.lines_entry)
 
         refresh_button = QPushButton("重新整理")

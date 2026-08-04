@@ -22,11 +22,21 @@ widget 個別設定，也不需要在意 ttk 的具名字型（Qt 沒有 ttk）�
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QStandardPaths, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QPainter, QPixmap, QPolygonF
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QFontMetrics,
+    QGuiApplication,
+    QPainter,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import QApplication
 
 from core.constants import LogCategory
@@ -34,16 +44,53 @@ from core.logging_setup import get_logger
 
 log = get_logger(LogCategory.GUI)
 
-#: 由上而下試，用第一個系統裝得到的。跟 gui/fonts.py 的 PREFERRED_FAMILIES 一致。
-PREFERRED_FAMILIES: tuple[str, ...] = (
+#: 由上而下試，用第一個系統裝得到的。
+#:
+#: 各平台把自己的系統介面字排前面。這不只是美觀問題：如果 Mac 上裝了
+#: Microsoft Office，"Microsoft JhengHei" 是會出現在字型清單裡的，於是
+#: Mac 會挑到一個 Windows 字型，字寬與行高都跟系統原生不同，整個版面
+#: 跟著跑掉——而使用者只會覺得「Mac 版壞掉了」。
+_MAC_FAMILIES: tuple[str, ...] = ("PingFang TC", "Heiti TC", "Apple LiGothic")
+_LINUX_FAMILIES: tuple[str, ...] = ("Noto Sans CJK TC", "Noto Sans TC", "WenQuanYi Micro Hei")
+_WINDOWS_FAMILIES: tuple[str, ...] = (
     "Microsoft JhengHei UI",
     "Microsoft JhengHei",
-    "Noto Sans TC",
     "Microsoft YaHei UI",
-    "PingFang TC",          # macOS
-    "Noto Sans CJK TC",     # Linux
     "MingLiU",
 )
+#: 跨平台的備援，接在該平台的原生字型後面。
+_FALLBACK_FAMILIES: tuple[str, ...] = ("Noto Sans TC", "Noto Sans CJK TC", "Arial Unicode MS")
+
+
+def preferred_families() -> tuple[str, ...]:
+    """目前平台的字型偏好順序，原生字型優先。"""
+    if sys.platform == "darwin":
+        native = _MAC_FAMILIES
+    elif sys.platform.startswith("linux"):
+        native = _LINUX_FAMILIES
+    else:
+        native = _WINDOWS_FAMILIES
+    seen: list[str] = []
+    for name in native + _FALLBACK_FAMILIES + _WINDOWS_FAMILIES + _MAC_FAMILIES:
+        if name not in seen:
+            seen.append(name)
+    return tuple(seen)
+
+
+#: 保留舊名稱給既有的 import 用；內容改為依平台決定。
+PREFERRED_FAMILIES: tuple[str, ...] = preferred_families()
+
+#: 各平台的介面基準字級（point）。
+#:
+#: macOS 的系統介面字是 13pt，Windows 是 9-10pt——同一個數字在兩邊看起來
+#: 差很多。以前這裡寫死 10pt，Mac 上的字因此明顯偏小，而版面的 padding 與
+#: min-height 又都是照 Windows 的字寬調出來的，比例一崩版面就開始跑位。
+_BASE_POINT_SIZE: dict[str, int] = {"darwin": 13, "win32": 10}
+_DEFAULT_POINT_SIZE = 10
+
+
+def base_point_size() -> int:
+    return _BASE_POINT_SIZE.get(sys.platform, _DEFAULT_POINT_SIZE)
 
 #: 等寬字型，日誌頁移植後會用到。
 PREFERRED_MONO: tuple[str, ...] = (
@@ -74,20 +121,128 @@ def configure_fonts(app: QApplication) -> str:
         log.warning("無法列出系統字型，沿用預設值：{}", exc)
         return app.font().family()
 
-    family = _first_available(PREFERRED_FAMILIES, installed)
+    family = _first_available(preferred_families(), installed)
     if family is None:
         log.warning("找不到任何中文字型，中文可能顯示為方框。")
         family = app.font().family()
 
     font = QFont(family)
-    font.setPointSize(10)
+    font.setPointSize(base_point_size())
     app.setFont(font)
 
     _resolved = family
     _resolved_mono = _first_available(PREFERRED_MONO, installed) or family
+    _measure(font)
 
-    log.info("介面字型：{}（等寬：{}）", family, _resolved_mono)
+    log.info(
+        "介面字型：{} {}pt（等寬：{}），行高 {}px、控制項內容高 {}px",
+        family, font.pointSize(), _resolved_mono, line_height(), control_content_height(),
+    )
     return family
+
+
+# ------------------------------------------------------------- 字型度量
+
+#: 版面尺寸一律從這裡推導，不要再寫死像素。
+#:
+#: 這些數字以前散落在 QSS 與各頁的 setFixedHeight() 裡，全是照 Windows 的
+#: 10pt 微軟正黑體量出來的。macOS 用 13pt 蘋方，行高高了好幾像素，寫死的
+#: 高度就會把文字切掉、或讓同一列的控制項對不齊。
+_metrics: dict[str, int] = {}
+
+#: Windows 上原本寫死的值，也是沒有 QApplication 時的保底值。
+_FALLBACK_METRICS: dict[str, int] = {
+    "digit": 8,
+    "line": 16,
+    "control_content": 22,
+    "nav_button": 40,
+    "status_bar": 34,
+    "toolbar_button": 26,
+}
+
+
+def _measure(font: QFont) -> None:
+    metrics = QFontMetrics(font)
+    line = metrics.height()
+    _metrics.update(
+        digit=max(metrics.horizontalAdvance("0"), 1),
+        line=line,
+        # +4 是文字上下的呼吸空間。Windows 的 line=16 會算出 20，取 max 之後
+        # 維持在 22——跟改動前完全一樣，這台機器上的對齊不會被動到。
+        control_content=max(line + 4, 22),
+        # 側邊欄按鈕：一行字加上下各 12px。
+        nav_button=max(line + 24, 40),
+        status_bar=max(line + 18, 34),
+        toolbar_button=max(line + 10, 26),
+    )
+
+
+def _metric(name: str) -> int:
+    return _metrics.get(name, _FALLBACK_METRICS[name])
+
+
+def line_height() -> int:
+    """一行文字的高度。"""
+    return _metric("line")
+
+
+def control_content_height() -> int:
+    """QLineEdit/QPushButton/QComboBox/QSpinBox 的內容框高度。
+
+    四者必須共用同一個值，否則同一列的控制項底邊不會齊——這是先前反覆
+    修不好的對齊問題的根因。
+    """
+    return _metric("control_content")
+
+
+def control_height() -> int:
+    """控制項的實際外框高度（內容 + 上下內距 4px + 上下邊框 1px）。"""
+    return control_content_height() + 4 * 2 + 1 * 2
+
+
+def nav_button_height() -> int:
+    return _metric("nav_button")
+
+
+def status_bar_height() -> int:
+    return _metric("status_bar")
+
+
+def toolbar_button_height() -> int:
+    return _metric("toolbar_button")
+
+
+def text_box_height(rows: int) -> int:
+    """多行輸入框要顯示 ``rows`` 行時的高度（含內距與邊框）。"""
+    return line_height() * rows + 4 * 2 + 1 * 2
+
+
+def match_control_height(*widgets: object) -> None:
+    """把控制項的高度壓成跟 QLineEdit/QPushButton 一致。
+
+    給 QSpinBox 用的。Qt 的 ``QAbstractSpinBox::sizeHint()`` 會多算 4px
+    （實測 36 vs 32），而且 QSS 改不動——給上下按鈕指定 height、改
+    ``subcontrol-origin``、對 QSpinBox 下 ``max-height`` 六種寫法都試過，
+    sizeHint 一律不變。所以只能在建立元件時直接指定高度。
+
+    不修的話，同一列裡的 QSpinBox 會比旁邊的輸入框高 4px，不管用哪種
+    對齊方式都會有一邊對不齊。
+    """
+    height = control_height()
+    for widget in widgets:
+        setter = getattr(widget, "setFixedHeight", None)
+        if callable(setter):
+            setter(height)
+
+
+def input_width(digits: int, *, has_spin_buttons: bool = False) -> int:
+    """能完整顯示 ``digits`` 個數字的輸入框寬度。
+
+    寬度也不能寫死：macOS 的字比較寬，Windows 上剛好的 70px 到了 Mac 會把
+    數字切掉。``has_spin_buttons`` 要留給 QSpinBox 右側的上下鈕。
+    """
+    width = _metric("digit") * digits + 8 * 2 + 1 * 2
+    return width + 18 if has_spin_buttons else width
 
 
 def ui_family() -> str:
@@ -330,6 +485,10 @@ def stylesheet(mode: str) -> str:
     # 圓點本身要用 accent 色才會跟底色有對比，不能像打勾圖示一樣用白色。
     radio_dot_icon = _radio_dot_icon(accent)
 
+    # 尺寸一律從字型度量推導。Windows 上算出來就是原本寫死的 22px，所以
+    # 這台機器的版面完全不會變；macOS 的字比較大，數字會自己跟著長高。
+    control_content = control_content_height()
+
     return f"""
     QMainWindow {{
         background-color: {window_bg};
@@ -397,7 +556,7 @@ def stylesheet(mode: str) -> str:
         border: 1px solid {border};
         border-radius: 6px;
         padding: 4px 8px;
-        min-height: 22px;
+        min-height: {control_content}px;
         selection-background-color: {accent};
         selection-color: #ffffff;
     }}
@@ -434,6 +593,10 @@ def stylesheet(mode: str) -> str:
     /* ---------------------------------------------------- QSpinBox 增減鍵頭
        跟下拉箭頭同一種成因/同一種修法：三角形一律用預先畫好的 PNG 圖示，
        不要用 border 三角形技巧（親測在這個 Qt 版本不會畫出三角形）。 */
+    /* 這裡不要試圖用 QSS 修正 QSpinBox 比其他控制項高 4px 的問題——實測
+       過六種寫法（給按鈕 height、改 subcontrol-origin、對 QSpinBox 加
+       max-height…）全部無效，那 4px 烤在 Qt 的 QAbstractSpinBox::sizeHint()
+       裡，樣式表管不到。要壓平只能在程式碼呼叫 match_control_height()。 */
     QSpinBox::up-button, QDoubleSpinBox::up-button {{
         subcontrol-origin: border;
         subcontrol-position: top right;
@@ -522,7 +685,7 @@ def stylesheet(mode: str) -> str:
            一邊對不齊——這是先前在匯出、郵件、設定、網址精靈四個畫面都被
            回報「按鈕沒對齊」的真正原因。水平內距可以不同，不影響對齊。 */
         padding: 4px 14px;
-        min-height: 22px;
+        min-height: {control_content}px;
     }}
     QPushButton:hover {{
         background-color: {hover};

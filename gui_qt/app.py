@@ -207,7 +207,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(page_class.title)
             button.setObjectName("NavButton")
             button.setCheckable(True)
-            button.setFixedHeight(40)
+            button.setFixedHeight(theme.nav_button_height())
             button.clicked.connect(
                 lambda checked=False, name=page_class.title: self.show_page(name)
             )

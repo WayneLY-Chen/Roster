@@ -289,7 +289,7 @@ class SettingsPage(BasePage):
         terms_box = QPlainTextEdit()
         terms_box.setReadOnly(True)
         terms_box.setPlainText(legal.TERMS)
-        terms_box.setFixedHeight(150)
+        terms_box.setFixedHeight(theme.text_box_height(9))
         section.body_layout.addWidget(terms_box)
 
         self._body_layout.addWidget(section)
@@ -480,7 +480,7 @@ class SettingsPage(BasePage):
         box = QPlainTextEdit(key)
         box.setReadOnly(True)
         box.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        box.setFixedHeight(70)
+        box.setFixedHeight(theme.text_box_height(4))
         layout.addWidget(box)
 
         def _copy() -> None:
@@ -513,7 +513,7 @@ class SettingsPage(BasePage):
         layout.addWidget(hint)
 
         entry = QPlainTextEdit()
-        entry.setFixedHeight(70)
+        entry.setFixedHeight(theme.text_box_height(4))
         layout.addWidget(entry)
 
         def _apply() -> None:

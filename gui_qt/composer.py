@@ -91,6 +91,7 @@ from PySide6.QtWidgets import (
 from core.config import AppConfig, get_config
 from core.constants import LogCategory
 from core.logging_setup import get_logger
+from gui_qt import theme
 
 log = get_logger(LogCategory.GUI)
 
@@ -223,7 +224,7 @@ class RichTextEditor(QWidget):
         )
         for text, handler in buttons:
             button = QPushButton(text)
-            button.setFixedHeight(26)
+            button.setFixedHeight(theme.toolbar_button_height())
             button.clicked.connect(handler)
             bar.addWidget(button)
         bar.addStretch(1)
