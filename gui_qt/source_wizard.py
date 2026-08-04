@@ -278,19 +278,23 @@ class SourceWizardDialog(QDialog):
         self.max_pages_entry = LabeledEntry("頁數上限", value="3")
         row.addWidget(self.max_pages_entry)
 
+        # 靠下對齊：這一列前面兩個是「說明文字在上、輸入框在下」的直向堆疊，
+        # 按鈕預設會對齊整個堆疊的垂直中心，看起來浮在說明文字那一排。
+        bottom = Qt.AlignmentFlag.AlignBottom
+
         self.save_button = QPushButton("儲存來源")
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(lambda: self._save(also_crawl=False))
-        row.addWidget(self.save_button)
+        row.addWidget(self.save_button, 0, bottom)
 
         self.save_crawl_button = QPushButton("儲存並立即爬取")
         self.save_crawl_button.setEnabled(False)
         self.save_crawl_button.clicked.connect(lambda: self._save(also_crawl=True))
-        row.addWidget(self.save_crawl_button)
+        row.addWidget(self.save_crawl_button, 0, bottom)
 
         close_button = QPushButton("關閉")
         close_button.clicked.connect(self.reject)
-        row.addWidget(close_button)
+        row.addWidget(close_button, 0, bottom)
         row.addStretch(1)
         section.body_layout.addLayout(row)
 

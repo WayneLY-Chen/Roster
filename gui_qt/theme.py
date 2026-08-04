@@ -517,7 +517,11 @@ def stylesheet(mode: str) -> str:
         color: {text_fg};
         border: 1px solid {border};
         border-radius: 6px;
-        padding: 6px 14px;
+        /* 垂直內距要跟 QLineEdit/QComboBox/QSpinBox 一致（4px），否則按鈕會
+           比旁邊的輸入框高 4px。高度不一樣的話，不管靠上還是靠下對齊都會有
+           一邊對不齊——這是先前在匯出、郵件、設定、網址精靈四個畫面都被
+           回報「按鈕沒對齊」的真正原因。水平內距可以不同，不影響對齊。 */
+        padding: 4px 14px;
         min-height: 22px;
     }}
     QPushButton:hover {{

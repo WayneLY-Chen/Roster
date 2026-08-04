@@ -33,6 +33,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -151,7 +152,7 @@ class SettingsPage(BasePage):
         config_row.addWidget(self.config_label, 1)
         open_folder_button = QPushButton("開啟設定資料夾")
         open_folder_button.clicked.connect(self._open_config_folder)
-        config_row.addWidget(open_folder_button, 0)
+        config_row.addWidget(open_folder_button, 0, Qt.AlignmentFlag.AlignBottom)
         section.body_layout.addLayout(config_row)
 
         self._body_layout.addWidget(section)
@@ -261,7 +262,7 @@ class SettingsPage(BasePage):
         row.addWidget(self.daily_limit_entry)
         save_button = QPushButton("儲存")
         save_button.clicked.connect(self._save_daily_limit)
-        row.addWidget(save_button)
+        row.addWidget(save_button, 0, Qt.AlignmentFlag.AlignBottom)
         row.addStretch(1)
         section.body_layout.addLayout(row)
 

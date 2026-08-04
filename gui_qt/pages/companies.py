@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -166,13 +166,16 @@ class CompaniesPage(BasePage):
         self._add_filter(filters, "status", "狀態")
         self._add_filter(filters, "tags", "標籤")
 
+        # 靠下對齊。這一列的其他項目都是「說明文字在上、控制項在下」的直向
+        # 堆疊，按鈕預設會對齊整個堆疊的垂直中心，看起來就浮在說明文字那一
+        # 排、跟輸入框與下拉沒有對齊。
         search_button = QPushButton("搜尋")
         search_button.clicked.connect(self._run_search)
-        filters.addWidget(search_button)
+        filters.addWidget(search_button, 0, Qt.AlignmentFlag.AlignBottom)
 
         clear_button = QPushButton("清除")
         clear_button.clicked.connect(self._clear_filters)
-        filters.addWidget(clear_button)
+        filters.addWidget(clear_button, 0, Qt.AlignmentFlag.AlignBottom)
 
         outer.addLayout(filters)
 

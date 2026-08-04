@@ -85,6 +85,50 @@ def sample_columns() -> list[tuple[str, str]]:
     return headers
 
 
+def _instructions(columns: list[tuple[str, str]]) -> list[str]:
+    """給 Excel 的「填寫說明」分頁，一列一句。"""
+    lines = [
+        "怎麼填這份表",
+        "",
+        "1. 「匯入範例」分頁的第一列是標題，請不要更動或刪除。",
+        "2. 從第二列開始，一列填一家公司。",
+        f"3. 只有「{sample_columns()[0][0]}」是必填，其餘留白都可以。",
+        "4. 三列示範資料填完後請刪掉，否則它們也會被匯入。",
+        "5. 存檔後回到程式的「匯入」頁，選這個檔案即可。",
+        "",
+        "標題可以改成別的寫法嗎",
+        "",
+        "可以。程式認得多種常見寫法，例如「公司名稱」也接受「公司」、",
+        "「廠商名稱」、「company」、「name」；「電子郵件」也接受「信箱」、",
+        "「email」、「mail」。認不出來的欄位會被略過，匯入前的預覽畫面會",
+        "列出哪些欄位對應到什麼，可以先確認再匯入。",
+        "",
+        "各欄位說明",
+        "",
+    ]
+    hints = {
+        "company_name": "必填。公司全名。",
+        "tax_id": "8 碼數字，程式會檢查檢核碼。",
+        "email": "會自動驗證格式，並查詢該網域是否真的收信。",
+        "phone": "市話或手機皆可，會自動正規化（全形轉半形、去掉 +886）。",
+        "website": "沒有 https:// 也沒關係，程式會自動補上。",
+        "address": "完整地址，程式會從開頭抓出縣市。",
+        "industry": "自由填寫，例如「電子零組件」、「機械設備」。",
+        "contact_person": "窗口姓名，會另外建立成聯絡人。",
+        "remark": "自由備註，不影響任何自動處理。",
+    }
+    for heading, field in columns:
+        lines.append(f"{heading}：{hints.get(field, '自由填寫。')}")
+    lines += [
+        "",
+        "重複的公司會怎麼樣",
+        "",
+        "程式會用統一編號、電子郵件、公司名稱＋電話等組合比對既有資料。",
+        "判定為同一家時只會補上空白欄位，不會覆蓋你已經整理好的內容。",
+    ]
+    return lines
+
+
 def write_sample(path: str | Path) -> Path:
     """把範例檔寫到 ``path``，副檔名決定格式（``.csv`` / ``.xlsx``）。
 
@@ -112,7 +156,14 @@ def write_sample(path: str | Path) -> Path:
         import pandas as pd
 
         frame = pd.DataFrame(rows, columns=headers)
-        frame.to_excel(target, index=False, sheet_name="匯入範例")
+        # 說明另開一個分頁，不要混進資料裡。匯入器讀的是第一個分頁
+        # （`pd.read_excel` 的預設），所以第二個分頁怎麼寫都不會影響匯入。
+        notes = pd.DataFrame(
+            {"填寫說明": _instructions(columns)},
+        )
+        with pd.ExcelWriter(target) as writer:
+            frame.to_excel(writer, index=False, sheet_name="匯入範例")
+            notes.to_excel(writer, index=False, sheet_name="填寫說明")
         return target
 
     raise ExportError(f"不支援的範例檔格式：{suffix or '（沒有副檔名）'}。請用 .csv 或 .xlsx。")

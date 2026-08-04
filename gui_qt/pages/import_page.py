@@ -149,7 +149,11 @@ class ImportPage(BasePage):
         except ExportError as exc:
             self.report_error(exc)
             return
-        self.import_status.setText(f"範例檔已存到 {written}，照著標題列填寫後即可匯入。")
+        if written.suffix.lower() in {".xlsx", ".xls"}:
+            guidance = "檔案裡的「填寫說明」分頁有逐欄說明，示範資料填完後請刪掉。"
+        else:
+            guidance = "第一列是標題請勿更動，三列示範資料填完後請刪掉。"
+        self.import_status.setText(f"範例檔已存到 {written}。{guidance}")
         self.status(f"範例檔已存到 {written}", "success")
 
     # ------------------------------------------------------------- 選擇檔案

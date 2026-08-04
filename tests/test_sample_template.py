@@ -51,6 +51,23 @@ def test_csv_carries_a_bom_so_excel_does_not_mangle_chinese(tmp_path):
     assert path.read_bytes().startswith(b"\xef\xbb\xbf")
 
 
+def test_excel_sample_carries_an_instructions_sheet(tmp_path):
+    """說明放第二個分頁。匯入器讀第一個分頁，所以說明怎麼寫都不會壞事。"""
+    import pandas as pd
+
+    path = write_sample(tmp_path / "範例.xlsx")
+    sheets = pd.ExcelFile(path).sheet_names
+    assert sheets[0] == "匯入範例", "資料一定要在第一個分頁，匯入器只讀那一個"
+    assert "填寫說明" in sheets
+
+    notes = "\n".join(pd.read_excel(path, sheet_name="填寫說明").iloc[:, 0].fillna(""))
+    assert "只有「公司名稱」是必填" in notes
+    assert "示範資料填完後請刪掉" in notes or "請刪掉" in notes
+    # 每個欄位都要有一句說明，不能只列標題。
+    for heading, _ in sample_columns():
+        assert f"{heading}：" in notes
+
+
 def test_unsupported_suffix_is_refused(tmp_path):
     with pytest.raises(ExportError):
         write_sample(tmp_path / "範例.txt")

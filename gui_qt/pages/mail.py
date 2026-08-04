@@ -178,7 +178,7 @@ class MailPage(BasePage):
         limit_row.addWidget(self.daily_limit_spin)
         save_limit_button = QPushButton("儲存上限")
         save_limit_button.clicked.connect(self._save_daily_limit)
-        limit_row.addWidget(save_limit_button)
+        limit_row.addWidget(save_limit_button, 0, Qt.AlignmentFlag.AlignBottom)
         limit_row.addStretch(1)
         section.body_layout.addLayout(limit_row)
 
@@ -210,7 +210,7 @@ class MailPage(BasePage):
         toolbar.addWidget(new_button)
         save_button = QPushButton("儲存樣板")
         save_button.clicked.connect(self._save_template)
-        toolbar.addWidget(save_button)
+        toolbar.addWidget(save_button, 0, Qt.AlignmentFlag.AlignBottom)
         section.body_layout.addLayout(toolbar)
 
         self.subject_entry = LabeledEntry("主旨")

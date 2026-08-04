@@ -122,7 +122,7 @@ class ExportPage(BasePage):
         path_row.addWidget(self.path_entry, 1)
         browse_button = QPushButton("瀏覽...")
         browse_button.clicked.connect(self._browse)
-        path_row.addWidget(browse_button)
+        path_row.addWidget(browse_button, 0, Qt.AlignmentFlag.AlignBottom)
         section.body_layout.addLayout(path_row)
 
         return section
@@ -203,7 +203,7 @@ class ExportPage(BasePage):
         self.open_folder_button = QPushButton("開啟資料夾")
         self.open_folder_button.setEnabled(False)
         self.open_folder_button.clicked.connect(self._open_folder)
-        footer.addWidget(self.open_folder_button)
+        footer.addWidget(self.open_folder_button, 0, Qt.AlignmentFlag.AlignBottom)
 
         self.result_label = QLabel("")
         self.result_label.setObjectName("MutedLabel")
