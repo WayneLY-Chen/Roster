@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.errors import CrawlError, CRMError, RobotsDisallowedError
+from crawler.pipeline import COLLECTABLE_FIELDS
 from controllers.source import KNOWN_FIELDS, PREVIEW_FIELDS, SourceWizardController
 from core.i18n import field_label
 from gui_qt import theme
@@ -304,6 +306,15 @@ class SourceWizardDialog(QDialog):
 
         parent_layout.addWidget(section)
 
+    def _set_all_collect(self, checked: bool) -> None:
+        for check in self.collect_checks.values():
+            check.setChecked(checked)
+
+    def _selected_collect_fields(self) -> list[str]:
+        """勾選的欄位；全部勾選時回空清單，代表「不做任何過濾」。"""
+        chosen = [f for f, check in self.collect_checks.items() if check.isChecked()]
+        return [] if len(chosen) == len(self.collect_checks) else chosen
+
     def _build_advanced_section(self, parent_layout: QVBoxLayout) -> None:
         """技術性的 CSS 選擇器控制項，全部收在這裡，預設收合。
 
@@ -348,6 +359,47 @@ class SourceWizardDialog(QDialog):
         detail_note.setWordWrap(True)
         detail_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         body_layout.addWidget(detail_note)
+
+        # --- 這個來源自己的收集設定（會被存起來，排程爬取也適用）---
+
+        collect_row = QHBoxLayout()
+        self.page_start_entry = LabeledEntry("從第幾頁開始", value="1")
+        collect_row.addWidget(self.page_start_entry)
+        self.page_end_entry = LabeledEntry("爬到第幾頁為止（留空＝不限）")
+        collect_row.addWidget(self.page_end_entry)
+        # 名錄網站幾乎都是一個分類一頁，分類本身就是產業——但它寫在麵包屑或
+        # 頁面標題裡，逐列抓的欄位規則抓不到它，產業欄就永遠是空的。
+        self.default_industry_entry = LabeledEntry(
+            "這個來源的產業（頁面沒寫時才套用）"
+        )
+        collect_row.addWidget(self.default_industry_entry)
+        body_layout.addLayout(collect_row)
+
+        collect_header = QHBoxLayout()
+        collect_header.addWidget(QLabel("要收集哪些欄位（公司名稱一定會收集）"))
+        collect_header.addStretch(1)
+        all_button = QPushButton("全選")
+        all_button.clicked.connect(lambda: self._set_all_collect(True))
+        collect_header.addWidget(all_button)
+        body_layout.addLayout(collect_header)
+
+        checks_row = QHBoxLayout()
+        self.collect_checks: dict[str, QCheckBox] = {}
+        for field, label_text in COLLECTABLE_FIELDS:
+            check = QCheckBox(label_text)
+            check.setChecked(True)
+            self.collect_checks[field] = check
+            checks_row.addWidget(check)
+        checks_row.addStretch(1)
+        body_layout.addLayout(checks_row)
+
+        collect_note = QLabel(
+            "沒勾的欄位在寫入資料庫前會被清空。這些設定存在這個來源上，"
+            "所以自動排程去爬的時候也會照著做。"
+        )
+        collect_note.setWordWrap(True)
+        collect_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
+        body_layout.addWidget(collect_note)
 
         fields_title = QLabel("偵測到的欄位")
         title_font = fields_title.font()
@@ -708,6 +760,17 @@ class SourceWizardDialog(QDialog):
                 return
 
         try:
+            page_start = int(self.page_start_entry.get().strip() or "1")
+            page_end_text = self.page_end_entry.get().strip()
+            page_end = int(page_end_text) if page_end_text else None
+        except ValueError:
+            QMessageBox.critical(self, "自訂網址精靈", "頁碼必須是整數。")
+            return
+        if page_end is not None and page_end < page_start:
+            QMessageBox.critical(self, "自訂網址精靈", "結束頁不能小於起始頁。")
+            return
+
+        try:
             source = self.controller.build_source(
                 url,
                 name,
@@ -717,6 +780,10 @@ class SourceWizardDialog(QDialog):
                 max_pages,
                 detail_link_selector=self.detail_link_entry.get().strip() or None,
                 max_details=max_details,
+                default_industry=self.default_industry_entry.get(),
+                collect_fields=self._selected_collect_fields(),
+                page_start=page_start,
+                page_end=page_end,
             )
             saved_name = self.controller.save(source, name, enabled=True)
         except CRMError as exc:

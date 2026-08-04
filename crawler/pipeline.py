@@ -108,14 +108,22 @@ class CrawlPipeline:
         self,
         config: AppConfig | None = None,
         fetcher: BaseFetcher | None = None,
-        keep_fields: Iterable[str] | None = None,
     ) -> None:
         self.config = config or get_config()
         self._fetcher = fetcher
         self._owns_fetcher = fetcher is None
-        #: 只保留這些欄位，其餘丟掉。``None`` 代表全部保留。
-        #: 公司名稱一律保留——那是必填欄位，丟掉整筆資料就沒有意義了。
-        self.keep_fields = set(keep_fields) | {"company_name"} if keep_fields else None
+
+    @staticmethod
+    def _fields_for(source_config: SourceConfig) -> set[str] | None:
+        """這個來源要收集哪些欄位。``None`` 代表全部。
+
+        設定住在來源上而不是「每次執行時勾一勾」：排程爬取跑的時候沒有人在
+        介面前面勾選，放在畫面上的話對排程完全沒有作用。
+
+        公司名稱一律保留——那是必填欄位，丟掉整筆資料就沒有意義了。
+        """
+        chosen = source_config.collect_fields
+        return set(chosen) | {"company_name"} if chosen else None
 
     # ------------------------------------------------------------------ api
 
@@ -240,7 +248,7 @@ class CrawlPipeline:
                     summary.records_found += len(batch.records)
 
                     _apply_default_industry(batch.records, source_config.default_industry)
-                    _keep_only(batch.records, self.keep_fields)
+                    _keep_only(batch.records, self._fields_for(source_config))
                     self._store_page(batch.records, repo, cleaner, summary)
                     session.commit()
 
@@ -324,10 +332,9 @@ def crawl(
     max_pages: int | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
-    keep_fields: Iterable[str] | None = None,
 ) -> list[CrawlSummary]:
     """Convenience entry point: crawl one source, or every enabled source."""
-    with CrawlPipeline(config, keep_fields=keep_fields) as pipeline:
+    with CrawlPipeline(config) as pipeline:
         if source:
             return [
                 pipeline.run_source(

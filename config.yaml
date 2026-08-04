@@ -6,6 +6,14 @@ app:
   locale: "zh_TW"
   theme: "system"          # system | light | dark
 
+  # 「設定」頁最下面的「反饋」會把使用者的問題回報寄到這個信箱。
+  #
+  # 注意：這個檔案在公開的原始碼倉庫裡，寫在這裡的信箱會被垃圾信爬蟲抓走。
+  # 不想公開自己的信箱的話，把這一行留空，「反饋」區塊會改成引導使用者到
+  # 下面的 issue_url 開 issue（GitHub 帳號本來就是公開的，不會多洩漏什麼）。
+  feedback_email: "qweasd226410@gmail.com"
+  issue_url: "https://github.com/WayneLY-Chen/Roster/issues"
+
 database:
   url: "sqlite:///./data/crm.db"
   echo: false

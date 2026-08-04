@@ -65,6 +65,10 @@ class SourceWizardController:
         max_pages: int | None = None,
         detail_link_selector: str | None = None,
         max_details: int | None = None,
+        default_industry: str = "",
+        collect_fields: list[str] | None = None,
+        page_start: int = 1,
+        page_end: int | None = None,
     ) -> SourceConfig:
         """Turn user-edited selectors into a validated :class:`SourceConfig`.
 
@@ -127,6 +131,10 @@ class SourceWizardController:
                 detail_link=detail_link,
                 max_details=max_details if max_details is not None else 100,
                 label=clean_name,
+                default_industry=default_industry.strip(),
+                collect_fields=list(collect_fields or []),
+                page_start=page_start,
+                page_end=page_end,
             )
         except ValidationError as exc:
             raise SourceConfigError(f"來源設定無效：{exc}") from exc

@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -196,8 +197,8 @@ class SettingsPage(BasePage):
         self._build_gmail_section()
         self._build_mailer_section()
         self._build_scheduler_section()
-        self._build_legal_section()
         self._build_backup_section()
+        self._build_legal_section()
         self._body_layout.addStretch(1)
 
     def _build_overview_section(self) -> None:
@@ -301,11 +302,14 @@ class SettingsPage(BasePage):
         button_row.addStretch(1)
         section.body_layout.addLayout(button_row)
 
+        # 這段只講「使用者要做什麼」與「密碼被放在哪」。不要在這裡提 git——
+        # 那是開發流程的事，跟坐在這個畫面前面的人無關。
         note = QLabel(
             "需先在 Google 帳戶開啟兩步驟驗證，再至 "
-            "https://myaccount.google.com/apppasswords 產生應用程式密碼。密碼會存在"
-            "作業系統的憑證保管庫（Windows 認證管理員／macOS 鑰匙圈／Linux Secret "
-            "Service），專案資料夾中不會出現這筆密碼，因此整個資料夾可以安全地上傳到 git。"
+            "https://myaccount.google.com/apppasswords 產生應用程式密碼。"
+            "請使用應用程式密碼，不要用你的 Google 帳號密碼。\n"
+            "密碼會存在作業系統的憑證保管庫（Windows 認證管理員／macOS 鑰匙圈／"
+            "Linux Secret Service），不會寫進這個資料夾裡的任何檔案。"
         )
         note.setObjectName("MutedLabel")
         note.setWordWrap(True)
@@ -738,7 +742,13 @@ class SettingsPage(BasePage):
 
     def _apply_overview(self, summary: dict[str, str], config_path: Path) -> None:
         self.overview_table.set_rows([{"key": key, "value": value} for key, value in summary.items()])
-        self.config_label.setText(f"設定值於 {config_path} 中編輯，重新啟動應用程式後才會生效。")
+        # 只顯示相對路徑。完整路徑在 Windows 上一定含使用者名稱，而這個畫面
+        # 常常被截圖下來問問題——要開實際位置的話旁邊就有「開啟設定資料夾」。
+        from core.config import display_path
+
+        self.config_label.setText(
+            f"設定值於 {display_path(config_path)} 中編輯，重新啟動應用程式後才會生效。"
+        )
 
     def _apply_encryption_status(self, report: Any) -> None:
         lines = [f"狀態：{report.describe()}"]
@@ -753,7 +763,9 @@ class SettingsPage(BasePage):
     def _apply_gmail_status(self, address_status: SecretStatus, password_status: SecretStatus) -> None:
         def _line(field_label: str, status: SecretStatus) -> str:
             text = f"{field_label}：{status.source.value}"
-            if status.hint:
+            # 沒設定時 source 與 hint 剛好是同一句「尚未設定」，無條件接起來
+            # 就會變成「尚未設定　尚未設定」。只有真的多講了什麼才接上去。
+            if status.hint and status.hint != status.source.value:
                 text += f"　{status.hint}"
             return text
 

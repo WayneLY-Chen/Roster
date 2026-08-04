@@ -139,7 +139,14 @@ class CrawlerPage(BasePage):
         input_row.addStretch(1)
         controls.body_layout.addLayout(input_row)
 
-        self._build_field_picker(controls)
+        page_note = QLabel(
+            "上面三個是「這一次執行」的臨時覆寫，留空就照來源自己的設定跑。"
+            "要收集哪些欄位、預設產業、常用的頁數範圍，都在「＋ 自訂網址…」"
+            "裡設定並存進該來源——那些設定排程爬取也會套用，寫在這一頁的不會。"
+        )
+        page_note.setObjectName("MutedLabel")
+        page_note.setWordWrap(True)
+        controls.body_layout.addWidget(page_note)
 
         buttons_row = QHBoxLayout()
         self.start_button = QPushButton("開始爬取")
@@ -207,46 +214,6 @@ class CrawlerPage(BasePage):
 
     # ------------------------------------------------------------- crawling
 
-    def _build_field_picker(self, section: Section) -> None:
-        """要收集哪些欄位。比照「匯出」頁可以挑欄位的作法。
-
-        沒勾的欄位在寫入資料庫之前就會被清空。只想要公司名稱與信箱時，
-        多抓回來的地址與統編只是雜訊，還會讓「疑似重複」的比對多出無謂的維度。
-
-        公司名稱不在這裡：它是必填的，不收集就等於整筆不要，那是「不要爬」
-        而不是「不要這個欄位」。
-        """
-        header = QHBoxLayout()
-        header.addWidget(caption("要收集哪些欄位（公司名稱一定會收集）"))
-        header.addStretch(1)
-
-        all_button = QPushButton("全選")
-        all_button.clicked.connect(lambda: self._set_all_fields(True))
-        header.addWidget(all_button)
-        none_button = QPushButton("全不選")
-        none_button.clicked.connect(lambda: self._set_all_fields(False))
-        header.addWidget(none_button)
-        section.body_layout.addLayout(header)
-
-        fields_row = QHBoxLayout()
-        self.field_checks: dict[str, QCheckBox] = {}
-        for field, label_text in self.crawl_controller.collectable_fields():
-            check = QCheckBox(label_text)
-            check.setChecked(True)          # 預設全收，跟改動前的行為一致
-            self.field_checks[field] = check
-            fields_row.addWidget(check)
-        fields_row.addStretch(1)
-        section.body_layout.addLayout(fields_row)
-
-    def _set_all_fields(self, checked: bool) -> None:
-        for check in self.field_checks.values():
-            check.setChecked(checked)
-
-    def selected_fields(self) -> list[str] | None:
-        """勾選的欄位；全部勾選時回 ``None`` 代表「不做任何過濾」。"""
-        chosen = [field for field, check in self.field_checks.items() if check.isChecked()]
-        return None if len(chosen) == len(self.field_checks) else chosen
-
     def _start_crawl(self) -> None:
         if self.crawl_task is not None and self.crawl_task.running:
             return
@@ -283,7 +250,7 @@ class CrawlerPage(BasePage):
             on_done=self._on_crawl_done,
             on_error=self._on_crawl_error,
         )
-        self.crawl_task.start(source, max_pages, from_page, to_page, self.selected_fields())
+        self.crawl_task.start(source, max_pages, from_page, to_page)
 
     @staticmethod
     def _optional_int(text: str, label: str) -> int | None:

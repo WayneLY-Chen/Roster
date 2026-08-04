@@ -9,6 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 import core.config as config_module
+from core.constants import DISPLAY_NAME
 from core.config import (
     AppConfig,
     CrawlerSection,
@@ -53,7 +54,9 @@ def test_load_config_defaults_when_default_path_is_absent(monkeypatch, tmp_path:
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
     config = load_config()
     assert isinstance(config, AppConfig)
-    assert config.app.name == "Taiwan B2B CRM"  # documented default
+    # 設定檔不見時要退回程式碼裡的預設值，而那個預設值必須是這支程式現在
+    # 的名字——不是改名前的舊名。名稱會出現在視窗標題上。
+    assert config.app.name == DISPLAY_NAME
 
 
 def test_load_config_explicit_missing_path_raises(tmp_path: Path):

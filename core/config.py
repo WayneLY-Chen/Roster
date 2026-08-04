@@ -46,6 +46,28 @@ PROJECT_ROOT = _project_root()
 RESOURCE_ROOT = _resource_root()
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 
+
+def display_path(path: "str | Path") -> str:
+    """把路徑縮成適合顯示在畫面上的樣子。
+
+    介面上不要出現完整路徑。Windows 的家目錄路徑一定含使用者帳號名稱，而
+    使用者常常會截圖畫面來問問題或回報狀況——把自己的帳號名稱印在每一張
+    截圖上，不是一件該由程式替他決定的事。
+
+    專案資料夾裡的東西顯示成相對路徑（``data/crm.db``），其他地方顯示成
+    ``~/...``。要開啟實際位置的話，畫面上都有「開啟資料夾」按鈕。
+    """
+    target = Path(path)
+    try:
+        return target.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except (ValueError, OSError):
+        pass
+    try:
+        return "~/" + target.resolve().relative_to(Path.home().resolve()).as_posix()
+    except (ValueError, OSError):
+        # 真的不在專案也不在家目錄（例如另一顆磁碟）——至少不要印出中間那段。
+        return f"…/{target.parent.name}/{target.name}" if target.parent.name else target.name
+
 #: 第一次執行時要從打包內容複製到使用者資料夾的東西。
 _FIRST_RUN_COPIES: tuple[str, ...] = ("config.yaml", "templates")
 
@@ -97,9 +119,19 @@ class _Base(BaseModel):
 
 
 class AppSection(_Base):
-    name: str = "Taiwan B2B CRM"
+    name: str = "名單匠"
     locale: str = "zh_TW"
     theme: Literal["system", "light", "dark"] = "system"
+
+    #: 「反饋」功能把使用者的問題回報寄到這個信箱。
+    #:
+    #: 放成設定值而不是寫死在程式裡，是因為這份原始碼是公開的——公開倉庫裡的
+    #: 信箱一定會被垃圾信爬蟲抓走。要接回報又不想公開信箱的話，把這裡設成空
+    #: 字串，「反饋」區塊就會改成引導使用者到 GitHub 開 issue。
+    feedback_email: str = ""
+
+    #: 回報用的 GitHub issue 頁面。``feedback_email`` 留空時會用這個。
+    issue_url: str = "https://github.com/WayneLY-Chen/Roster/issues"
 
 
 class DatabaseSection(_Base):
@@ -219,6 +251,15 @@ class SourceConfig(_Base):
     #:
     #: 只在頁面沒有提供產業時才套用——頁面自己有寫的話，那個比較準。
     default_industry: str = ""
+
+    #: 這個來源要收集哪些欄位。留空＝全部收集。
+    #:
+    #: 存在來源上而不是「每次執行時勾一勾」：排程爬取跑的時候沒有人在介面
+    #: 前面勾選，設定在畫面上的話對排程完全沒有作用。而且「這個名錄只給得出
+    #: 名稱與電話」是那個網站的性質，不是某一次執行的心情。
+    #:
+    #: ``company_name`` 不用列，它一律會被收集——那是必填欄位。
+    collect_fields: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _page_range_is_sane(self) -> "SourceConfig":

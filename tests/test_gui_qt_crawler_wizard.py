@@ -139,6 +139,10 @@ class _FakeSourceController:
         *,
         detail_link_selector=None,
         max_details=None,
+        default_industry="",
+        collect_fields=None,
+        page_start=1,
+        page_end=None,
     ):
         built = {
             "url": url,
@@ -149,6 +153,10 @@ class _FakeSourceController:
             "max_pages": max_pages,
             "detail_link_selector": detail_link_selector,
             "max_details": max_details,
+            "default_industry": default_industry,
+            "collect_fields": collect_fields,
+            "page_start": page_start,
+            "page_end": page_end,
         }
         self.built.append(built)
         return built

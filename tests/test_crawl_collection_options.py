@@ -89,11 +89,42 @@ def test_company_name_is_not_a_collectable_field():
     assert "company_name" not in dict(COLLECTABLE_FIELDS)
 
 
-def test_pipeline_keeps_company_name_even_if_it_is_not_in_the_kept_set():
+def _source(**overrides):
+    """generic_html 來源的必填欄位不少，這幾個測試只在意 collect_fields。"""
+    from core.config import FieldRule, PaginationRule, SourceConfig
+
+    fields = dict(
+        name="s",
+        type="generic_html",
+        start_url="https://example.test/",
+        list_selector="div.item",
+        pagination=PaginationRule(type="none"),
+        fields={"company_name": FieldRule(selector="h3")},
+    )
+    fields.update(overrides)
+    return SourceConfig(**fields)
+
+
+def test_company_name_is_kept_even_when_it_is_not_in_the_selected_set():
+    """公司名稱是必填欄位，清掉它整筆資料就沒有意義了。"""
     from crawler.pipeline import CrawlPipeline
 
-    pipeline = CrawlPipeline(keep_fields=["email"])
-    assert "company_name" in pipeline.keep_fields
+    assert CrawlPipeline._fields_for(_source(collect_fields=["email"])) == {
+        "email",
+        "company_name",
+    }
+
+
+def test_no_selection_means_collect_everything():
+    """留空＝不過濾，這是預設也是改動前的行為。"""
+    from crawler.pipeline import CrawlPipeline
+
+    assert CrawlPipeline._fields_for(_source()) is None
+
+
+def test_collect_fields_live_on_the_source_so_the_scheduler_uses_them():
+    """設定放在來源上而不是畫面上——排程爬取跑的時候沒有人在介面前面勾選。"""
+    assert _source(collect_fields=["email", "phone"]).collect_fields == ["email", "phone"]
 
 
 # ----------------------------------------------------- 依日期分組與刪除

@@ -286,7 +286,6 @@ class CrawlController:
         max_pages: int | None = None,
         from_page: int | None = None,
         to_page: int | None = None,
-        keep_fields: list[str] | None = None,
         *,
         report: Callable[[Any], None],
         cancel_event,
@@ -304,15 +303,7 @@ class CrawlController:
             max_pages=max_pages,
             page_start=from_page,
             page_end=to_page,
-            keep_fields=keep_fields,
         )
-
-    @staticmethod
-    def collectable_fields() -> list[tuple[str, str]]:
-        """可以勾選要不要收集的欄位 ``(欄位代號, 中文標題)``。"""
-        from crawler.pipeline import COLLECTABLE_FIELDS
-
-        return list(COLLECTABLE_FIELDS)
 
 
 class VerifyController:
@@ -458,11 +449,20 @@ class SettingsController:
         self.config = config or get_config()
 
     def summary(self) -> dict[str, str]:
-        """設定總覽。鍵與值都已是中文，Settings 頁可直接顯示。"""
+        """設定總覽。鍵與值都已是中文，Settings 頁可直接顯示。
+
+        路徑一律經過 :func:`~core.config.display_path` 縮寫。使用者常常會截圖
+        這個畫面來問問題，而完整路徑在 Windows 上一定含使用者名稱。
+        """
+        from core.config import display_path
+
         config = self.config
         engines = {"httpx": "httpx（一般網頁）", "playwright": "playwright（JavaScript 網頁）"}
+        sqlite_path = config.database.sqlite_path
         return {
-            "資料庫": config.database.resolved_url,
+            "資料庫": (
+                display_path(sqlite_path) if sqlite_path else config.database.resolved_url
+            ),
             "爬取引擎": engines.get(config.crawler.engine, config.crawler.engine),
             "User-Agent": config.crawler.resolved_user_agent(),
             "遵守 robots.txt": "是" if config.crawler.respect_robots else "否（僅限自有網站）",

@@ -45,6 +45,7 @@ from gui_qt.pages.contacts import ContactsPage
 from gui_qt.pages.crawler import CrawlerPage
 from gui_qt.pages.dashboard import DashboardPage
 from gui_qt.pages.export_page import ExportPage
+from gui_qt.pages.feedback import FeedbackPage
 from gui_qt.pages.import_page import ImportPage
 from gui_qt.pages.logs import LogsPage
 from gui_qt.pages.mail import MailPage
@@ -66,9 +67,14 @@ log = get_logger(LogCategory.GUI)
 #:     mail.MailPage              郵件    ✉
 #:     logs.LogsPage              日誌    📜
 #:     settings.SettingsPage      設定    ⚙️
+#:     feedback.FeedbackPage      反饋    💬
 #:
 #: title 是頁面的識別字串（``show_page()``、``self.pages``、``nav_buttons``
 #: 都拿它當 key），改字等於改 key，要一起改。
+#:
+#: 「反饋」排最後、在「設定」之後：使用者是在某個地方卡住之後才會想回報，
+#: 那個當下要找的是「哪裡可以講」。它不是一種設定，所以是獨立的一頁而不是
+#: 設定頁裡的一個區塊——藏在設定頁最下面等於沒有。
 PAGE_CLASSES: tuple[type[BasePage], ...] = (
     DashboardPage,
     CompaniesPage,
@@ -79,6 +85,7 @@ PAGE_CLASSES: tuple[type[BasePage], ...] = (
     MailPage,
     LogsPage,
     SettingsPage,
+    FeedbackPage,
 )
 
 MIN_WIDTH = 1100
