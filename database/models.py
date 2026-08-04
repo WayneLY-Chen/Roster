@@ -248,6 +248,46 @@ class Attachment(Base):
         return f"<Attachment id={self.id} filename={self.filename!r}>"
 
 
+class MailAttachment(Base):
+    """一個可以隨信寄出的檔案。使用者自己的附件庫。
+
+    跟上面的 :class:`Attachment` 不同：那個是「掛在某一家公司底下的檔案」，
+    這個是「可以附加到任何一封開發信的檔案」，兩者沒有關係。
+
+    **檔案內容不存在資料庫裡**，只存在 ``attachments/`` 資料夾。單一附件可以
+    到 20MB，塞進 SQLite 會讓資料庫肥到幾百 MB、每次備份都要複製一遍，而備份
+    是這支程式預設就會做的事。這裡存的是索引與後設資料：顯示名稱、備註、
+    加入時間、用過幾次。
+
+    檔案是否還在，一律在讀取時去問檔案系統（見 ``exists``），不存成欄位——
+    使用者可以直接開資料夾把檔案拖走，存成欄位只會得到一個過期的答案。
+    """
+
+    __tablename__ = "mail_attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: ``attachments/`` 底下的實際檔名。同一個檔名只會有一筆。
+    filename: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    #: 顯示用的名稱。改這個不會動到檔案，所以使用者可以把
+    #: "2026Q1_catalog_final_v3.pdf" 顯示成「2026 春季型錄」。
+    label: Mapped[str] = mapped_column(String(255), default="")
+    mime_type: Mapped[str | None] = mapped_column(String(128))
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    #: 使用者自己的備註，例如「舊版，別再寄了」。
+    note: Mapped[str | None] = mapped_column(Text)
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    #: 最後一次真的被寄出去的時間與累計次數。用來判斷哪些附件可以清掉。
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    @property
+    def display_name(self) -> str:
+        return self.label.strip() or self.filename
+
+    def __repr__(self) -> str:
+        return f"<MailAttachment id={self.id} filename={self.filename!r}>"
+
+
 class CrawlJob(Base):
     """History of crawl runs; powers the Dashboard's crawl status panel."""
 

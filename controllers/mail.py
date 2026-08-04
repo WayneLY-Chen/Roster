@@ -101,6 +101,28 @@ class MailController:
         except CRMError as exc:
             raise CRMError(f"移除附件失敗：{exc}") from exc
 
+    def update_attachment(
+        self, name: str, label: str | None = None, note: str | None = None
+    ) -> None:
+        """改顯示名稱或備註。不會動到檔案本身。"""
+        from gmail.attachments import update
+
+        try:
+            update(name, self.config, label=label, note=note)
+        except CRMError as exc:
+            raise CRMError(f"更新附件失敗：{exc}") from exc
+
+    def attachment_used_by_schedule(self, name: str) -> bool:
+        """刪掉排程正在用的附件，後果是排程在半夜三點失敗而沒有人看到。"""
+        from gmail.attachments import used_by_schedule
+
+        return used_by_schedule(name, self.config)
+
+    def attachments_dir(self):
+        from gmail.attachments import attachments_dir
+
+        return attachments_dir(self.config)
+
     def attachment_limit_bytes(self) -> int:
         return self.config.mailer.max_attachment_bytes
 

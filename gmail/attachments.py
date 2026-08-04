@@ -1,4 +1,4 @@
-"""信件附件的存放與檢查。
+"""信件附件庫：檔案放 ``attachments/``，索引與後設資料放資料庫。
 
 ## 為什麼要複製一份，而不是直接記住原始路徑
 
@@ -7,11 +7,29 @@
 是幾天後的事。所以選檔的當下就複製進 ``attachments/``，之後寄的永遠是當初
 選的那一份。
 
+## 為什麼檔案內容不放進資料庫
+
+單一附件可以到 20MB。塞進 SQLite 會讓資料庫肥到幾百 MB，而這支程式預設就會
+定期備份整個資料庫——每天複製幾百 MB 只為了存幾個型錄，不划算。資料庫只存
+索引：顯示名稱、備註、加入時間、用過幾次。
+
 ## 為什麼上限是 20MB 而不是 Gmail 說的 25MB
 
 附件在 MIME 裡是 base64 編碼的，體積會膨脹約 4/3。Gmail 的 25MB 限制算的是
 編碼後的大小，所以原始檔 20MB 才是安全線。超過的話是寄出去才失敗，而使用者
 在介面上完全看不出原因——寧可在選檔的當下就擋下來。
+
+## 資料夾與資料庫怎麼對帳
+
+兩邊都可能被單方面改動：使用者會直接開資料夾丟檔案進去，也會直接把檔案拖走。
+:func:`sync` 每次列出附件前都會跑一次：
+
+* 資料夾有、資料庫沒有 → 收編成新的一筆（使用者手動丟進來的）
+* 資料庫有、資料夾沒有 → **保留那一筆**，只標記檔案不存在
+
+第二種刻意不自動刪除。檔案可能只是暫時被移走，而那一筆帶著使用者自己打的
+顯示名稱與備註——為了一個可能是暫時的狀況，把使用者輸入的東西丟掉並不合理。
+介面會把它標成「檔案不見了」，要不要刪由使用者決定。
 """
 
 from __future__ import annotations
@@ -19,12 +37,15 @@ from __future__ import annotations
 import mimetypes
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from core.config import AppConfig, get_config
 from core.constants import LogCategory
 from core.errors import GmailError
 from core.logging_setup import get_logger
+from database.models import MailAttachment, now
+from database.session import session_scope
 
 #: 沿用 gmail/sender.py 的做法：沒有獨立的 mail 分類，寄信歸在 CRAWL。
 log = get_logger(LogCategory.CRAWL)
@@ -38,17 +59,41 @@ _MAX_NAME_LENGTH = 120
 
 
 @dataclass(frozen=True, slots=True)
-class StoredAttachment:
-    """已經放進 ``attachments/`` 的一個檔案。"""
+class AttachmentInfo:
+    """附件庫裡的一筆，給介面顯示用的快照。
 
+    刻意是不可變的普通資料類別，而不是直接把 ORM 物件交出去：介面拿到之後
+    session 早就關了，碰到任何延遲載入的屬性都會炸。
+    """
+
+    id: int
     name: str
+    label: str
     path: Path
     size_bytes: int
     mime_type: str
+    note: str
+    added_at: datetime
+    last_used_at: datetime | None
+    use_count: int
+    #: 檔案現在還在不在。每次列出時去問檔案系統，不存成資料庫欄位。
+    exists: bool
+
+    @property
+    def display_name(self) -> str:
+        return self.label.strip() or self.name
 
     @property
     def human_size(self) -> str:
         return human_size(self.size_bytes)
+
+    @property
+    def status_text(self) -> str:
+        if not self.exists:
+            return "檔案不見了"
+        if self.use_count:
+            return f"已寄出 {self.use_count} 次"
+        return "尚未寄出"
 
 
 def human_size(size_bytes: int) -> str:
@@ -95,23 +140,89 @@ def resolve(name: str, config: AppConfig | None = None) -> Path:
     return candidate
 
 
-def _describe(path: Path) -> StoredAttachment:
-    guessed, _ = mimetypes.guess_type(path.name)
-    return StoredAttachment(
-        name=path.name,
+def _guess_mime(name: str) -> str:
+    guessed, _ = mimetypes.guess_type(name)
+    return guessed or "application/octet-stream"
+
+
+def _to_info(row: MailAttachment, directory: Path) -> AttachmentInfo:
+    path = directory / row.filename
+    return AttachmentInfo(
+        id=row.id,
+        name=row.filename,
+        label=row.label or "",
         path=path,
-        size_bytes=path.stat().st_size,
-        mime_type=guessed or "application/octet-stream",
+        size_bytes=row.size_bytes,
+        mime_type=row.mime_type or "application/octet-stream",
+        note=row.note or "",
+        added_at=row.added_at,
+        last_used_at=row.last_used_at,
+        use_count=row.use_count,
+        exists=path.is_file(),
     )
 
 
-def list_stored(config: AppConfig | None = None) -> list[StoredAttachment]:
-    """附件資料夾裡的檔案，依名稱排序。"""
+# ------------------------------------------------------------------- 對帳
+
+
+def sync(config: AppConfig | None = None) -> int:
+    """讓資料庫追上資料夾的現況，回傳新收編的筆數。
+
+    只收編、不刪除——理由見模組開頭。
+    """
     directory = attachments_dir(config)
-    return sorted(
-        (_describe(path) for path in directory.iterdir() if path.is_file()),
-        key=lambda item: item.name.lower(),
-    )
+    adopted = 0
+
+    with session_scope() as session:
+        known = {row.filename: row for row in session.query(MailAttachment).all()}
+
+        for path in sorted(directory.iterdir()):
+            if not path.is_file():
+                continue
+            row = known.get(path.name)
+            if row is None:
+                session.add(
+                    MailAttachment(
+                        filename=path.name,
+                        label="",
+                        mime_type=_guess_mime(path.name),
+                        size_bytes=path.stat().st_size,
+                    )
+                )
+                adopted += 1
+                continue
+            # 檔案被外部換掉（同名覆蓋）時，大小要跟著更新，否則總量會算錯。
+            actual = path.stat().st_size
+            if row.size_bytes != actual:
+                row.size_bytes = actual
+
+    if adopted:
+        log.info("附件庫收編了 {} 個手動放進資料夾的檔案", adopted)
+    return adopted
+
+
+def library(config: AppConfig | None = None) -> list[AttachmentInfo]:
+    """附件庫的完整內容，先對帳再列出。"""
+    sync(config)
+    directory = attachments_dir(config)
+    with session_scope() as session:
+        rows = session.query(MailAttachment).order_by(MailAttachment.added_at.desc()).all()
+        return [_to_info(row, directory) for row in rows]
+
+
+#: 舊名稱，保留給既有呼叫端。
+def list_stored(config: AppConfig | None = None) -> list[AttachmentInfo]:
+    return library(config)
+
+
+def get(name: str, config: AppConfig | None = None) -> AttachmentInfo | None:
+    directory = attachments_dir(config)
+    with session_scope() as session:
+        row = session.query(MailAttachment).filter_by(filename=name).one_or_none()
+        return _to_info(row, directory) if row else None
+
+
+# ------------------------------------------------------------------ 新增
 
 
 def _unique_target(directory: Path, name: str) -> Path:
@@ -127,8 +238,13 @@ def _unique_target(directory: Path, name: str) -> Path:
     raise GmailError(f"同名附件太多了，請先整理 {directory}")
 
 
-def store(source: str | Path, config: AppConfig | None = None) -> StoredAttachment:
-    """把 ``source`` 複製進附件資料夾，回傳存好的那一份。"""
+def store(
+    source: str | Path,
+    config: AppConfig | None = None,
+    label: str = "",
+    note: str = "",
+) -> AttachmentInfo:
+    """把 ``source`` 複製進附件資料夾並建檔，回傳存好的那一筆。"""
     config = config or get_config()
     origin = Path(source).expanduser()
 
@@ -148,18 +264,89 @@ def store(source: str | Path, config: AppConfig | None = None) -> StoredAttachme
     directory = attachments_dir(config)
     target = _unique_target(directory, safe_name(origin.name))
     shutil.copy2(origin, target)
+
+    with session_scope() as session:
+        row = MailAttachment(
+            filename=target.name,
+            label=label.strip(),
+            note=note.strip() or None,
+            mime_type=_guess_mime(target.name),
+            size_bytes=size,
+        )
+        session.add(row)
+        session.flush()
+        info = _to_info(row, directory)
+
     log.info("附件已存入 {}（{}）", target.name, human_size(size))
-    return _describe(target)
+    return info
+
+
+# ------------------------------------------------------------------ 修改
+
+
+def update(
+    name: str,
+    config: AppConfig | None = None,
+    label: str | None = None,
+    note: str | None = None,
+) -> None:
+    """改顯示名稱或備註。不會動到檔案本身。"""
+    with session_scope() as session:
+        row = session.query(MailAttachment).filter_by(filename=name).one_or_none()
+        if row is None:
+            raise GmailError(f"附件庫裡沒有「{name}」")
+        if label is not None:
+            row.label = label.strip()
+        if note is not None:
+            row.note = note.strip() or None
 
 
 def remove(name: str, config: AppConfig | None = None) -> None:
-    """從附件資料夾刪掉一個檔案。已經不在了就當作成功。"""
+    """把檔案與紀錄一起刪掉。已經不在了就當作成功。"""
     path = resolve(name, config)
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
         raise GmailError(f"刪不掉附件「{name}」：{exc}") from exc
+
+    with session_scope() as session:
+        row = session.query(MailAttachment).filter_by(filename=name).one_or_none()
+        if row is not None:
+            session.delete(row)
+
     log.info("附件已刪除：{}", name)
+
+
+def mark_used(names: list[str], config: AppConfig | None = None) -> None:
+    """記錄這批附件真的被寄出去了。
+
+    用來判斷哪些附件還在用、哪些可以清掉——只看「加入時間」看不出這件事。
+    """
+    if not names:
+        return
+    stamp = now()
+    with session_scope() as session:
+        for name in names:
+            row = session.query(MailAttachment).filter_by(filename=name).one_or_none()
+            if row is not None:
+                row.use_count += 1
+                row.last_used_at = stamp
+
+
+# --------------------------------------------------------------- 使用中檢查
+
+
+def used_by_schedule(name: str, config: AppConfig | None = None) -> bool:
+    """這個附件是不是正被自動排程引用。
+
+    刪掉排程正在用的附件，後果是排程在半夜三點失敗，而且沒有人會在當下看到
+    錯誤訊息——所以刪除前要先問過使用者。
+    """
+    config = config or get_config()
+    return name in (config.scheduler.mail_attachments or [])
+
+
+# ------------------------------------------------------------------ 寄送
 
 
 def check_total_size(names: list[str], config: AppConfig | None = None) -> int:
@@ -206,6 +393,5 @@ def load_for_sending(
             data = path.read_bytes()
         except OSError as exc:
             raise GmailError(f"讀不到附件「{name}」：{exc}") from exc
-        guessed, _ = mimetypes.guess_type(path.name)
-        loaded.append((path.name, data, guessed or "application/octet-stream"))
+        loaded.append((path.name, data, _guess_mime(path.name)))
     return loaded

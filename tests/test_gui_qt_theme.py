@@ -127,6 +127,52 @@ def test_windows_metrics_are_unchanged(qt_app, at_point_size):
     assert theme.control_height() == 32           # 22 + 內距 8 + 邊框 2
 
 
+def test_dropdown_popup_is_wide_enough_to_read_the_options(qt_app, at_point_size):
+    """篩選列的下拉框很窄，Qt 預設讓彈出清單跟著一樣寬。
+
+    後果是「包裝材料」「電子零組件」被截成「包...料」「電...件」——使用者
+    根本看不出自己在選什麼。下拉框本身要維持窄的（版面需要），只有展開時
+    的清單才變寬。
+    """
+    from gui_qt.widgets import WideComboBox
+
+    at_point_size(10)
+    combo = WideComboBox()
+    combo.addItems(["全部", "包裝材料", "電子零組件", "精密機械與量測儀器"])
+    combo.setFixedWidth(90)          # 模擬篩選列裡的窄下拉框
+    combo.show()
+    qt_app.processEvents()
+    try:
+        combo.showPopup()
+        qt_app.processEvents()
+        popup_width = combo.view().minimumWidth()
+    finally:
+        combo.hidePopup()
+        combo.close()
+        combo.deleteLater()
+        qt_app.processEvents()
+
+    assert popup_width > combo.width(), "彈出清單沒有比下拉框寬，選項還是會被截斷"
+    assert popup_width <= WideComboBox.MAX_POPUP_WIDTH, "不能寬到蓋掉整個畫面"
+
+
+def test_inline_caption_matches_the_control_height(qt_app, at_point_size):
+    """「單次最多 [50] 封」這種一列裡，說明文字要跟輸入框同高才對得齊。
+
+    一列如果有 LabeledEntry（說明在上、輸入框在下，兩行高），普通 QLabel 會
+    被擺在那一列的垂直中央，而旁邊的輸入框靠下——文字就浮在半空中。
+    """
+    from gui_qt.widgets import caption, inline_caption
+
+    at_point_size(10)
+    plain = caption("單次最多")
+    sized = inline_caption("單次最多")
+
+    assert sized.height() == theme.control_height()
+    # 普通 caption 沒有被固定高度，這正是兩者的差別。
+    assert plain.height() != sized.height() or plain.maximumHeight() > sized.height()
+
+
 def test_platform_font_preference_puts_the_native_family_first():
     """Mac 上如果裝了 Office，微軟正黑體會出現在字型清單裡。
 

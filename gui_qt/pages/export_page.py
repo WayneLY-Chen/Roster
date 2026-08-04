@@ -34,7 +34,7 @@ from controllers.core import ExportController
 from core.i18n import ALL_OPTION, FORMAT_LABELS, field_label, label, stage_labels, to_value
 from gui_qt.pages.base import BasePage
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import LabeledEntry, Section, caption
+from gui_qt.widgets import LabeledEntry, Section, WideComboBox, caption
 
 #: 業務階段下拉選單裡，用來表示「不篩選階段」的那個選項。
 ANY_STAGE = ALL_OPTION
@@ -110,7 +110,7 @@ class ExportPage(BasePage):
         except CRMError as exc:
             self.report_error(exc)
             formats = []
-        self.format_combo = QComboBox()
+        self.format_combo = WideComboBox()
         self.format_combo.addItems([label(f, FORMAT_LABELS) for f in formats])
         format_row.addWidget(self.format_combo)
         format_row.addStretch(1)
@@ -137,7 +137,7 @@ class ExportPage(BasePage):
         section.body_layout.addWidget(self.industry_entry)
 
         section.body_layout.addWidget(caption("業務階段"))
-        self.stage_combo = QComboBox()
+        self.stage_combo = WideComboBox()
         self.stage_combo.addItems(stage_labels(with_all=True))
         section.body_layout.addWidget(self.stage_combo)
 

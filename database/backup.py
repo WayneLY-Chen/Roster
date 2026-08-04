@@ -111,6 +111,34 @@ def create_backup(kind: str = "manual", config: AppConfig | None = None) -> Back
     return result
 
 
+def delete_backup(backup: Path | str, config: AppConfig | None = None) -> Path:
+    """刪掉一份備份檔。
+
+    只認備份資料夾裡的檔名。這個函式的輸入來自介面上被選取的那一列，但
+    「介面只會傳合法的值」不是可以依賴的假設——把不受限的路徑交給 unlink()
+    的後果太嚴重，所以在這裡自己確認一次。
+    """
+    config = config or get_config()
+    directory = config.backup.resolved_dir
+    target = (directory / Path(backup).name).resolve()
+
+    try:
+        target.relative_to(directory.resolve())
+    except ValueError as exc:
+        raise BackupError(f"備份路徑不在備份資料夾內：{backup}") from exc
+
+    if not target.is_file():
+        raise BackupError(f"找不到備份檔：{target.name}")
+
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise BackupError(f"刪不掉備份「{target.name}」：{exc}") from exc
+
+    log.info("備份已刪除：{}", target.name)
+    return target
+
+
 def prune_backups(config: AppConfig | None = None) -> list[Path]:
     """Delete backups beyond the configured retention. Returns removed paths."""
     config = config or get_config()

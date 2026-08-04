@@ -208,6 +208,18 @@ class SourceConfig(_Base):
     # Written verbatim to Company.source when omitted; defaults to ``name``.
     label: str | None = None
 
+    #: 這個來源的公司預設屬於哪個產業。
+    #:
+    #: 台灣的名錄網站幾乎都是「一個分類一個頁面」——工業會依公會分類、
+    #: iyp 依產業分類——分類本身就是產業，但它寫在麵包屑或頁面標題裡，不在
+    #: 每一列的資料中，所以逐列抓的欄位規則抓不到它。
+    #:
+    #: 實測：資料庫裡 208 家真實爬到的公司，產業欄 100% 是空的，而
+    #: 「iyp-精密機械」這個來源名稱本身就已經寫著答案。
+    #:
+    #: 只在頁面沒有提供產業時才套用——頁面自己有寫的話，那個比較準。
+    default_industry: str = ""
+
     @model_validator(mode="after")
     def _page_range_is_sane(self) -> "SourceConfig":
         if self.page_end is not None and self.page_end < self.page_start:
@@ -492,6 +504,17 @@ class SchedulerSection(_Base):
     mail_campaign: str = "排程寄送"
     #: 隨信附上的檔案（``attachments/`` 底下的檔名）。
     mail_attachments: list[str] = Field(default_factory=list)
+
+    # 寄給誰。對應「郵件」頁右邊那組篩選條件；留空＝不限制。
+    #
+    # 這幾個一定要有：沒有它們的話排程就是「寄給資料庫裡每一家公司」，
+    # 而且是在無人看顧的時候寄。使用者想要的通常是「每月一號寄給這個月新
+    # 收集到的、某個產業、還沒聯絡過的那些」，不是全部。
+    mail_industry: str = ""
+    mail_stage: str = ""
+    mail_tag: str = ""
+    #: 只寄給 MX 驗證通過的信箱。預設開啟，跟郵件頁一致。
+    mail_verified_only: bool = True
     #: 排程寄信單次最多寄幾封。
     #:
     #: 跟 ``mailer.daily_limit`` 是兩件事：那個是「今天總共」的天花板，這個

@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 from core import legal
 from core.credentials import SecretSource, SecretStatus
 from core.errors import CRMError
+from core.i18n import ALL_OPTION, STAGE_LABELS, stage_labels, to_value
 from controllers.core import SettingsController
 
 # gui.controllers_mail.MailController 是跟 gui.controllers 同一種東西：純資料層
@@ -66,7 +67,7 @@ from controllers.mail import MailController
 from gui_qt import theme
 from gui_qt.pages.base import BasePage
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, LabeledEntry, Section, caption
+from gui_qt.widgets import DataTable, LabeledEntry, Section, WideComboBox, caption, inline_caption
 
 #: 外觀選單：值對照 ``config.yaml`` 的 ``app.theme``（英文小寫），顯示用中文標籤。
 APPEARANCE_MODES: tuple[str, ...] = ("system", "light", "dark")
@@ -116,6 +117,20 @@ def _checked_values(widget: QListWidget) -> list[str]:
     ]
 
 
+def _fill_options(combo: QComboBox, values: list[str], selected: str) -> None:
+    """「全部」永遠是第一個選項，代表不限制。"""
+    combo.clear()
+    combo.addItem(ALL_OPTION)
+    combo.addItems(values)
+    combo.setCurrentText(selected if selected and selected in values else ALL_OPTION)
+
+
+def _selected_option(combo: QComboBox) -> str:
+    """選了「全部」就回空字串——設定檔用空字串表示不限制。"""
+    text = combo.currentText().strip()
+    return "" if text == ALL_OPTION else text
+
+
 class SettingsPage(BasePage):
     title = "設定"
     icon = "⚙️"
@@ -152,7 +167,7 @@ class SettingsPage(BasePage):
         header.addStretch(1)
 
         header.addWidget(caption("外觀"))
-        self.appearance_combo = QComboBox()
+        self.appearance_combo = WideComboBox()
         self.appearance_combo.addItems([APPEARANCE_LABELS[mode] for mode in APPEARANCE_MODES])
         config_data = getattr(self.app, "config_data", None)
         initial_theme = getattr(getattr(config_data, "app", None), "theme", None) or "system"
@@ -260,13 +275,15 @@ class SettingsPage(BasePage):
         self.gmail_status_label.setWordWrap(True)
         section.body_layout.addWidget(self.gmail_status_label)
 
+        # 兩個輸入框各吃一半寬度，不要在後面加 addStretch()——那個彈簧會把
+        # 多出來的空間全部吃掉，兩個框就只剩下最小寬度，右邊卻空著一大片。
+        # 信箱與應用程式密碼都是會填滿整格的長字串，該給它們空間。
         form_row = QHBoxLayout()
         self.gmail_address_entry = LabeledEntry("Gmail 帳號", placeholder="you@gmail.com")
-        form_row.addWidget(self.gmail_address_entry)
-        self.gmail_password_entry = LabeledEntry("應用程式密碼")
+        form_row.addWidget(self.gmail_address_entry, 1)
+        self.gmail_password_entry = LabeledEntry("應用程式密碼", placeholder="16 碼，不是你的帳號密碼")
         self.gmail_password_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
-        form_row.addWidget(self.gmail_password_entry)
-        form_row.addStretch(1)
+        form_row.addWidget(self.gmail_password_entry, 1)
         section.body_layout.addLayout(form_row)
 
         button_row = QHBoxLayout()
@@ -341,7 +358,7 @@ class SettingsPage(BasePage):
         # --- 做什麼 ---
         action_row = QHBoxLayout()
         action_row.addWidget(caption("要做什麼"))
-        self.schedule_action_combo = QComboBox()
+        self.schedule_action_combo = WideComboBox()
         for label in SCHEDULE_ACTIONS.values():
             self.schedule_action_combo.addItem(label)
         self.schedule_action_combo.currentTextChanged.connect(
@@ -354,7 +371,7 @@ class SettingsPage(BasePage):
         # --- 什麼時候 ---
         when_row = QHBoxLayout()
         when_row.addWidget(caption("多久一次"))
-        self.schedule_mode_combo = QComboBox()
+        self.schedule_mode_combo = WideComboBox()
         for label in SCHEDULE_MODES.values():
             self.schedule_mode_combo.addItem(label)
         self.schedule_mode_combo.currentTextChanged.connect(
@@ -409,16 +426,35 @@ class SettingsPage(BasePage):
         template_row = QHBoxLayout()
         self.schedule_template_label = caption("郵件樣板")
         template_row.addWidget(self.schedule_template_label)
-        self.schedule_template_combo = QComboBox()
+        self.schedule_template_combo = WideComboBox()
         template_row.addWidget(self.schedule_template_combo, 1)
         template_row.addStretch(1)
         section.body_layout.addLayout(template_row)
 
+        # 寄給誰。沒有這一段的話，排程就是「寄給資料庫裡每一家公司」，而且是
+        # 在無人看顧的時候寄——那不是任何人想要的預設行為。欄位刻意跟「郵件」
+        # 頁右邊那組篩選一致，使用者在兩個地方看到的是同一套概念。
+        self.schedule_recipient_label = caption("寄給誰（留「全部」代表不限制）")
+        section.body_layout.addWidget(self.schedule_recipient_label)
+
+        recipient_row = QHBoxLayout()
+        self.schedule_industry_combo = WideComboBox()
+        recipient_row.addWidget(self.schedule_industry_combo, 1)
+        self.schedule_stage_combo = WideComboBox()
+        self.schedule_stage_combo.addItems(stage_labels(with_all=True))
+        recipient_row.addWidget(self.schedule_stage_combo, 1)
+        self.schedule_tag_combo = WideComboBox()
+        recipient_row.addWidget(self.schedule_tag_combo, 1)
+        section.body_layout.addLayout(recipient_row)
+
+        self.schedule_verified_check = QCheckBox("只寄給已通過驗證的信箱")
+        section.body_layout.addWidget(self.schedule_verified_check)
+
         campaign_row = QHBoxLayout()
         self.schedule_campaign_entry = LabeledEntry("活動名稱（會自動接上執行日期）")
         campaign_row.addWidget(self.schedule_campaign_entry, 1)
-        self.schedule_batch_label = caption("單次最多")
-        campaign_row.addWidget(self.schedule_batch_label)
+        self.schedule_batch_label = inline_caption("單次最多")
+        campaign_row.addWidget(self.schedule_batch_label, 0, Qt.AlignmentFlag.AlignBottom)
         self.schedule_batch_spin = QSpinBox()
         self.schedule_batch_spin.setRange(1, 2000)
         self.schedule_batch_spin.setSuffix(" 封")
@@ -493,6 +529,11 @@ class SettingsPage(BasePage):
         for widget in (
             self.schedule_template_label,
             self.schedule_template_combo,
+            self.schedule_recipient_label,
+            self.schedule_industry_combo,
+            self.schedule_stage_combo,
+            self.schedule_tag_combo,
+            self.schedule_verified_check,
             self.schedule_campaign_entry,
             self.schedule_batch_label,
             self.schedule_batch_spin,
@@ -523,6 +564,24 @@ class SettingsPage(BasePage):
         self.schedule_catchup_check.setChecked(bool(values["catch_up"]))
         self.schedule_campaign_entry.set(values["mail_campaign"])
         self.schedule_batch_spin.setValue(int(values["mail_batch_limit"]))
+        self.schedule_verified_check.setChecked(bool(values["mail_verified_only"]))
+
+        # 產業與標籤是資料庫裡實際有的值，每次載入都重查——使用者剛爬完一批
+        # 新資料，選單就該立刻看得到新的產業。
+        _fill_options(
+            self.schedule_industry_combo,
+            self.controller.industry_options(),
+            values["mail_industry"],
+        )
+        _fill_options(
+            self.schedule_tag_combo,
+            self.controller.tag_options(),
+            values["mail_tag"],
+        )
+        stage = values["mail_stage"]
+        self.schedule_stage_combo.setCurrentText(
+            STAGE_LABELS.get(stage, ALL_OPTION) if stage else ALL_OPTION
+        )
 
         _fill_checklist(
             self.schedule_sources_list,
@@ -561,6 +620,10 @@ class SettingsPage(BasePage):
             "mail_campaign": self.schedule_campaign_entry.get().strip() or "排程寄送",
             "mail_batch_limit": self.schedule_batch_spin.value(),
             "mail_attachments": _checked_values(self.schedule_attachments_list),
+            "mail_industry": _selected_option(self.schedule_industry_combo),
+            "mail_tag": _selected_option(self.schedule_tag_combo),
+            "mail_stage": to_value(self.schedule_stage_combo.currentText(), STAGE_LABELS),
+            "mail_verified_only": self.schedule_verified_check.isChecked(),
         }
         template = self.schedule_template_combo.currentText().strip()
         values["mail_template"] = (
@@ -612,8 +675,19 @@ class SettingsPage(BasePage):
         restore_button = QPushButton("還原所選")
         restore_button.clicked.connect(self._restore_selected)
         buttons.addWidget(restore_button)
+        delete_button = QPushButton("刪除所選")
+        delete_button.clicked.connect(self._delete_selected_backup)
+        buttons.addWidget(delete_button)
         buttons.addStretch(1)
         section.body_layout.addLayout(buttons)
+
+        note = QLabel(
+            "每日與每週備份會依保留數量自動清理，這裡的刪除是給手動備份、"
+            "或想立刻騰出空間時用的。"
+        )
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
 
         self._body_layout.addWidget(section)
 
@@ -983,3 +1057,28 @@ class SettingsPage(BasePage):
             self.report_error(exc)
             return
         self.status(f"已從 {name} 還原 -- 請重新啟動應用程式", "success")
+
+    def _delete_selected_backup(self) -> None:
+        row = self.backup_table.selected_row()
+        if row is None:
+            self.status("請先選擇要刪除的備份", "error")
+            return
+        name = row["name"]
+
+        reply = QMessageBox.question(
+            self,
+            "刪除備份",
+            f"確定要刪除備份 {name} 嗎？\n"
+            "檔案會真的從硬碟移除，這個動作無法復原。",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.controller.delete_backup(name)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        self.status(f"已刪除備份 {name}", "success")
+        self.refresh()

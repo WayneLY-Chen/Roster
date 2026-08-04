@@ -57,7 +57,7 @@ from core.i18n import (
 )
 from gui_qt import theme
 from gui_qt.pages.base import bump_data_version
-from gui_qt.widgets import CaptionedControl, DataTable, LabeledEntry, caption
+from gui_qt.widgets import CaptionedControl, DataTable, LabeledEntry, WideComboBox, caption
 
 CONTACT_COLUMNS = [
     ("name", "姓名", 140),
@@ -214,21 +214,21 @@ class CompanyDetailDialog(QDialog):
         self.contact_person_entry = LabeledEntry("聯絡人")
         grid.addWidget(self.contact_person_entry, 3, 1)
 
-        self.stage_combo = QComboBox()
+        self.stage_combo = WideComboBox()
         self.stage_combo.addItems(stage_labels())
         self.stage_combo.setCurrentText(label(PipelineStage.NEW.value, STAGE_LABELS))
         stage_control = CaptionedControl("業務階段")
         stage_control.attach(self.stage_combo)
         grid.addWidget(stage_control, 4, 0)
 
-        self.priority_combo = QComboBox()
+        self.priority_combo = WideComboBox()
         self.priority_combo.addItems(priority_labels())
         self.priority_combo.setCurrentText(label(Priority.MEDIUM.value, PRIORITY_LABELS))
         priority_control = CaptionedControl("優先度")
         priority_control.attach(self.priority_combo)
         grid.addWidget(priority_control, 4, 1)
 
-        self.status_combo = QComboBox()
+        self.status_combo = WideComboBox()
         self.status_combo.addItems(status_labels())
         self.status_combo.setCurrentText(label(RecordStatus.ACTIVE.value, STATUS_LABELS))
         status_control = CaptionedControl("狀態")
@@ -409,7 +409,7 @@ class CompanyDetailDialog(QDialog):
 
         form = QGridLayout()
 
-        self.activity_type_combo = QComboBox()
+        self.activity_type_combo = WideComboBox()
         self.activity_type_combo.addItems(activity_labels())
         self.activity_type_combo.setCurrentText(label(ActivityType.NOTE.value, ACTIVITY_LABELS))
         type_control = CaptionedControl("類型")

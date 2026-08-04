@@ -50,6 +50,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from datetime import datetime
+
 from core.errors import CRMError
 from core.schemas import CompanyFilter, CompanyView
 from controllers.core import CompanyController
@@ -66,7 +68,7 @@ from core.i18n import (
 from gui_qt.company_detail import CompanyDetailDialog
 from gui_qt.pages.base import BasePage, bump_data_version
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, caption
+from gui_qt.widgets import DataTable, WideComboBox, caption
 
 ALL = ALL_OPTION
 
@@ -139,6 +141,15 @@ class CompaniesPage(BasePage):
         delete_button.clicked.connect(self._delete_selected)
         header.addWidget(delete_button)
 
+        # 只有在「收集日期」選了某一天時才會啟用。整批刪除是不可復原的，
+        # 選著「全部」時按下去等於清空整個資料庫——那顆按鈕不該存在。
+        self.delete_day_button = QPushButton("刪除該日全部")
+        self.delete_day_button.setObjectName("DangerButton")
+        self.delete_day_button.setEnabled(False)
+        self.delete_day_button.setToolTip("先在下面的「收集日期」選一天")
+        self.delete_day_button.clicked.connect(self._delete_selected_day)
+        header.addWidget(self.delete_day_button)
+
         duplicates_button = QPushButton("尋找重複")
         duplicates_button.clicked.connect(self._find_duplicates)
         header.addWidget(duplicates_button)
@@ -166,6 +177,17 @@ class CompaniesPage(BasePage):
         self._add_filter(filters, "status", "狀態")
         self._add_filter(filters, "tags", "標籤")
 
+        # 收集日期。使用者是一批一批爬的，「哪一天爬的」才是他們心裡真正的
+        # 分組方式——比「第 1 到 200 筆」直覺得多，也是唯一能整批清掉某次
+        # 爬壞的資料的入口。
+        date_column = QVBoxLayout()
+        date_column.addWidget(caption("收集日期"))
+        self.date_combo = WideComboBox()
+        self.date_combo.addItem(ALL)
+        self.date_combo.currentIndexChanged.connect(self._on_date_changed)
+        date_column.addWidget(self.date_combo)
+        filters.addLayout(date_column)
+
         # 靠下對齊。這一列的其他項目都是「說明文字在上、控制項在下」的直向
         # 堆疊，按鈕預設會對齊整個堆疊的垂直中心，看起來就浮在說明文字那一
         # 排、跟輸入框與下拉沒有對齊。
@@ -173,7 +195,10 @@ class CompaniesPage(BasePage):
         search_button.clicked.connect(self._run_search)
         filters.addWidget(search_button, 0, Qt.AlignmentFlag.AlignBottom)
 
-        clear_button = QPushButton("清除")
+        # 名稱一定要寫「篩選」。原本只叫「清除」，使用者以為那顆會把下面的
+        # 名單全部清掉——一個看起來會刪資料的按鈕，實際上只是把搜尋條件歸零。
+        clear_button = QPushButton("清除篩選")
+        clear_button.setToolTip("把上面的搜尋條件全部歸零，不會刪除任何資料")
         clear_button.clicked.connect(self._clear_filters)
         filters.addWidget(clear_button, 0, Qt.AlignmentFlag.AlignBottom)
 
@@ -189,7 +214,7 @@ class CompaniesPage(BasePage):
     def _add_filter(self, layout: QHBoxLayout, field: str, label_text: str) -> None:
         column = QVBoxLayout()
         column.addWidget(caption(label_text))
-        combo = QComboBox()
+        combo = WideComboBox()
         combo.addItem(ALL)
         combo.currentIndexChanged.connect(lambda _index: self._run_search())
         column.addWidget(combo)
@@ -227,12 +252,21 @@ class CompaniesPage(BasePage):
         status = self.filter_combos["status"].currentText()
         tag = self.filter_combos["tags"].currentText()
         industry = self.filter_combos["industry"].currentText()
+        day = self.selected_date()
         return CompanyFilter(
             text=self.search_entry.text().strip() or None,
             industry=None if industry in ("", ALL) else industry,
             stages=[] if stage in ("", ALL) else [to_value(stage, STAGE_LABELS)],
             statuses=[] if status in ("", ALL) else [to_value(status, STATUS_LABELS)],
             tags=[] if tag in ("", ALL) else [tag],
+            created_after=(
+                datetime.combine(day, datetime.min.time()) if day else None
+            ),
+            # 到當天 23:59:59.999999 為止。用「隔天零點」會把隔天零點整
+            # 建立的那一筆也算進來。
+            created_before=(
+                datetime.combine(day, datetime.max.time()) if day else None
+            ),
         )
 
     def _clear_filters(self) -> None:
@@ -243,7 +277,76 @@ class CompaniesPage(BasePage):
             combo.blockSignals(True)
             combo.setCurrentText(ALL)
             combo.blockSignals(False)
+        self.date_combo.blockSignals(True)
+        self.date_combo.setCurrentText(ALL)
+        self.date_combo.blockSignals(False)
+        self._update_delete_day_button()
         self._run_search()
+
+    # ----------------------------------------------------------- 收集日期
+
+    def selected_date(self):
+        """目前選到的收集日期；選「全部」時回 ``None``。
+
+        選項資料存的是 ISO 字串而不是 ``date`` 物件。``QComboBox.findData()``
+        是拿 QVariant 比對的，兩個「值相等但不是同一個」的 Python 物件在那裡
+        比不出相等——重建選單時就會找不到原本選的那一項而退回「全部」，
+        看起來就是「選了會被彈回來」。字串沒有這個問題。
+        """
+        raw = self.date_combo.currentData()
+        return date.fromisoformat(raw) if raw else None
+
+    def _on_date_changed(self, _index: int) -> None:
+        self._update_delete_day_button()
+        self._run_search()
+
+    def _update_delete_day_button(self) -> None:
+        day = self.selected_date()
+        self.delete_day_button.setEnabled(day is not None)
+        self.delete_day_button.setToolTip(
+            f"刪除 {day:%Y-%m-%d} 收集到的所有公司" if day else "先在下面的「收集日期」選一天"
+        )
+
+    def _apply_date_options(self, dates: list) -> None:
+        """重填日期選單，保留目前選的那一天。"""
+        previous = self.date_combo.currentData()      # ISO 字串或 None
+        self.date_combo.blockSignals(True)
+        self.date_combo.clear()
+        self.date_combo.addItem(ALL, None)
+        for day, count in dates:
+            self.date_combo.addItem(f"{day:%Y-%m-%d}（{count} 家）", day.isoformat())
+        if previous:
+            index = self.date_combo.findData(previous)
+            # 剛把那一天整批刪掉的話，該選項就不存在了，退回「全部」。
+            self.date_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.date_combo.blockSignals(False)
+        self._update_delete_day_button()
+
+    def _delete_selected_day(self) -> None:
+        day = self.selected_date()
+        if day is None:
+            self.status("請先在「收集日期」選一天", "error")
+            return
+
+        count = self.table.row_count()
+        reply = QMessageBox.question(
+            self,
+            "刪除該日全部公司",
+            f"確定要刪除 {day:%Y-%m-%d} 收集到的全部公司嗎？\n"
+            f"目前這一天有 {count} 家，連同底下的聯絡人、活動記錄與附件都會一起刪除。\n\n"
+            "這個動作無法復原。需要保險的話，先到「設定」頁建立一份備份。",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            removed = self.controller.delete_by_date(day)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        self.status(f"已刪除 {day:%Y-%m-%d} 的 {removed} 家公司", "success")
+        self.on_show(force=True)
 
     # ------------------------------------------------------------- 查詢（背景執行緒）
 
@@ -270,16 +373,18 @@ class CompaniesPage(BasePage):
         rows = self.controller.search(criteria)
         industries = self.controller.distinct("industry")
         tags = self.controller.all_tags()
-        return rows, industries, tags
+        dates = self.controller.crawl_dates()
+        return rows, industries, tags, dates
 
     def _apply_result(self, result: tuple) -> None:
-        rows, industries, tags = result
+        rows, industries, tags, dates = result
         self._rows = rows
         self.table.set_rows([self._to_row(view) for view in rows])
         count = len(rows)
         self.count_label.setText(f"共 {count} 家公司")
         self.status(f"已載入 {count} 家公司")
         self._apply_filter_options(industries, tags)
+        self._apply_date_options(dates)
         self._start_pending_if_any()
 
     def _handle_error(self, exc: Exception) -> None:
@@ -407,7 +512,7 @@ class DuplicatesDialog(QDialog):
         frame_layout.addWidget(name_label)
 
         row = QHBoxLayout()
-        keep_combo = QComboBox()
+        keep_combo = WideComboBox()
         keep_combo.addItems([str(c.id) for c in group])
         row.addWidget(keep_combo)
         row.addStretch(1)

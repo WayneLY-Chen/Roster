@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import Select, delete, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from core.constants import (
@@ -508,6 +508,47 @@ class CompanyRepository:
         self.session.delete(company)
         self.session.flush()
         return True
+
+    def crawl_dates(self) -> list[tuple[date, int]]:
+        """每一天各收集了幾家公司，最近的排前面。
+
+        使用者是一批一批爬的，所以「哪一天爬的」是他們心裡真正的分組方式
+        ——比「第 1 到 200 筆」直覺得多。
+        """
+        stmt = (
+            select(
+                func.date(Company.created_at).label("day"),
+                func.count(Company.id),
+            )
+            .group_by("day")
+            .order_by(desc("day"))
+        )
+        results: list[tuple[date, int]] = []
+        for raw_day, count in self.session.execute(stmt):
+            if raw_day is None:
+                continue
+            # SQLite 的 date() 回傳字串，其他資料庫可能直接給 date 物件。
+            day = raw_day if isinstance(raw_day, date) else date.fromisoformat(str(raw_day))
+            results.append((day, int(count)))
+        return results
+
+    def delete_by_date(self, day: date) -> int:
+        """刪掉某一天收集到的所有公司，回傳刪除筆數。
+
+        逐筆 delete 而不是一次 bulk delete：公司底下的聯絡人、活動記錄、
+        附件都靠 ORM 的 cascade 一起清掉，繞過 ORM 會留下孤兒資料。
+        這個功能一次最多也就幾百筆，值不得為了速度換掉正確性。
+        """
+        start = datetime.combine(day, datetime.min.time())
+        end = start + timedelta(days=1)
+        stmt = select(Company).where(
+            Company.created_at >= start, Company.created_at < end
+        )
+        companies = list(self.session.execute(stmt).scalars())
+        for company in companies:
+            self.session.delete(company)
+        self.session.flush()
+        return len(companies)
 
     def set_stage(self, company_id: int, stage: PipelineStage) -> Company:
         """Move a company through the pipeline and log it to the history."""

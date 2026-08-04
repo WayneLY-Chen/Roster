@@ -49,7 +49,7 @@ from core.i18n import field_label
 from gui_qt import theme
 from gui_qt.pages.base import bump_data_version
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, LabeledEntry, Section
+from gui_qt.widgets import DataTable, LabeledEntry, Section, WideComboBox
 
 FIELD_COLUMNS = [
     ("field", "欄位", 110),
@@ -381,7 +381,7 @@ class SourceWizardDialog(QDialog):
         new_field_caption.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         new_field_row.addWidget(new_field_caption)
 
-        self.new_field_combo = QComboBox()
+        self.new_field_combo = WideComboBox()
         self.new_field_combo.addItems([field_label(code) for code in KNOWN_FIELDS])
         new_field_row.addWidget(self.new_field_combo)
 

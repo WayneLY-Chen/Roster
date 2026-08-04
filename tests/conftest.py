@@ -8,6 +8,7 @@ stay independent of run order.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,37 @@ from core.config import AppConfig
 from core.constants import EmailVerdict, RecordStatus
 from core.schemas import CleanCompany, RawCompany
 from database.models import Base
+
+# ---------------------------------------------------------------------------
+# 日誌一定要在任何測試跑起來之前就導離使用者的 logs/ 資料夾。
+#
+# 這不能用 fixture 做。每個模組在 **import 的當下**就執行
+# ``log = get_logger(...)``，而 get_logger() 會呼叫 setup_logging()，讀的是
+# **真實設定**——那比任何 fixture 都早。setup_logging() 又是 idempotent 的
+# （``_configured`` 旗標），所以之後再怎麼換設定都不會重新安裝輸出目標，
+# 整場測試就這樣寫進使用者的正式日誌裡。
+#
+# 實際後果：使用者打開「日誌」頁，看到滿滿的 pytest 堆疊與測試故意製造的
+# 假錯誤（例如 RuntimeError("pipeline exploded")），完全分不出哪些是真的。
+#
+# 這裡在 conftest 被 import 的時候就用 force=True 把輸出目標換掉。conftest
+# 早於所有測試模組被 import，所以測試期間的每一筆日誌都會落在暫存目錄。
+# ---------------------------------------------------------------------------
+_TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="roster-tests-logs-"))
+
+
+def _redirect_logging_to_a_temp_dir() -> None:
+    from core.logging_setup import setup_logging
+
+    setup_logging(
+        AppConfig.model_validate(
+            {"logging": {"dir": str(_TEST_LOG_DIR), "console": False}}
+        ),
+        force=True,
+    )
+
+
+_redirect_logging_to_a_temp_dir()
 
 
 @pytest.fixture(scope="session", autouse=True)

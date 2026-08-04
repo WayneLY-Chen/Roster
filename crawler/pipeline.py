@@ -37,6 +37,56 @@ ProgressCallback = Callable[[str, int, int], None]
 """``(source_name, page_number, records_stored_so_far)``."""
 
 
+#: 使用者可以勾選要不要收集的欄位。``company_name`` 不在裡面——它是必填的，
+#: 不收集就等於整筆不要，那是「不要爬」而不是「不要這個欄位」。
+COLLECTABLE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("tax_id", "統一編號"),
+    ("email", "電子信箱"),
+    ("phone", "電話"),
+    ("website", "網站"),
+    ("address", "地址"),
+    ("industry", "產業"),
+    ("contact_person", "聯絡人"),
+)
+
+
+def _keep_only(records: list[RawCompany], keep: set[str] | None) -> None:
+    """把沒有被勾選的欄位清空。
+
+    存在的理由跟匯出頁可以挑欄位一樣：使用者只想要公司名稱與信箱時，
+    多抓回來的地址與統編只是雜訊，還會讓「疑似重複」的比對多出無謂的維度。
+
+    在這裡清空而不是在解析階段跳過：解析規則是來源設定的一部分（會被存進
+    custom_sources.yaml 重複使用），不該被「這一次執行想要什麼」改寫。
+    """
+    if keep is None:
+        return
+    for record in records:
+        for field, _label in COLLECTABLE_FIELDS:
+            if field not in keep:
+                setattr(record, field, None)
+
+
+def _apply_default_industry(records: list[RawCompany], default: str) -> int:
+    """把來源宣告的產業補到沒有產業的紀錄上，回傳補了幾筆。
+
+    台灣的名錄網站幾乎都是「一個分類一個頁面」——工業會依公會分類、iyp 依
+    產業分類。分類本身就是產業，但它寫在麵包屑或頁面標題裡，不在每一列的
+    資料中，所以逐列抓的欄位規則抓不到它，產業欄就永遠是空的。
+
+    只補空的。頁面自己有寫產業時那個比較準，不要蓋掉。
+    """
+    default = (default or "").strip()
+    if not default:
+        return 0
+    filled = 0
+    for record in records:
+        if not (record.industry or "").strip():
+            record.industry = default
+            filled += 1
+    return filled
+
+
 def _with_page_range(
     source_config: SourceConfig, page_start: int | None, page_end: int | None
 ) -> SourceConfig:
@@ -58,10 +108,14 @@ class CrawlPipeline:
         self,
         config: AppConfig | None = None,
         fetcher: BaseFetcher | None = None,
+        keep_fields: Iterable[str] | None = None,
     ) -> None:
         self.config = config or get_config()
         self._fetcher = fetcher
         self._owns_fetcher = fetcher is None
+        #: 只保留這些欄位，其餘丟掉。``None`` 代表全部保留。
+        #: 公司名稱一律保留——那是必填欄位，丟掉整筆資料就沒有意義了。
+        self.keep_fields = set(keep_fields) | {"company_name"} if keep_fields else None
 
     # ------------------------------------------------------------------ api
 
@@ -185,6 +239,8 @@ class CrawlPipeline:
                     summary.pages_crawled += 1
                     summary.records_found += len(batch.records)
 
+                    _apply_default_industry(batch.records, source_config.default_industry)
+                    _keep_only(batch.records, self.keep_fields)
                     self._store_page(batch.records, repo, cleaner, summary)
                     session.commit()
 
@@ -244,6 +300,7 @@ class CrawlPipeline:
         summary: CrawlSummary,
     ) -> None:
         """Dedupe within the page, clean, then upsert each record."""
+        records = list(records)
         unique, dropped_in_page = deduplicate_batch(records)
         summary.records_duplicate += dropped_in_page
 
@@ -267,9 +324,10 @@ def crawl(
     max_pages: int | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
+    keep_fields: Iterable[str] | None = None,
 ) -> list[CrawlSummary]:
     """Convenience entry point: crawl one source, or every enabled source."""
-    with CrawlPipeline(config) as pipeline:
+    with CrawlPipeline(config, keep_fields=keep_fields) as pipeline:
         if source:
             return [
                 pipeline.run_source(

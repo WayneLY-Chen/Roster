@@ -196,6 +196,8 @@ def test_load_scheduler_fills_the_form_from_the_config(qt_app, db_session, monke
             "every_minutes": 360, "day_of_month": 28, "sources": [],
             "verify_after_crawl": True, "catch_up": False, "mail_template": "",
             "mail_campaign": "季報", "mail_attachments": [], "mail_batch_limit": 77,
+            "mail_industry": "", "mail_stage": "", "mail_tag": "",
+            "mail_verified_only": False,
         },
     )
     page._load_scheduler()

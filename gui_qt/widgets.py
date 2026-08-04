@@ -39,8 +39,10 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -312,6 +314,68 @@ def caption(text: str = "") -> QLabel:
     font = label.font()
     font.setPointSize(CAPTION_SIZE)
     label.setFont(font)
+    return label
+
+
+class WideComboBox(QComboBox):
+    """收合時看得到完整的選項文字，展開時的清單也不會被切掉。
+
+    兩個都是 Qt 的預設行為造成的，而且成因不同：
+
+    **收合狀態**：預設的 ``AdjustToContentsOnFirstShow`` 只在第一次顯示時
+    量一次寬度。這支程式的篩選下拉框建立時只有「全部」一個選項，真正的
+    產業／標籤是稍後由背景查詢填進去的——寬度早就照「全部」兩個字定死了，
+    於是「新名單」被截成「新名」。改成 ``AdjustToContents``，內容一變就
+    重算。
+
+    **展開狀態**：Qt 讓彈出清單跟下拉框一樣寬。下拉框本來就窄的話，
+    「電子零組件」會顯示成「電...件」，使用者根本看不出自己在選什麼。
+
+    兩邊都設上限，免得一個特別長的產業名把整列版面撐爆。
+    """
+
+    #: 收合狀態的寬度上限。超過的選項仍會以「…」截斷，但展開後看得到全文。
+    MAX_WIDTH = 240
+    #: 彈出清單的寬度上限。
+    MAX_POPUP_WIDTH = 420
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        # 內容變了就重新量寬度，不是只量第一次。
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.setMaximumWidth(self.MAX_WIDTH)
+
+    def _widest_item(self) -> int:
+        metrics = QFontMetrics(self.font())
+        return max(
+            (metrics.horizontalAdvance(self.itemText(i)) for i in range(self.count())),
+            default=0,
+        )
+
+    def showPopup(self) -> None:  # noqa: N802 - Qt 的覆寫方法命名
+        # 加上捲軸與左右內距的餘裕；不足下拉框本身寬度時就沿用下拉框的寬度。
+        needed = min(self._widest_item() + 40, self.MAX_POPUP_WIDTH)
+        self.view().setMinimumWidth(max(needed, self.width()))
+        super().showPopup()
+
+
+def inline_caption(text: str = "") -> QLabel:
+    """跟旁邊的輸入框「同一列」的說明文字，例如「單次最多 [50] 封」。
+
+    跟 :func:`caption` 的差別只有高度：這個標籤會被撐成跟 QLineEdit／
+    QSpinBox 一樣高，文字在裡面垂直置中。
+
+    為什麼需要：一列裡如果有 LabeledEntry（說明在上、輸入框在下，兩行高），
+    那一列的高度就是兩行。普通的 QLabel 會被擺在那一列的**垂直中央**，
+    而旁邊的輸入框靠下——文字看起來就浮在半空中，跟輸入框沒有對齊。
+    給標籤一個跟控制項等高的框，再讓整個框靠下對齊，兩邊的文字就會落在
+    同一條基線上。
+    """
+    from gui_qt import theme
+
+    label = caption(text)
+    label.setFixedHeight(theme.control_height())
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     return label
 
 

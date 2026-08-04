@@ -318,6 +318,27 @@ class CrawlScheduler:
             s.name for s in self.config.crawler.enabled_sources()
         ]
 
+    def recipient_filter(self):
+        """排程要寄給誰。對應「郵件」頁右邊那組篩選條件。
+
+        沒有這個的話，排程就是「寄給資料庫裡每一家公司」，而且是在無人看顧
+        的時候寄——那不是任何人想要的預設行為。
+        """
+        from core.constants import EmailVerdict
+        from core.i18n import STAGE_LABELS, to_value
+        from core.schemas import CompanyFilter
+
+        settings = self.settings
+        stage = settings.mail_stage.strip()
+        return CompanyFilter(
+            industry=settings.mail_industry.strip() or None,
+            stages=[to_value(stage, STAGE_LABELS)] if stage else [],
+            tags=[settings.mail_tag.strip()] if settings.mail_tag.strip() else [],
+            email_verdicts=(
+                [EmailVerdict.VALID.value] if settings.mail_verified_only else []
+            ),
+        )
+
     def _send_mail(self) -> int:
         """依設定的樣板寄出一批信，回傳寄出的封數。
 
@@ -325,7 +346,6 @@ class CrawlScheduler:
         每日上限、重複寄送間隔、只寄已驗證信箱、退訂聲明這些防護一個都不會
         因為「是排程跑的」而被繞過。
         """
-        from core.schemas import CompanyFilter
         from gmail.campaign import build_plan, send_campaign
 
         settings = self.settings
@@ -335,7 +355,7 @@ class CrawlScheduler:
 
         campaign_name = f"{settings.mail_campaign}-{datetime.now():%Y%m%d}"
         plan = build_plan(
-            CompanyFilter(),
+            self.recipient_filter(),
             template,
             campaign_name,
             self.config,

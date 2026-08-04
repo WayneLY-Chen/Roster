@@ -74,7 +74,7 @@ from gui_qt import theme
 from gui_qt.composer import RichTextEditor, edit_body, populate_preview
 from gui_qt.pages.base import BasePage
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, LabeledEntry, Section, StatCard, caption
+from gui_qt.widgets import DataTable, LabeledEntry, Section, StatCard, WideComboBox, caption
 
 
 class MailPage(BasePage):
@@ -210,7 +210,7 @@ class MailPage(BasePage):
 
         toolbar = QHBoxLayout()
         toolbar.addWidget(caption("樣板"))
-        self.template_combo = QComboBox()
+        self.template_combo = WideComboBox()
         self.template_combo.currentTextChanged.connect(self._on_template_selected)
         toolbar.addWidget(self.template_combo, 1)
         new_button = QPushButton("新增樣板")
@@ -248,7 +248,7 @@ class MailPage(BasePage):
         # 下拉選單取代 Tk 版那 8 顆會被切掉的變數按鈕。
         insert_row = QHBoxLayout()
         insert_row.addWidget(caption("插入變數"))
-        self.placeholder_combo = QComboBox()
+        self.placeholder_combo = WideComboBox()
         self.placeholder_combo.setMinimumWidth(220)
         insert_row.addWidget(self.placeholder_combo, 1)
         insert_button = QPushButton("插入游標處")
@@ -282,6 +282,14 @@ class MailPage(BasePage):
         self.remove_attachment_button.setEnabled(False)
         self.remove_attachment_button.clicked.connect(self._remove_attachment)
         header.addWidget(self.remove_attachment_button)
+
+        # 「移除」是快速刪掉選到的那一個；「管理…」才是完整的整理視窗
+        # （改顯示名稱、寫備註、看用過幾次）。整理跟寄信是兩件事，塞在同一頁
+        # 只會讓寄信流程變成雜物櫃。
+        manage_button = QPushButton("管理…")
+        manage_button.setToolTip("改顯示名稱、寫備註、看用過幾次")
+        manage_button.clicked.connect(self._manage_attachments)
+        header.addWidget(manage_button)
         section.body_layout.addLayout(header)
 
         self.attachment_list = QListWidget()
@@ -388,16 +396,37 @@ class MailPage(BasePage):
         if added:
             self.status(f"已加入 {added} 個附件", "success")
 
+    def _manage_attachments(self) -> None:
+        """開附件庫的整理視窗。關掉之後重新載入，名稱或備註改過要跟著更新。"""
+        from gui_qt.attachment_library import AttachmentLibraryDialog
+
+        checked = set(self.selected_attachments())
+        AttachmentLibraryDialog(self, self.controller).exec()
+        self._refresh_attachments(keep_checked=checked)
+
     def _remove_attachment(self) -> None:
         item = self.attachment_list.currentItem()
         if item is None:
             return
         name = item.data(Qt.ItemDataRole.UserRole)
 
+        # 排程可能正引用這個附件。刪掉的話排程會在半夜三點失敗，而且不會有人
+        # 在當下看到錯誤訊息——等發現時已經漏寄好幾天。
+        warning = ""
+        try:
+            if self.controller.attachment_used_by_schedule(name):
+                warning = (
+                    "\n\n⚠ 這個附件正被「自動排程」引用，刪掉之後排程寄信會失敗。"
+                    "請記得到「設定」頁把它取消勾選。"
+                )
+        except CRMError:
+            pass
+
         confirm = QMessageBox.question(
             self,
             "移除附件",
-            f"要把「{name}」從附件資料夾刪除嗎？\n檔案會真的被刪掉，這個動作無法復原。",
+            f"要把「{name}」從附件資料夾刪除嗎？\n"
+            f"檔案會真的被刪掉，這個動作無法復原。{warning}",
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
@@ -432,15 +461,15 @@ class MailPage(BasePage):
         body_row.addWidget(section, 1)
 
         filters_row = QHBoxLayout()
-        self.industry_combo = QComboBox()
+        self.industry_combo = WideComboBox()
         self.industry_combo.addItem(ALL_OPTION)
         filters_row.addWidget(self.industry_combo)
 
-        self.stage_combo = QComboBox()
+        self.stage_combo = WideComboBox()
         self.stage_combo.addItems(stage_labels(with_all=True))
         filters_row.addWidget(self.stage_combo)
 
-        self.tag_combo = QComboBox()
+        self.tag_combo = WideComboBox()
         self.tag_combo.addItem(ALL_OPTION)
         filters_row.addWidget(self.tag_combo)
         section.body_layout.addLayout(filters_row)

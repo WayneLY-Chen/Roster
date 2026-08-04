@@ -335,6 +335,12 @@ def send_campaign(
         if sender is not None:
             sender.close()
 
+    # 真的寄出去了才記一次使用。演練不算——演練的用途就是「什麼都不發生」。
+    if plan.attachments and result.sent and not mailer.dry_run:
+        from gmail.attachments import mark_used
+
+        mark_used(plan.attachments, config)
+
     result.skipped = already_skipped + (len(to_send) - processed)
     return result
 

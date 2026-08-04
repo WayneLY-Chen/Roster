@@ -26,6 +26,7 @@ from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -46,7 +47,7 @@ from gui_qt import theme
 from gui_qt.pages.base import BasePage, bump_data_version
 from gui_qt.source_wizard import SourceWizardDialog
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, LabeledEntry, Section, caption
+from gui_qt.widgets import DataTable, LabeledEntry, Section, WideComboBox, caption
 
 #: 來源下拉選單裡「不指定單一來源」的顯示文字。
 ALL_ENABLED = "（全部啟用）"
@@ -69,7 +70,7 @@ class _LabeledCombo(QWidget):
         layout.setSpacing(2)
         layout.addWidget(caption(label_text))
 
-        self.combo = QComboBox()
+        self.combo = WideComboBox()
         self.combo.addItems(values)
         layout.addWidget(self.combo)
 
@@ -138,6 +139,8 @@ class CrawlerPage(BasePage):
         input_row.addStretch(1)
         controls.body_layout.addLayout(input_row)
 
+        self._build_field_picker(controls)
+
         buttons_row = QHBoxLayout()
         self.start_button = QPushButton("開始爬取")
         self.start_button.clicked.connect(self._start_crawl)
@@ -204,6 +207,46 @@ class CrawlerPage(BasePage):
 
     # ------------------------------------------------------------- crawling
 
+    def _build_field_picker(self, section: Section) -> None:
+        """要收集哪些欄位。比照「匯出」頁可以挑欄位的作法。
+
+        沒勾的欄位在寫入資料庫之前就會被清空。只想要公司名稱與信箱時，
+        多抓回來的地址與統編只是雜訊，還會讓「疑似重複」的比對多出無謂的維度。
+
+        公司名稱不在這裡：它是必填的，不收集就等於整筆不要，那是「不要爬」
+        而不是「不要這個欄位」。
+        """
+        header = QHBoxLayout()
+        header.addWidget(caption("要收集哪些欄位（公司名稱一定會收集）"))
+        header.addStretch(1)
+
+        all_button = QPushButton("全選")
+        all_button.clicked.connect(lambda: self._set_all_fields(True))
+        header.addWidget(all_button)
+        none_button = QPushButton("全不選")
+        none_button.clicked.connect(lambda: self._set_all_fields(False))
+        header.addWidget(none_button)
+        section.body_layout.addLayout(header)
+
+        fields_row = QHBoxLayout()
+        self.field_checks: dict[str, QCheckBox] = {}
+        for field, label_text in self.crawl_controller.collectable_fields():
+            check = QCheckBox(label_text)
+            check.setChecked(True)          # 預設全收，跟改動前的行為一致
+            self.field_checks[field] = check
+            fields_row.addWidget(check)
+        fields_row.addStretch(1)
+        section.body_layout.addLayout(fields_row)
+
+    def _set_all_fields(self, checked: bool) -> None:
+        for check in self.field_checks.values():
+            check.setChecked(checked)
+
+    def selected_fields(self) -> list[str] | None:
+        """勾選的欄位；全部勾選時回 ``None`` 代表「不做任何過濾」。"""
+        chosen = [field for field, check in self.field_checks.items() if check.isChecked()]
+        return None if len(chosen) == len(self.field_checks) else chosen
+
     def _start_crawl(self) -> None:
         if self.crawl_task is not None and self.crawl_task.running:
             return
@@ -240,7 +283,7 @@ class CrawlerPage(BasePage):
             on_done=self._on_crawl_done,
             on_error=self._on_crawl_error,
         )
-        self.crawl_task.start(source, max_pages, from_page, to_page)
+        self.crawl_task.start(source, max_pages, from_page, to_page, self.selected_fields())
 
     @staticmethod
     def _optional_int(text: str, label: str) -> int | None:

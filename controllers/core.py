@@ -23,6 +23,7 @@ from core.constants import (
     RecordStatus,
 )
 from core.credentials import SecretSource, SecretStatus
+from core.errors import CRMError
 from core.logging_setup import get_logger, log_file_path
 from core.schemas import (
     ActivityView,
@@ -159,6 +160,19 @@ class CompanyController:
         with session_scope() as session:
             return TagRepository(session).names()
 
+    def crawl_dates(self) -> list[tuple[Any, int]]:
+        """``(日期, 家數)``，最近的排前面。給公司頁的日期篩選用。"""
+        with session_scope() as session:
+            return CompanyRepository(session).crawl_dates()
+
+    def delete_by_date(self, day: Any) -> int:
+        """刪掉某一天收集到的所有公司。"""
+        with session_scope() as session:
+            removed = CompanyRepository(session).delete_by_date(day)
+        if removed:
+            bump()
+        return removed
+
     def duplicate_groups(self) -> list[list[CompanyView]]:
         with session_scope() as session:
             repo = CompanyRepository(session)
@@ -272,6 +286,7 @@ class CrawlController:
         max_pages: int | None = None,
         from_page: int | None = None,
         to_page: int | None = None,
+        keep_fields: list[str] | None = None,
         *,
         report: Callable[[Any], None],
         cancel_event,
@@ -289,7 +304,15 @@ class CrawlController:
             max_pages=max_pages,
             page_start=from_page,
             page_end=to_page,
+            keep_fields=keep_fields,
         )
+
+    @staticmethod
+    def collectable_fields() -> list[tuple[str, str]]:
+        """可以勾選要不要收集的欄位 ``(欄位代號, 中文標題)``。"""
+        from crawler.pipeline import COLLECTABLE_FIELDS
+
+        return list(COLLECTABLE_FIELDS)
 
 
 class VerifyController:
@@ -480,6 +503,10 @@ class SettingsController:
             "mail_campaign": settings.mail_campaign,
             "mail_attachments": list(settings.mail_attachments),
             "mail_batch_limit": settings.mail_batch_limit,
+            "mail_industry": settings.mail_industry,
+            "mail_stage": settings.mail_stage,
+            "mail_tag": settings.mail_tag,
+            "mail_verified_only": settings.mail_verified_only,
         }
 
     def save_scheduler_settings(self, values: dict[str, Any]) -> None:
@@ -532,6 +559,19 @@ class SettingsController:
         except CRMError:
             return []
 
+    def industry_options(self) -> list[str]:
+        """資料庫裡實際存在的產業。空的就回空清單，不要造假選項。"""
+        try:
+            return CompanyController().distinct("industry")
+        except CRMError:
+            return []
+
+    def tag_options(self) -> list[str]:
+        try:
+            return CompanyController().all_tags()
+        except CRMError:
+            return []
+
     def backups(self) -> list[BackupFile]:
         return list_backups(self.config)
 
@@ -543,6 +583,11 @@ class SettingsController:
 
         reset_engine()
         return restore_backup(name, self.config)
+
+    def delete_backup(self, name: str) -> Path:
+        from database.backup import delete_backup
+
+        return delete_backup(name, self.config)
 
     # ----------------------------------------------------------- 資料庫加密
 
