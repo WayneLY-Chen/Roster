@@ -381,25 +381,183 @@ def _by_text_pattern(
     return None
 
 
+#: 每張卡片都會出現的導覽／動作文字。這些正是舊版誤抓的東西：一個「詳細
+#: 資料」連結出現在每一列，命中率是 100%，比真正的公司名稱還「可靠」，於是
+#: 穩穩勝出。要靠內容判斷才擋得掉，光看命中率永遠會選到它們。
+_NAME_STOPWORDS = frozenset({
+    "更多", "詳細", "詳細資料", "詳細內容", "詳情", "看更多", "閱讀更多",
+    "查看", "查看更多", "繼續閱讀", "回上頁", "上一頁", "下一頁", "首頁",
+    "回首頁", "登入", "註冊", "會員專區", "聯絡我們", "關於我們", "立即聯絡",
+    "洽詢", "詢價", "加入最愛", "分享", "列印", "地圖", "官網", "網站",
+    "more", "detail", "details", "read more", "readmore", "view", "view more",
+    "login", "sign up", "signup", "home", "back", "next", "previous", "contact",
+    "click here", "learn more", "website", "map", "share", "print",
+})
+
+#: 台灣公司名稱的組織型態關鍵詞。命中代表這一欄「看起來真的是公司名」。
+_COMPANY_MARKERS: tuple[str, ...] = (
+    "股份有限公司", "有限公司", "公司", "企業社", "企業", "實業", "工業",
+    "科技", "商行", "行號", "工作室", "事務所", "工廠", "製造", "貿易",
+    "合作社", "農場", "牧場", "診所", "藥局", "商號", "產業", "集團",
+)
+_COMPANY_MARKERS_EN: tuple[str, ...] = (
+    "co.", "co,", " ltd", "ltd.", " inc", "inc.", "corp", "company", "llc",
+    "gmbh", "plc", "industries", "enterprise",
+)
+
+#: 台灣中小企業的登記名稱常常只以單一個字結尾，不帶「公司」二字。
+#: 這不是猜的——實際資料庫的 215 筆裡就有 8 筆長這樣：「祥發包裝材料行」、
+#: 「金龍電工機械廠」、「豫味開封包子店」、「力業鐵工廠」。只認「有限公司」
+#: 會讓整個小型商家名錄的評分被低估。
+#: 限定「結尾」而非「包含」，避免「旅行社優惠」這種內文被誤判。
+_COMPANY_SUFFIXES: tuple[str, ...] = (
+    "行", "廠", "店", "社", "號", "坊", "館", "苑", "軒", "堂", "舖", "鋪", "庄",
+)
+
+#: 一望即知不是公司名稱的內容形狀（純數字、日期、網址、信箱、只有標點）。
+_NOT_NAME_SHAPE = re.compile(
+    r"""(?x)
+    ^\W*$
+  | ^[\d\s\-/年月日時分:.()]+$
+  | ^https?://
+  | ^[\w.+\-]+@[\w\-]+\.
+    """
+)
+
+#: 候選值裡至少要有這麼高的比例「每一列都不一樣」，才可能是公司名稱。
+#: 樣板連結的相異率趨近 0，正常名錄接近 1。
+_MIN_NAME_DISTINCT_RATIO = 0.5
+
+#: 內容評分低於這個門檻就不採用，寧可回報「找不到公司名稱」讓使用者自己填，
+#: 也不要塞一堆「詳細資料」進資料庫。
+_MIN_NAME_SCORE = 3.0
+
+
+def _is_obviously_not_a_name(value: str) -> bool:
+    text = value.strip()
+    if not text or len(text) > 80:
+        return True
+    if text.lower() in _NAME_STOPWORDS:
+        return True
+    return bool(_NOT_NAME_SHAPE.match(text))
+
+
+def _has_company_marker(value: str) -> bool:
+    text = value.strip()
+    if any(marker in text for marker in _COMPANY_MARKERS):
+        return True
+    # 單字尾要夠長才算，兩三個字的「更多」「查看」不會誤中。
+    if len(text) >= 4 and text.endswith(_COMPANY_SUFFIXES):
+        return True
+    lowered = text.lower()
+    return any(marker in lowered for marker in _COMPANY_MARKERS_EN)
+
+
+def _score_name_values(values: list[str], item_count: int) -> float:
+    """一組候選值有多像「每一列各自的公司名稱」。
+
+    分數由四個獨立訊號組成，最重的是**相異率**——這是唯一能分辨
+    「真名稱」與「每列都一樣的樣板文字」的訊號，而舊版完全沒有用到它。
+    """
+    if not values or not item_count:
+        return 0.0
+
+    coverage = len(values) / item_count
+    if coverage < MIN_FIELD_HIT_RATE:
+        return 0.0
+
+    distinct_ratio = len(set(values)) / len(values)
+    if distinct_ratio < _MIN_NAME_DISTINCT_RATIO:
+        return 0.0
+
+    usable = [v for v in values if not _is_obviously_not_a_name(v)]
+    if not usable:
+        return 0.0
+    usable_ratio = len(usable) / len(values)
+
+    marker_ratio = sum(1 for v in usable if _has_company_marker(v)) / len(usable)
+
+    average_length = sum(len(v) for v in usable) / len(usable)
+    length_factor = 1.0 if 3 <= average_length <= 40 else 0.4
+
+    return (
+        distinct_ratio * 5.0
+        + marker_ratio * 4.0
+        + usable_ratio * 2.0
+        + coverage * 1.0
+    ) * length_factor
+
+
+def _values_for(items: list[Tag], selector: str, attr: str = "text") -> list[str]:
+    """把候選規則實際套用到每一列，取回真正會存進資料庫的值。"""
+    from crawler.parser import extract_field
+
+    rule = FieldRule(selector=selector, attr=attr)
+    values: list[str] = []
+    for item in items:
+        value = extract_field(item, rule)
+        if value:
+            values.append(value.strip())
+    return values
+
+
 def _guess_company_name(items: list[Tag]) -> FieldGuess | None:
-    """Company name: a heading, a prominent link, or the item's first line."""
-    candidates: Counter[str] = Counter()
+    """Company name: pick the column that actually *reads* like company names.
+
+    舊版是「數哪個選擇器出現最多次，再檢查命中率」。那個作法必然會選到每張
+    卡片都有的「詳細資料／更多」連結——它們的命中率剛好是最高的 100%。
+
+    現在改成：先蒐集結構上合理的候選（標題、連結、粗體、class 名稱像的），
+    再把每個候選**實際套用一次**，用內容本身評分，取最高分者。
+    """
+    if not items:
+        return None
+
+    # 結構加分：標題最可能是名稱，其次是連結，粗體再次之。
+    structural: Counter[str] = Counter()
     for item in items:
         heading = item.find(re.compile("^h[1-6]$"))
         if heading is not None:
-            candidates[_css_for(heading)] += 3
+            structural[_css_for(heading)] += 3.0
         for node in item.find_all(("a", "strong", "b")):
-            text = _text(node)
-            if 2 <= len(text) <= 60:
-                candidates[_css_for(node)] += 1
+            if 2 <= len(_text(node)) <= 80:
+                structural[_css_for(node)] += 1.0
 
-    for selector, _score in candidates.most_common(6):
-        guess = _validated("company_name", selector, "text", items)
-        if guess and all(len(s) >= 2 for s in guess.samples):
-            guess.reason = "標題或主要連結"
-            return guess
+    # class/id 名稱帶有 company/name/公司 之類的字也算候選。
+    for item in items:
+        for node in item.find_all(True):
+            tokens = list(node.get("class") or [])
+            if isinstance(tokens, str):
+                tokens = tokens.split()
+            if node.get("id"):
+                tokens.append(str(node.get("id")))
+            haystack = " ".join(tokens).lower()
+            if any(hint in haystack for hint in _CLASS_HINTS["company_name"]):
+                structural[_css_for(node)] += 2.0
 
-    return _by_class_hint("company_name", items)
+    best: FieldGuess | None = None
+    best_score = 0.0
+    for selector, structure_bonus in structural.most_common(12):
+        values = _values_for(items, selector)
+        content_score = _score_name_values(values, len(items))
+        if content_score <= 0:
+            continue
+        # 結構只是輔助；內容才是主要依據，所以結構加分壓得很小。
+        score = content_score + min(structure_bonus / len(items), 1.0)
+        if score > best_score:
+            best_score = score
+            best = FieldGuess(
+                field="company_name",
+                selector=selector,
+                attr="text",
+                hit_rate=len(values) / len(items),
+                samples=values[:3],
+                reason=f"內容像公司名稱（評分 {content_score:.1f}）",
+            )
+
+    if best is not None and best_score >= _MIN_NAME_SCORE:
+        return best
+    return None
 
 
 def _guess_email(items: list[Tag]) -> FieldGuess | None:
