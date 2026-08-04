@@ -49,6 +49,9 @@ def tmp_config(tmp_path: Path) -> AppConfig:
     log_dir = tmp_path / "logs"
     output_dir = tmp_path / "output"
     backup_dir = tmp_path / "backups"
+    # 附件資料夾一定要一起導到 tmp_path。它的預設值 "./attachments" 是相對於
+    # PROJECT_ROOT 解析的，漏掉的話測試會把檔案寫進使用者真正的附件資料夾。
+    attachments_dir = tmp_path / "attachments"
 
     return AppConfig.model_validate(
         {
@@ -56,6 +59,7 @@ def tmp_config(tmp_path: Path) -> AppConfig:
             "logging": {"dir": str(log_dir), "console": False},
             "exporter": {"output_dir": str(output_dir)},
             "backup": {"dir": str(backup_dir), "keep_daily": 3, "keep_weekly": 2},
+            "mailer": {"attachments_dir": str(attachments_dir)},
             "verifier": {
                 "check_mx": False,
                 "reject_disposable": True,

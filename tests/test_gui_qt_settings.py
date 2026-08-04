@@ -32,7 +32,11 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
 
 from core.errors import CRMError  # noqa: E402
-from gui_qt.pages.settings import SettingsPage  # noqa: E402
+from gui_qt.pages.settings import (  # noqa: E402
+    SCHEDULE_ACTIONS,
+    SCHEDULE_MODES,
+    SettingsPage,
+)
 
 
 @pytest.fixture(scope="module")
@@ -89,6 +93,121 @@ def test_scroll_area_shows_a_scrollbar_at_the_minimum_supported_window_size(qt_a
         assert vbar.maximum() > 0  # 內容比可視區域高，捲軸真的有作用
     finally:
         page.hide()
+
+
+# --------------------------------------------------------------------- 排程
+
+
+def _schedule_page(saved: list[dict] | None = None):
+    """建好的設定頁，並把儲存動作換成只記錄呼叫的假函式。"""
+    page = SettingsPage(_FakeApp())
+    page.ensure_built()
+    if saved is not None:
+        page.controller.save_scheduler_settings = saved.append  # type: ignore[method-assign]
+    return page
+
+
+def test_schedule_form_only_shows_the_fields_that_matter(qt_app, db_session):
+    """一次攤開十幾個欄位，使用者得自己判斷哪些跟目前的選擇有關。"""
+    page = _schedule_page()
+    page.schedule_enabled_check.setChecked(True)
+
+    page.schedule_action_combo.setCurrentText(SCHEDULE_ACTIONS["crawl"])
+    page.schedule_mode_combo.setCurrentText(SCHEDULE_MODES["daily"])
+    assert page.schedule_sources_list.isVisible() or not page.isVisible()
+    assert page.schedule_template_combo.isVisibleTo(page) is False
+    assert page.schedule_day_spin.isVisibleTo(page) is False
+    assert page.schedule_at_entry.isVisibleTo(page) is True
+
+    page.schedule_mode_combo.setCurrentText(SCHEDULE_MODES["monthly"])
+    assert page.schedule_day_spin.isVisibleTo(page) is True
+
+    page.schedule_mode_combo.setCurrentText(SCHEDULE_MODES["interval"])
+    assert page.schedule_every_spin.isVisibleTo(page) is True
+    assert page.schedule_at_entry.isVisibleTo(page) is False
+
+    page.schedule_action_combo.setCurrentText(SCHEDULE_ACTIONS["send"])
+    assert page.schedule_template_combo.isVisibleTo(page) is True
+    assert page.schedule_sources_list.isVisibleTo(page) is False
+
+
+def test_saving_a_schedule_sends_every_field_in_one_call(qt_app, db_session):
+    """一次存整組，不是一個欄位存一次。
+
+    逐一儲存會失敗：action 設成寄信時 mail_template 就變成必填，先寫哪一個
+    都會在中途產生不合法的設定而被回滾，使用者永遠到不了目標狀態。
+    """
+    saved: list[dict] = []
+    page = _schedule_page(saved)
+
+    page.schedule_enabled_check.setChecked(True)
+    page.schedule_action_combo.setCurrentText(SCHEDULE_ACTIONS["crawl_and_send"])
+    page.schedule_mode_combo.setCurrentText(SCHEDULE_MODES["monthly"])
+    page.schedule_day_spin.setValue(15)
+    page.schedule_at_entry.setText("07:45")
+    page.schedule_batch_spin.setValue(30)
+    page.schedule_campaign_entry.set("每月名單")
+
+    page._save_scheduler()
+
+    assert len(saved) == 1
+    values = saved[0]
+    assert values["enabled"] is True
+    assert values["action"] == "crawl_and_send"
+    assert values["mode"] == "monthly"
+    assert values["day_of_month"] == 15
+    assert values["at"] == "07:45"
+    assert values["mail_batch_limit"] == 30
+    assert values["mail_campaign"] == "每月名單"
+
+
+def test_blank_time_falls_back_to_a_valid_default(qt_app, db_session):
+    """空字串會讓設定驗證失敗，不能就這樣送出去。"""
+    saved: list[dict] = []
+    page = _schedule_page(saved)
+    page.schedule_at_entry.setText("   ")
+
+    page._save_scheduler()
+
+    assert saved[0]["at"] == "03:00"
+
+
+def test_a_template_that_no_longer_exists_is_not_saved(qt_app, db_session):
+    """下拉選單在沒有樣板時顯示「（尚未建立任何樣板）」，那不是一個樣板名稱。"""
+    saved: list[dict] = []
+    page = _schedule_page(saved)
+    page.schedule_template_combo.clear()
+    page.schedule_template_combo.addItem("（尚未建立任何樣板）")
+
+    page._save_scheduler()
+
+    assert saved[0]["mail_template"] == ""
+
+
+def test_load_scheduler_fills_the_form_from_the_config(qt_app, db_session, monkeypatch):
+    page = SettingsPage(_FakeApp())
+    page.ensure_built()
+
+    monkeypatch.setattr(
+        page.controller,
+        "scheduler_settings",
+        lambda: {
+            "enabled": True, "action": "send", "mode": "monthly", "at": "23:15",
+            "every_minutes": 360, "day_of_month": 28, "sources": [],
+            "verify_after_crawl": True, "catch_up": False, "mail_template": "",
+            "mail_campaign": "季報", "mail_attachments": [], "mail_batch_limit": 77,
+        },
+    )
+    page._load_scheduler()
+
+    assert page.schedule_enabled_check.isChecked() is True
+    assert page.schedule_action_combo.currentText() == SCHEDULE_ACTIONS["send"]
+    assert page.schedule_mode_combo.currentText() == SCHEDULE_MODES["monthly"]
+    assert page.schedule_at_entry.text() == "23:15"
+    assert page.schedule_day_spin.value() == 28
+    assert page.schedule_batch_spin.value() == 77
+    assert page.schedule_campaign_entry.get() == "季報"
+    assert page.schedule_catchup_check.isChecked() is False
 
 
 # ------------------------------------------------------------------- 背景重整

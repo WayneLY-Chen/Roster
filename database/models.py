@@ -290,12 +290,20 @@ class EmailMessage(Base):
     )
     subject: Mapped[str] = mapped_column(String(512), default="")
     body: Mapped[str | None] = mapped_column(EncryptedText)
+    #: 這封信帶了哪些附件，一行一個檔名。只是稽核紀錄——檔案本身在
+    #: ``attachments/``，這裡存的是「當時寄出去的是哪幾個」。用換行分隔而不是
+    #: 逗號，因為檔名裡可以有逗號、不會有換行（見 gmail.attachments.safe_name）。
+    attachments: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
         String(32), default=EmailStatus.PENDING.value, index=True
     )
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+
+    @property
+    def attachment_names(self) -> list[str]:
+        return [line for line in (self.attachments or "").splitlines() if line.strip()]
 
     def __repr__(self) -> str:
         return f"<EmailMessage id={self.id} to={self.to_address!r} status={self.status!r}>"

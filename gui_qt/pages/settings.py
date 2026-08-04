@@ -36,15 +36,19 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -68,6 +72,48 @@ from gui_qt.widgets import DataTable, LabeledEntry, Section, caption
 APPEARANCE_MODES: tuple[str, ...] = ("system", "light", "dark")
 APPEARANCE_LABELS: dict[str, str] = {"system": "系統", "light": "淺色", "dark": "深色"}
 APPEARANCE_REVERSE: dict[str, str] = {v: k for k, v in APPEARANCE_LABELS.items()}
+
+#: 排程的動作與頻率：鍵是寫進設定檔的值，值是介面上顯示的中文。
+#: 順序就是下拉選單的順序，所以第一個要是最常用的。
+SCHEDULE_ACTIONS: dict[str, str] = {
+    "crawl": "只爬取",
+    "send": "只寄信",
+    "crawl_and_send": "先爬取，再把名單寄出去",
+}
+SCHEDULE_MODES: dict[str, str] = {
+    "daily": "每天",
+    "monthly": "每個月",
+    "hourly": "每小時",
+    "interval": "每隔一段時間",
+}
+
+
+def _key_for(mapping: dict[str, str], label: str) -> str:
+    """從顯示標籤反查設定檔用的值。找不到就用第一個，不讓介面卡住。"""
+    for key, text in mapping.items():
+        if text == label:
+            return key
+    return next(iter(mapping))
+
+
+def _fill_checklist(widget: QListWidget, names: list[str], checked: set[str]) -> None:
+    """用勾選清單呈現「多選其中幾個」。"""
+    widget.clear()
+    for name in names:
+        item = QListWidgetItem(name)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(
+            Qt.CheckState.Checked if name in checked else Qt.CheckState.Unchecked
+        )
+        widget.addItem(item)
+
+
+def _checked_values(widget: QListWidget) -> list[str]:
+    return [
+        widget.item(index).text()
+        for index in range(widget.count())
+        if widget.item(index).checkState() == Qt.CheckState.Checked
+    ]
 
 
 class SettingsPage(BasePage):
@@ -134,6 +180,7 @@ class SettingsPage(BasePage):
         self._build_encryption_section()
         self._build_gmail_section()
         self._build_mailer_section()
+        self._build_scheduler_section()
         self._build_legal_section()
         self._build_backup_section()
         self._body_layout.addStretch(1)
@@ -277,6 +324,258 @@ class SettingsPage(BasePage):
 
         self._body_layout.addWidget(section)
 
+    # ------------------------------------------------------------- 排程
+
+    def _build_scheduler_section(self) -> None:
+        """自動排程：什麼時候、做什麼、對誰做。
+
+        欄位會依「動作」與「頻率」顯示或隱藏——一次把十幾個欄位全攤開，
+        使用者得自己判斷哪些跟目前的選擇有關；只留相關的，選什麼看到什麼。
+        """
+        section = Section("自動排程")
+
+        self.schedule_enabled_check = QCheckBox("啟用自動排程")
+        self.schedule_enabled_check.toggled.connect(self._update_schedule_visibility)
+        section.body_layout.addWidget(self.schedule_enabled_check)
+
+        # --- 做什麼 ---
+        action_row = QHBoxLayout()
+        action_row.addWidget(caption("要做什麼"))
+        self.schedule_action_combo = QComboBox()
+        for label in SCHEDULE_ACTIONS.values():
+            self.schedule_action_combo.addItem(label)
+        self.schedule_action_combo.currentTextChanged.connect(
+            lambda _: self._update_schedule_visibility()
+        )
+        action_row.addWidget(self.schedule_action_combo, 1)
+        action_row.addStretch(1)
+        section.body_layout.addLayout(action_row)
+
+        # --- 什麼時候 ---
+        when_row = QHBoxLayout()
+        when_row.addWidget(caption("多久一次"))
+        self.schedule_mode_combo = QComboBox()
+        for label in SCHEDULE_MODES.values():
+            self.schedule_mode_combo.addItem(label)
+        self.schedule_mode_combo.currentTextChanged.connect(
+            lambda _: self._update_schedule_visibility()
+        )
+        when_row.addWidget(self.schedule_mode_combo)
+
+        self.schedule_day_label = caption("每月")
+        when_row.addWidget(self.schedule_day_label)
+        self.schedule_day_spin = QSpinBox()
+        self.schedule_day_spin.setRange(1, 31)
+        self.schedule_day_spin.setSuffix(" 號")
+        theme.match_control_height(self.schedule_day_spin)
+        when_row.addWidget(self.schedule_day_spin)
+
+        self.schedule_at_label = caption("時間")
+        when_row.addWidget(self.schedule_at_label)
+        # 這裡用純 QLineEdit 而不是 LabeledEntry：後者會在輸入框上面多一行
+        # 說明文字，在這種橫排的一列裡會把高度撐高、跟旁邊的元件對不齊。
+        self.schedule_at_entry = QLineEdit()
+        self.schedule_at_entry.setPlaceholderText("HH:MM")
+        self.schedule_at_entry.setFixedWidth(theme.input_width(7))
+        when_row.addWidget(self.schedule_at_entry)
+
+        self.schedule_every_label = caption("每隔")
+        when_row.addWidget(self.schedule_every_label)
+        self.schedule_every_spin = QSpinBox()
+        self.schedule_every_spin.setRange(15, 10_080)
+        self.schedule_every_spin.setSuffix(" 分鐘")
+        theme.match_control_height(self.schedule_every_spin)
+        when_row.addWidget(self.schedule_every_spin)
+
+        when_row.addStretch(1)
+        section.body_layout.addLayout(when_row)
+
+        self.schedule_day_hint = caption(
+            "遇到沒有這一天的月份（例如二月的 31 號）會改在當月最後一天執行。"
+        )
+        section.body_layout.addWidget(self.schedule_day_hint)
+
+        # --- 爬取設定 ---
+        self.schedule_crawl_label = caption("要爬哪些來源（不勾＝全部已啟用的來源）")
+        section.body_layout.addWidget(self.schedule_crawl_label)
+        self.schedule_sources_list = QListWidget()
+        self.schedule_sources_list.setFixedHeight(theme.text_box_height(4))
+        section.body_layout.addWidget(self.schedule_sources_list)
+
+        self.schedule_verify_check = QCheckBox("爬完後自動驗證信箱")
+        section.body_layout.addWidget(self.schedule_verify_check)
+
+        # --- 寄信設定 ---
+        template_row = QHBoxLayout()
+        self.schedule_template_label = caption("郵件樣板")
+        template_row.addWidget(self.schedule_template_label)
+        self.schedule_template_combo = QComboBox()
+        template_row.addWidget(self.schedule_template_combo, 1)
+        template_row.addStretch(1)
+        section.body_layout.addLayout(template_row)
+
+        campaign_row = QHBoxLayout()
+        self.schedule_campaign_entry = LabeledEntry("活動名稱（會自動接上執行日期）")
+        campaign_row.addWidget(self.schedule_campaign_entry, 1)
+        self.schedule_batch_label = caption("單次最多")
+        campaign_row.addWidget(self.schedule_batch_label)
+        self.schedule_batch_spin = QSpinBox()
+        self.schedule_batch_spin.setRange(1, 2000)
+        self.schedule_batch_spin.setSuffix(" 封")
+        theme.match_control_height(self.schedule_batch_spin)
+        campaign_row.addWidget(self.schedule_batch_spin, 0, Qt.AlignmentFlag.AlignBottom)
+        section.body_layout.addLayout(campaign_row)
+
+        self.schedule_attachment_label = caption("隨信附件")
+        section.body_layout.addWidget(self.schedule_attachment_label)
+        self.schedule_attachments_list = QListWidget()
+        self.schedule_attachments_list.setFixedHeight(theme.text_box_height(3))
+        section.body_layout.addWidget(self.schedule_attachments_list)
+
+        # --- 共用 ---
+        self.schedule_catchup_check = QCheckBox(
+            "錯過的排程在下次開啟程式時補跑一次"
+        )
+        section.body_layout.addWidget(self.schedule_catchup_check)
+
+        save_row = QHBoxLayout()
+        self.schedule_status_label = QLabel("")
+        self.schedule_status_label.setObjectName("MutedLabel")
+        self.schedule_status_label.setWordWrap(True)
+        save_row.addWidget(self.schedule_status_label, 1)
+        save_schedule_button = QPushButton("儲存排程")
+        save_schedule_button.clicked.connect(self._save_scheduler)
+        save_row.addWidget(save_schedule_button, 0, Qt.AlignmentFlag.AlignBottom)
+        section.body_layout.addLayout(save_row)
+
+        note = QLabel(
+            "排程只在本程式開啟時執行——這是桌面程式，沒有背景服務。要無人值守"
+            "請改用命令列的 python main.py schedule。"
+        )
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
+
+        self._body_layout.addWidget(section)
+
+    def _update_schedule_visibility(self) -> None:
+        """只顯示跟目前選擇有關的欄位。"""
+        enabled = self.schedule_enabled_check.isChecked()
+        action = _key_for(SCHEDULE_ACTIONS, self.schedule_action_combo.currentText())
+        mode = _key_for(SCHEDULE_MODES, self.schedule_mode_combo.currentText())
+
+        crawls = action in ("crawl", "crawl_and_send")
+        sends = action in ("send", "crawl_and_send")
+
+        for widget in (
+            self.schedule_action_combo,
+            self.schedule_mode_combo,
+            self.schedule_catchup_check,
+        ):
+            widget.setEnabled(enabled)
+
+        # 時間欄位：每天/每月要時間，每隔要分鐘數，每小時什麼都不用。
+        wants_clock = mode in ("daily", "monthly")
+        for widget in (self.schedule_at_label, self.schedule_at_entry):
+            widget.setVisible(enabled and wants_clock)
+        for widget in (self.schedule_day_label, self.schedule_day_spin, self.schedule_day_hint):
+            widget.setVisible(enabled and mode == "monthly")
+        for widget in (self.schedule_every_label, self.schedule_every_spin):
+            widget.setVisible(enabled and mode == "interval")
+
+        for widget in (
+            self.schedule_crawl_label,
+            self.schedule_sources_list,
+            self.schedule_verify_check,
+        ):
+            widget.setVisible(enabled and crawls)
+
+        for widget in (
+            self.schedule_template_label,
+            self.schedule_template_combo,
+            self.schedule_campaign_entry,
+            self.schedule_batch_label,
+            self.schedule_batch_spin,
+            self.schedule_attachment_label,
+            self.schedule_attachments_list,
+        ):
+            widget.setVisible(enabled and sends)
+
+    def _load_scheduler(self) -> None:
+        """把設定填進表單。"""
+        try:
+            values = self.controller.scheduler_settings()
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        self.schedule_enabled_check.setChecked(bool(values["enabled"]))
+        self.schedule_action_combo.setCurrentText(
+            SCHEDULE_ACTIONS.get(values["action"], SCHEDULE_ACTIONS["crawl"])
+        )
+        self.schedule_mode_combo.setCurrentText(
+            SCHEDULE_MODES.get(values["mode"], SCHEDULE_MODES["daily"])
+        )
+        self.schedule_at_entry.setText(values["at"])
+        self.schedule_every_spin.setValue(int(values["every_minutes"]))
+        self.schedule_day_spin.setValue(int(values["day_of_month"]))
+        self.schedule_verify_check.setChecked(bool(values["verify_after_crawl"]))
+        self.schedule_catchup_check.setChecked(bool(values["catch_up"]))
+        self.schedule_campaign_entry.set(values["mail_campaign"])
+        self.schedule_batch_spin.setValue(int(values["mail_batch_limit"]))
+
+        _fill_checklist(
+            self.schedule_sources_list,
+            self.controller.crawl_source_names(),
+            set(values["sources"]),
+        )
+        _fill_checklist(
+            self.schedule_attachments_list,
+            [item.name for item in self.mail_controller.attachments()],
+            set(values["mail_attachments"]),
+        )
+
+        templates = self.controller.mail_template_names()
+        self.schedule_template_combo.clear()
+        self.schedule_template_combo.addItems(templates or ["（尚未建立任何樣板）"])
+        if values["mail_template"] in templates:
+            self.schedule_template_combo.setCurrentText(values["mail_template"])
+
+        self.schedule_status_label.setText(self.controller.scheduler_next_run_text())
+        self._update_schedule_visibility()
+
+    def _save_scheduler(self) -> None:
+        action = _key_for(SCHEDULE_ACTIONS, self.schedule_action_combo.currentText())
+        mode = _key_for(SCHEDULE_MODES, self.schedule_mode_combo.currentText())
+
+        values = {
+            "enabled": self.schedule_enabled_check.isChecked(),
+            "action": action,
+            "mode": mode,
+            "at": self.schedule_at_entry.text().strip() or "03:00",
+            "every_minutes": self.schedule_every_spin.value(),
+            "day_of_month": self.schedule_day_spin.value(),
+            "sources": _checked_values(self.schedule_sources_list),
+            "verify_after_crawl": self.schedule_verify_check.isChecked(),
+            "catch_up": self.schedule_catchup_check.isChecked(),
+            "mail_campaign": self.schedule_campaign_entry.get().strip() or "排程寄送",
+            "mail_batch_limit": self.schedule_batch_spin.value(),
+            "mail_attachments": _checked_values(self.schedule_attachments_list),
+        }
+        template = self.schedule_template_combo.currentText().strip()
+        values["mail_template"] = (
+            template if template in self.controller.mail_template_names() else ""
+        )
+
+        try:
+            self.controller.save_scheduler_settings(values)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        self.schedule_status_label.setText(self.controller.scheduler_next_run_text())
+        self.status("排程設定已儲存，重新啟動程式後生效", "success")
+
     def _build_legal_section(self) -> None:
         """使用條款與免責聲明。文字與 README 共用 :mod:`core.legal`。"""
         section = Section(legal.TITLE)
@@ -354,6 +653,9 @@ class SettingsPage(BasePage):
         self._apply_gmail_status(data["address_status"], data["password_status"])
         self.daily_limit_entry.set(str(data["daily_limit"]))
         self._apply_backups(data["backups"])
+        # 排程表單在 UI 執行緒直接讀設定就好——都是已經載入的設定值與檔名
+        # 清單，沒有資料庫查詢，不值得再多開一個背景工作。
+        self._load_scheduler()
 
     def _handle_refresh_error(self, exc: Exception) -> None:
         self.report_error(exc)

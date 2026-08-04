@@ -49,9 +49,12 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -88,6 +91,9 @@ class MailPage(BasePage):
         #: 正在用程式（而不是使用者操作）改開關的勾選狀態時設為 True，
         #: 避免 toggled signal 誤觸發「儲存設定」或彈出確認對話框。
         self._updating_switches = False
+        #: 目前勾選的附件總量有沒有超過上限。超過就擋住「產生名單」——
+        #: 讓使用者在按下去之前就知道，而不是跑完名單才失敗。
+        self._attachments_ok = True
 
         # 三個背景工作對應三種會碰資料庫／會跑一段時間的動作，理由見檔案
         # 開頭的說明；名稱刻意跟 Tk 版 self.build_task/self.send_task 一致。
@@ -252,6 +258,159 @@ class MailPage(BasePage):
 
         self._placeholder_tokens: dict[str, str] = {}
         self._build_placeholder_menu()
+
+        self._build_attachments_row(section)
+
+    # ------------------------------------------------------------- 附件
+
+    def _build_attachments_row(self, section: Section) -> None:
+        """附件放在「郵件樣板」面板底部——它跟主旨、內文一樣屬於「要寄什麼」。
+
+        勾選式清單而不是「已加入就一定會寄」：附件資料夾是長期累積的（型錄、
+        報價單、公司簡介），每次活動只挑其中幾個，不該為了這次不寄就把檔案
+        刪掉。
+        """
+        header = QHBoxLayout()
+        header.addWidget(caption("附件"))
+        header.addStretch(1)
+
+        add_button = QPushButton("加入附件")
+        add_button.clicked.connect(self._add_attachment)
+        header.addWidget(add_button)
+
+        self.remove_attachment_button = QPushButton("移除")
+        self.remove_attachment_button.setEnabled(False)
+        self.remove_attachment_button.clicked.connect(self._remove_attachment)
+        header.addWidget(self.remove_attachment_button)
+        section.body_layout.addLayout(header)
+
+        self.attachment_list = QListWidget()
+        self.attachment_list.setFixedHeight(theme.text_box_height(4))
+        self.attachment_list.itemChanged.connect(self._on_attachment_checked)
+        self.attachment_list.currentItemChanged.connect(
+            lambda current, _previous: self.remove_attachment_button.setEnabled(
+                current is not None
+            )
+        )
+        section.body_layout.addWidget(self.attachment_list)
+
+        self.attachment_summary = caption("")
+        section.body_layout.addWidget(self.attachment_summary)
+        self._refresh_attachments()
+
+    def _refresh_attachments(self, keep_checked: set[str] | None = None) -> None:
+        """重新列出附件資料夾的內容，保留原本的勾選狀態。"""
+        checked = keep_checked if keep_checked is not None else set(self.selected_attachments())
+
+        try:
+            stored = self.controller.attachments()
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        # 重填期間 itemChanged 會連環觸發，先擋掉，不然每加一列就重算一次總量。
+        self.attachment_list.blockSignals(True)
+        self.attachment_list.clear()
+        for item_data in stored:
+            item = QListWidgetItem(f"{item_data.name}（{item_data.human_size}）")
+            item.setData(Qt.ItemDataRole.UserRole, item_data.name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if item_data.name in checked
+                else Qt.CheckState.Unchecked
+            )
+            self.attachment_list.addItem(item)
+        self.attachment_list.blockSignals(False)
+
+        self._update_attachment_summary()
+
+    def selected_attachments(self) -> list[str]:
+        """目前打勾的附件檔名。"""
+        names: list[str] = []
+        for index in range(self.attachment_list.count()):
+            item = self.attachment_list.item(index)
+            if item.checkState() == Qt.CheckState.Checked:
+                names.append(item.data(Qt.ItemDataRole.UserRole))
+        return names
+
+    def _update_attachment_summary(self) -> None:
+        from gmail.attachments import human_size
+
+        names = self.selected_attachments()
+        limit = self.controller.attachment_limit_bytes()
+        if not names:
+            self.attachment_summary.setText(
+                f"未選附件。單封信所有附件合計上限 {human_size(limit)}。"
+            )
+            self._attachments_ok = True
+            return
+
+        total = 0
+        for index in range(self.attachment_list.count()):
+            item = self.attachment_list.item(index)
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            # 大小已經寫在顯示文字裡，但那是給人看的；真的要算總量還是要問檔案。
+            try:
+                from gmail.attachments import resolve
+
+                total += resolve(item.data(Qt.ItemDataRole.UserRole)).stat().st_size
+            except (OSError, CRMError):
+                continue
+
+        self._attachments_ok = total <= limit
+        over = "" if self._attachments_ok else "　超過上限，請取消勾選幾個檔案。"
+        self.attachment_summary.setText(
+            f"已選 {len(names)} 個附件，合計 {human_size(total)} / {human_size(limit)}。{over}"
+        )
+
+    def _on_attachment_checked(self, _item: object) -> None:
+        self._update_attachment_summary()
+
+    def _add_attachment(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "選擇要附加的檔案", "", "所有檔案 (*.*)")
+        if not paths:
+            return
+
+        checked = set(self.selected_attachments())
+        added = 0
+        for path in paths:
+            try:
+                stored = self.controller.add_attachment(path)
+            except CRMError as exc:
+                self.report_error(exc)
+                continue
+            checked.add(stored.name)      # 剛加進來的預設就勾選，符合直覺
+            added += 1
+
+        self._refresh_attachments(keep_checked=checked)
+        if added:
+            self.status(f"已加入 {added} 個附件", "success")
+
+    def _remove_attachment(self) -> None:
+        item = self.attachment_list.currentItem()
+        if item is None:
+            return
+        name = item.data(Qt.ItemDataRole.UserRole)
+
+        confirm = QMessageBox.question(
+            self,
+            "移除附件",
+            f"要把「{name}」從附件資料夾刪除嗎？\n檔案會真的被刪掉，這個動作無法復原。",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.controller.remove_attachment(name)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        checked = set(self.selected_attachments()) - {name}
+        self._refresh_attachments(keep_checked=checked)
+        self.status(f"已移除附件 {name}", "success")
 
     def _build_placeholder_menu(self) -> None:
         try:
@@ -637,14 +796,20 @@ class MailPage(BasePage):
         if not template_name:
             self.status("請先選擇一個樣板", "error")
             return
+        if not self._attachments_ok:
+            self.status("附件總量超過上限，請先取消勾選幾個檔案", "error")
+            return
         campaign_name = self.campaign_name_entry.get() or template_name
         criteria = self._current_filter()
+        attachments = self.selected_attachments()
 
         self.build_plan_button.setEnabled(False)
         self.app.status_bar.start_progress()
         self.status("正在產生寄送名單...", "normal")
 
-        self.build_task.start(criteria, template_name, campaign_name)
+        self.build_task.start(
+            criteria, template_name, campaign_name, attachments=attachments
+        )
 
     def _on_build_plan_done(self, plan: Any) -> None:
         self.plan = plan
@@ -674,6 +839,9 @@ class MailPage(BasePage):
         if reason_summary:
             summary += f"（{reason_summary}）"
         summary += f" 今日寄送額度剩餘 {plan.daily_remaining} 封。"
+        # 附件寫進名單摘要，使用者按「開始寄送」前看得到自己到底要寄出什麼。
+        if getattr(plan, "attachments", None):
+            summary += f" 附件：{('、'.join(plan.attachments))}。"
         self.summary_label.setText(summary)
 
         self._update_action_buttons()

@@ -452,3 +452,62 @@ def test_sender_send_sets_utf8_and_list_unsubscribe(mail_config, monkeypatch):
     assert payload.get_content().strip() == Msg.body
     assert payload.get_content_charset() == "utf-8"
     assert FakeSMTP.instances[0].quit_called
+
+
+# ------------------------------------------------------------------- 附件
+
+
+class _Msg:
+    to_address = "target@example.com"
+    subject = "帶附件的信"
+    body = "內文"
+
+
+def test_send_attaches_files_as_real_attachments(mail_config, monkeypatch):
+    """收件者要看得到迴紋針。
+
+    內文圖片是 add_related 掛在 HTML 部分裡、用 cid: 引用，不會出現在附件
+    列表；一般附件必須掛在最外層才看得到，這兩者不能搞混。
+    """
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", FakeSMTP)
+
+    with SmtpSender(mail_config) as sender:
+        sender.send(
+            _Msg(),
+            [
+                ("型錄.pdf", b"%PDF-1.4 fake", "application/pdf"),
+                ("報價單.xlsx", b"fake xlsx", "application/vnd.ms-excel"),
+            ],
+        )
+
+    sent = FakeSMTP.instances[0].sent_messages[0]
+    attached = {
+        part.get_filename(): part.get_payload(decode=True)
+        for part in sent.iter_attachments()
+    }
+    assert set(attached) == {"型錄.pdf", "報價單.xlsx"}
+    assert attached["型錄.pdf"] == b"%PDF-1.4 fake"
+    # 內文仍然要在，附件不能把本文擠掉。
+    assert sent.get_body(preferencelist=("plain",)).get_content().strip() == "內文"
+
+
+def test_send_without_attachments_produces_no_attachment_parts(mail_config, monkeypatch):
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", FakeSMTP)
+
+    with SmtpSender(mail_config) as sender:
+        sender.send(_Msg())
+
+    sent = FakeSMTP.instances[0].sent_messages[0]
+    assert list(sent.iter_attachments()) == []
+
+
+def test_unknown_mime_type_falls_back_to_octet_stream(mail_config, monkeypatch):
+    """副檔名認不得也要寄得出去，不能整批中斷。"""
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", FakeSMTP)
+
+    with SmtpSender(mail_config) as sender:
+        sender.send(_Msg(), [("怪檔.qwerty", b"data", "application/octet-stream")])
+
+    part = next(iter(FakeSMTP.instances[0].sent_messages[0].iter_attachments()))
+    assert part.get_filename() == "怪檔.qwerty"
+    assert part.get_content_type() == "application/octet-stream"

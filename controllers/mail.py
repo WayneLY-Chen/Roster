@@ -62,6 +62,7 @@ class MailController:
         template_name: str,
         campaign_name: str,
         *,
+        attachments: list[str] | None = None,
         report: Callable[[Any], None] | None = None,
         cancel_event: Any = None,
     ) -> CampaignPlan:
@@ -69,9 +70,39 @@ class MailController:
         if not (template_name or "").strip():
             raise CRMError("請先選擇一個樣板。")
         try:
-            return campaign_module.build_plan(criteria, template_name, campaign_name, self.config)
+            return campaign_module.build_plan(
+                criteria, template_name, campaign_name, self.config, attachments
+            )
         except CRMError as exc:
             raise CRMError(f"產生寄送名單失敗：{exc}") from exc
+
+    # ------------------------------------------------------------- 附件
+
+    def attachments(self) -> list[Any]:
+        """``attachments/`` 裡現有的檔案。"""
+        from gmail.attachments import list_stored
+
+        return list_stored(self.config)
+
+    def add_attachment(self, source: str) -> Any:
+        """把使用者選的檔案複製進附件資料夾。"""
+        from gmail.attachments import store
+
+        try:
+            return store(source, self.config)
+        except CRMError as exc:
+            raise CRMError(f"加入附件失敗：{exc}") from exc
+
+    def remove_attachment(self, name: str) -> None:
+        from gmail.attachments import remove
+
+        try:
+            remove(name, self.config)
+        except CRMError as exc:
+            raise CRMError(f"移除附件失敗：{exc}") from exc
+
+    def attachment_limit_bytes(self) -> int:
+        return self.config.mailer.max_attachment_bytes
 
     def preview_first(self, plan: CampaignPlan) -> tuple[str, str] | None:
         """Subject and full body (with the unsubscribe note) for the first

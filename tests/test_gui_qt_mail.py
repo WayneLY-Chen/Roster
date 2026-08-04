@@ -395,6 +395,169 @@ def test_disabling_dry_run_with_confirmation_calls_controller(
 # ---------------------------------------------------------------------- 預覽
 
 
+# ------------------------------------------------------------------ 附件
+
+
+def _source_file(tmp_path, name: str, size: int = 20):
+    path = tmp_path / "sources" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    return str(path)
+
+
+def _built_page(qt_app):
+    page = MailPage(_FakeApp())
+    page.ensure_built()
+    return page
+
+
+def test_added_attachment_appears_checked(qt_app, db_session, mail_config, tmp_path, monkeypatch):
+    """剛加進來的附件預設就勾選——使用者剛選了它，顯然是要寄的。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    page = _built_page(qt_app)
+    source = _source_file(tmp_path, "型錄.pdf", 100)
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileNames", staticmethod(lambda *a, **k: ([source], ""))
+    )
+
+    page._add_attachment()
+
+    assert page.attachment_list.count() == 1
+    assert page.selected_attachments() == ["型錄.pdf"]
+    assert "型錄.pdf" in page.attachment_list.item(0).text()
+    assert "100 B" in page.attachment_list.item(0).text()
+
+
+def test_unchecking_excludes_the_file_from_the_campaign(
+    qt_app, db_session, mail_config, tmp_path, monkeypatch
+):
+    """附件資料夾是長期累積的，這次不寄不代表要刪掉。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QFileDialog
+
+    page = _built_page(qt_app)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: ([_source_file(tmp_path, "簡介.pdf")], "")),
+    )
+    page._add_attachment()
+
+    page.attachment_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+
+    assert page.selected_attachments() == []
+    # 檔案本身還在，只是這次不寄。
+    assert page.attachment_list.count() == 1
+
+
+def test_build_plan_is_blocked_when_attachments_exceed_the_limit(
+    qt_app, db_session, mail_config, tmp_path, monkeypatch
+):
+    """超過上限要在按「產生名單」的當下就擋，不能等到寄出去才失敗。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    page = _built_page(qt_app)
+    monkeypatch.setattr(page.controller, "attachment_limit_bytes", lambda: 50)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: ([_source_file(tmp_path, "大檔.bin", 40)], "")),
+    )
+    page._add_attachment()
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: ([_source_file(tmp_path, "大檔2.bin", 40)], "")),
+    )
+    page._add_attachment()
+
+    assert page._attachments_ok is False
+    assert "超過上限" in page.attachment_summary.text()
+
+    page.template_combo.addItem("t")
+    page.template_combo.setCurrentText("t")
+    page._start_build_plan()
+
+    assert page.app.messages[-1][1] == "error"
+    assert page.build_task.running is False
+
+
+def test_removing_an_attachment_deletes_the_file(
+    qt_app, db_session, mail_config, tmp_path, monkeypatch
+):
+    from PySide6.QtWidgets import QFileDialog
+
+    page = _built_page(qt_app)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: ([_source_file(tmp_path, "刪我.pdf")], "")),
+    )
+    page._add_attachment()
+    page.attachment_list.setCurrentRow(0)
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    page._remove_attachment()
+
+    assert page.attachment_list.count() == 0
+    assert not (mail_config.mailer.resolved_attachments_dir / "刪我.pdf").exists()
+
+
+def test_declining_the_confirmation_keeps_the_file(
+    qt_app, db_session, mail_config, tmp_path, monkeypatch
+):
+    """刪檔是不可復原的，按「否」就必須什麼都不做。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    page = _built_page(qt_app)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: ([_source_file(tmp_path, "留著.pdf")], "")),
+    )
+    page._add_attachment()
+    page.attachment_list.setCurrentRow(0)
+
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+    )
+    page._remove_attachment()
+
+    assert page.attachment_list.count() == 1
+    assert (mail_config.mailer.resolved_attachments_dir / "留著.pdf").exists()
+
+
+def test_plan_carries_the_checked_attachments(
+    qt_app, db_session, mail_config, tmp_path, monkeypatch
+):
+    """真正要保證的：勾選的附件會一路帶到寄送計畫裡。"""
+    from PySide6.QtWidgets import QFileDialog
+
+    _save_template(mail_config)
+    _make_company(db_session)
+
+    page = _built_page(qt_app)
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: ([_source_file(tmp_path, "報價單.xlsx")], "")),
+    )
+    page._add_attachment()
+
+    page.template_combo.setCurrentText("test-template")
+    page._start_build_plan()
+    _wait_for(qt_app, page.build_task)
+
+    assert page.plan.attachments == ["報價單.xlsx"]
+    assert "報價單.xlsx" in page.summary_label.text()
+
+
 def test_preview_dialog_shows_subject_and_renders_body(qt_app, db_session, mail_config):
     _save_template(mail_config)
     _make_company(db_session)

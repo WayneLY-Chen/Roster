@@ -1,9 +1,18 @@
-"""Unattended crawl scheduling.
+"""Unattended scheduling: crawling, sending, or both.
+
+類別名稱仍叫 ``CrawlScheduler`` 是歷史因素——最初只會爬取，後來加上排程
+寄信。實際做什麼由 ``scheduler.action`` 決定（``crawl`` / ``send`` /
+``crawl_and_send``）。
 
 This is a desktop application, not a service. There is no daemon, so a job can
 only run while the window is open -- the scheduler says so plainly rather than
 pretending otherwise, and :attr:`CrawlScheduler.status_text` always reports the
 next run in terms the user can check against a clock.
+
+排程寄信走的是跟郵件頁完全相同的 ``build_plan``/``send_campaign``，所以每日
+上限、重複寄送間隔、只寄已驗證信箱、強制附上退訂聲明這些防護不會因為「是
+排程跑的」而被繞過。另外還有一層 ``mail_batch_limit``：無人看顧的批次寧可
+少寄，半夜三點寄錯沒有人會即時發現。
 
 The worker thread wakes once a second, which is cheap and keeps ``stop()``
 responsive; it never spins on the database.
@@ -15,6 +24,7 @@ import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from calendar import monthrange
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 
@@ -99,6 +109,39 @@ def parse_at(value: str) -> dtime:
     return dtime(hour=int(hour), minute=int(minute or 0))
 
 
+def _clamp_day(year: int, month: int, day: int) -> int:
+    """把「幾號」夾到該月真的有的天數。
+
+    設定「每月 31 號」的人要的是月底。二月沒有 31 號時整個月跳過不執行，
+    絕對不是他的本意——所以退到當月最後一天。
+    """
+    return min(day, monthrange(year, month)[1])
+
+
+def _monthly_due(reference: datetime, settings: SchedulerSection) -> datetime:
+    """指定日期的下一個執行時間點。"""
+    target = parse_at(settings.at)
+    day = _clamp_day(reference.year, reference.month, settings.day_of_month)
+    due = reference.replace(
+        day=day, hour=target.hour, minute=target.minute, second=0, microsecond=0
+    )
+    if due > reference:
+        return due
+
+    # 這個月的時間已經過了，往下一個月推。
+    year = reference.year + (reference.month // 12)
+    month = reference.month % 12 + 1
+    return reference.replace(
+        year=year,
+        month=month,
+        day=_clamp_day(year, month, settings.day_of_month),
+        hour=target.hour,
+        minute=target.minute,
+        second=0,
+        microsecond=0,
+    )
+
+
 def next_run_after(
     reference: datetime, settings: SchedulerSection, last_run: datetime | None = None
 ) -> datetime:
@@ -111,6 +154,9 @@ def next_run_after(
     if settings.mode == "hourly":
         due = (reference + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         return due
+
+    if settings.mode == "monthly":
+        return _monthly_due(reference, settings)
 
     target = parse_at(settings.at)
     due = reference.replace(
@@ -139,6 +185,14 @@ def is_overdue(
         return reference - last_run >= timedelta(minutes=settings.every_minutes)
     if settings.mode == "hourly":
         return reference - last_run >= timedelta(hours=1)
+
+    if settings.mode == "monthly":
+        target = parse_at(settings.at)
+        day = _clamp_day(reference.year, reference.month, settings.day_of_month)
+        due_this_month = reference.replace(
+            day=day, hour=target.hour, minute=target.minute, second=0, microsecond=0
+        )
+        return reference >= due_this_month > last_run
 
     target = parse_at(settings.at)
     due_today = reference.replace(
@@ -177,6 +231,15 @@ class CrawlScheduler:
         return self._next_run
 
     @property
+    def action_text(self) -> str:
+        """這個排程會做什麼，用中文講一遍。"""
+        return {
+            "crawl": "爬取",
+            "send": "寄信",
+            "crawl_and_send": "爬取後寄信",
+        }.get(self.settings.action, self.settings.action)
+
+    @property
     def status_text(self) -> str:
         """One line for the Settings page. Never says "on" when it is not."""
         if not self.settings.enabled:
@@ -184,10 +247,13 @@ class CrawlScheduler:
         if not self.running:
             return "排程已設定，但尚未啟動"
         if self._running_job:
-            return "排程任務執行中…"
+            return f"排程任務執行中（{self.action_text}）…"
         if self._next_run is None:
             return "排程執行中，正在計算下次時間"
-        return f"下次執行：{self._next_run:%Y-%m-%d %H:%M}（僅在本程式開啟時執行）"
+        return (
+            f"下次{self.action_text}：{self._next_run:%Y-%m-%d %H:%M}"
+            "（僅在本程式開啟時執行）"
+        )
 
     def start(self) -> bool:
         """Start the timer thread. Returns False when scheduling is disabled."""
@@ -247,16 +313,61 @@ class CrawlScheduler:
                 )
                 log.info("下次排程時間：{:%Y-%m-%d %H:%M}", self._next_run)
 
+    def _crawl_targets(self) -> list[str]:
+        return self.settings.sources or [
+            s.name for s in self.config.crawler.enabled_sources()
+        ]
+
+    def _send_mail(self) -> int:
+        """依設定的樣板寄出一批信，回傳寄出的封數。
+
+        走的是跟郵件頁完全相同的 ``build_plan`` / ``send_campaign``，所以
+        每日上限、重複寄送間隔、只寄已驗證信箱、退訂聲明這些防護一個都不會
+        因為「是排程跑的」而被繞過。
+        """
+        from core.schemas import CompanyFilter
+        from gmail.campaign import build_plan, send_campaign
+
+        settings = self.settings
+        template = settings.mail_template.strip()
+        if not template:
+            raise ValueError("排程設定要寄信，但沒有指定郵件樣板")
+
+        campaign_name = f"{settings.mail_campaign}-{datetime.now():%Y%m%d}"
+        plan = build_plan(
+            CompanyFilter(),
+            template,
+            campaign_name,
+            self.config,
+            settings.mail_attachments,
+        )
+
+        # 排程是無人看顧的，額外套一層單次上限。半夜跑掉的批次沒有人會即時
+        # 發現，所以這裡寧可少寄、下次再寄。
+        sendable = [r for r in plan.recipients if r.will_send]
+        if len(sendable) > settings.mail_batch_limit:
+            log.info(
+                "排程寄信：可寄 {} 封，依單次上限只寄 {} 封",
+                len(sendable), settings.mail_batch_limit,
+            )
+            keep = set(id(r) for r in sendable[: settings.mail_batch_limit])
+            for recipient in plan.recipients:
+                if recipient.will_send and id(recipient) not in keep:
+                    recipient.will_send = False
+            plan.sendable = min(plan.sendable, settings.mail_batch_limit)
+
+        result = send_campaign(plan, self.config, cancel_event=self._job_cancel)
+        log.info("排程寄信完成：寄出 {}，失敗 {}", result.sent, result.failed)
+        return result.sent
+
     def _run_job(self) -> None:
-        """One scheduled pass: crawl the configured sources, then verify."""
+        """One scheduled pass. 依 ``action`` 決定爬取、寄信，或兩者都做。"""
         if self._running_job:
             log.warning("上一次排程任務尚未結束，略過這一次")
             return
 
-        targets = self.settings.sources or [
-            s.name for s in self.config.crawler.enabled_sources()
-        ]
-        if not targets:
+        targets = self._crawl_targets() if self.settings.crawls else []
+        if self.settings.crawls and not targets:
             # Nothing to do is not a successful run: recording it as one would
             # move last_run forward and stop catch_up from ever firing.
             log.warning("排程沒有可執行的來源，這次不算執行")
@@ -268,19 +379,25 @@ class CrawlScheduler:
         error: str | None = None
 
         try:
-            from crawler.pipeline import CrawlPipeline
+            if self.settings.crawls:
+                from crawler.pipeline import CrawlPipeline
 
-            log.info("排程任務開始，來源：{}", ", ".join(targets))
-            with CrawlPipeline(self.config) as pipeline:
-                for name in targets:
-                    if self._stop.is_set():
-                        break
-                    summaries.append(
-                        pipeline.run_source(name, cancel_event=self._job_cancel)
-                    )
+                log.info("排程任務開始，來源：{}", ", ".join(targets))
+                with CrawlPipeline(self.config) as pipeline:
+                    for name in targets:
+                        if self._stop.is_set():
+                            break
+                        summaries.append(
+                            pipeline.run_source(name, cancel_event=self._job_cancel)
+                        )
 
-            if self.settings.verify_after_crawl and not self._stop.is_set():
-                self._verify()
+                if self.settings.verify_after_crawl and not self._stop.is_set():
+                    self._verify()
+
+            # 寄信排在爬取之後：crawl_and_send 的用意就是「把剛收集到的名單
+            # 寄出去」，順序顛倒的話這次寄的會是上一輪的資料。
+            if self.settings.sends_mail and not self._stop.is_set():
+                self._send_mail()
 
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"

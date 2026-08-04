@@ -58,6 +58,9 @@ class CampaignPlan:
     skipped: int
     skip_counts: dict[str, int]
     daily_remaining: int
+    #: 附件檔名（位於 ``attachments/``）。整個活動共用同一組——同一批開發信
+    #: 帶的型錄或報價單對每個收件者都一樣，沒有理由讓它變成每人不同。
+    attachments: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -119,11 +122,22 @@ def build_plan(
     template_name: str,
     campaign_name: str,
     config: AppConfig | None = None,
+    attachments: list[str] | None = None,
 ) -> CampaignPlan:
-    """Decide who would be emailed, without sending anything or touching SMTP."""
+    """Decide who would be emailed, without sending anything or touching SMTP.
+
+    ``attachments`` 在這裡就會驗證總大小與檔案是否存在——附件超過上限或檔案
+    不見，要在使用者按「預覽」時就知道，而不是按下「開始寄送」之後才炸。
+    """
     config = config or get_config()
     mailer = config.mailer
     template = load_template(template_name, config)
+
+    attachment_names = list(attachments or [])
+    if attachment_names:
+        from gmail.attachments import check_total_size
+
+        check_total_size(attachment_names, config)
 
     resend_cutoff = now() - timedelta(days=mailer.resend_after_days)
 
@@ -183,6 +197,7 @@ def build_plan(
         skipped=len(recipients) - sendable,
         skip_counts=skip_counts,
         daily_remaining=max(remaining_today - sendable, 0),
+        attachments=attachment_names,
     )
 
 
@@ -236,6 +251,16 @@ def send_campaign(
     to_send = [r for r in plan.recipients if r.will_send]
     already_skipped = len(plan.recipients) - len(to_send)
 
+    # 附件讀一次，整批共用。放在連線之前：檔案不見或超過上限要在還沒開始寄
+    # 的時候就中止，不要寄了一半才發現。
+    loaded_attachments: list[tuple[str, bytes, str]] = []
+    if plan.attachments and to_send and not mailer.dry_run:
+        from gmail.attachments import load_for_sending
+
+        loaded_attachments = load_for_sending(plan.attachments, config)
+
+    attachment_record = "\n".join(plan.attachments) if plan.attachments else None
+
     sender: SmtpSender | None = None
     if not mailer.dry_run and to_send:
         sender = SmtpSender(config)
@@ -256,6 +281,7 @@ def send_campaign(
                     to_address=recipient.to_address,
                     subject=recipient.subject,
                     body=body,
+                    attachments=attachment_record,
                     status=EmailStatus.PENDING.value,
                 )
                 session.add(message)
@@ -268,7 +294,7 @@ def send_campaign(
             if not mailer.dry_run:
                 try:
                     assert sender is not None
-                    sender.send(message)
+                    sender.send(message, loaded_attachments)
                 except GmailError as exc:
                     status = EmailStatus.FAILED
                     error_text = str(exc)

@@ -461,6 +461,77 @@ class SettingsController:
 
         return DEFAULT_CONFIG_PATH
 
+    # ------------------------------------------------------------- 排程
+
+    def scheduler_settings(self) -> dict[str, Any]:
+        """設定頁那張排程表單目前該顯示的值。"""
+        settings = self.config.scheduler
+        return {
+            "enabled": settings.enabled,
+            "action": settings.action,
+            "mode": settings.mode,
+            "at": settings.at,
+            "every_minutes": settings.every_minutes,
+            "day_of_month": settings.day_of_month,
+            "sources": list(settings.sources),
+            "verify_after_crawl": settings.verify_after_crawl,
+            "catch_up": settings.catch_up,
+            "mail_template": settings.mail_template,
+            "mail_campaign": settings.mail_campaign,
+            "mail_attachments": list(settings.mail_attachments),
+            "mail_batch_limit": settings.mail_batch_limit,
+        }
+
+    def save_scheduler_settings(self, values: dict[str, Any]) -> None:
+        """整組一起存。
+
+        逐一儲存會失敗：``action`` 設成寄信時 ``mail_template`` 就變成必填，
+        先寫哪一個都會在中途產生不合法的設定而被回滾。
+        """
+        from core.config import save_user_settings
+
+        try:
+            save_user_settings("scheduler", values)
+        except CRMError as exc:
+            raise CRMError(f"儲存排程設定失敗：{exc}") from exc
+        except ValueError as exc:
+            # pydantic 的驗證錯誤（例如要寄信卻沒選樣板）訊息很長，只留重點。
+            raise CRMError(f"排程設定不合法：{exc}") from exc
+        self.config = get_config()
+
+    def scheduler_next_run_text(self) -> str:
+        """下次執行時間的說明文字，不啟動排程執行緒也算得出來。"""
+        from datetime import datetime
+
+        from core.scheduler import load_state, next_run_after
+
+        settings = self.config.scheduler
+        if not settings.enabled:
+            return "排程已關閉。"
+        state = load_state(self.config)
+        due = next_run_after(datetime.now(), settings, state.last_run)
+        action = {
+            "crawl": "爬取",
+            "send": "寄信",
+            "crawl_and_send": "爬取後寄信",
+        }.get(settings.action, settings.action)
+        return (
+            f"下次{action}：{due:%Y-%m-%d %H:%M}"
+            "（排程只在本程式開啟時執行，關掉視窗就不會跑）"
+        )
+
+    def crawl_source_names(self) -> list[str]:
+        """可以排程的來源名稱。"""
+        return [source.name for source in self.config.crawler.sources]
+
+    def mail_template_names(self) -> list[str]:
+        from gmail.templates import list_templates
+
+        try:
+            return list_templates(self.config)
+        except CRMError:
+            return []
+
     def backups(self) -> list[BackupFile]:
         return list_backups(self.config)
 

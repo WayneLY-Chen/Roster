@@ -89,12 +89,21 @@ class SmtpSender:
         finally:
             self._connection = None
 
-    def send(self, message: SendableMessage) -> None:
+    def send(
+        self,
+        message: SendableMessage,
+        attachments: list[tuple[str, bytes, str]] | None = None,
+    ) -> None:
         """Compose and hand one message to the SMTP relay.
 
         ``message`` only needs ``to_address``, ``subject`` and ``body`` --
         typically a :class:`database.models.EmailMessage` row, but any
         duck-typed stand-in works (useful in tests).
+
+        ``attachments`` is ``(檔名, 內容, MIME type)``，已經讀進記憶體。刻意
+        不在這裡讀檔：一批信件共用同一組附件，由呼叫端用
+        :func:`gmail.attachments.load_for_sending` 讀一次就好，也才能在開始
+        寄之前就發現檔案不見，而不是寄到第 37 封才中斷。
         """
         if self._connection is None:
             raise GmailError("尚未連線；請先呼叫 connect()")
@@ -123,6 +132,7 @@ class SmtpSender:
         mime["List-Unsubscribe"] = f"<mailto:{unsubscribe_target}?subject=unsubscribe>"
 
         self._set_body(mime, body)
+        self._add_attachments(mime, attachments or [])
 
         try:
             self._connection.send_message(mime)
@@ -160,6 +170,24 @@ class SmtpSender:
         for cid, (data, subtype) in images.items():
             html_part.add_related(data, "image", subtype, cid=f"<{cid}>")
 
+    def _add_attachments(
+        self, mime: MimeMessage, attachments: list[tuple[str, bytes, str]]
+    ) -> None:
+        """把檔案掛成一般附件（收件者看得到、可以下載的那種）。
+
+        跟內文圖片不同：圖片是 ``add_related`` 掛在 HTML 部分裡、用 ``cid:``
+        引用、不會出現在附件列表；這裡的檔案要 ``add_attachment`` 掛在最外層，
+        收件者才看得到迴紋針。
+        """
+        for filename, data, mime_type in attachments:
+            maintype, _, subtype = mime_type.partition("/")
+            mime.add_attachment(
+                data,
+                maintype=maintype or "application",
+                subtype=subtype or "octet-stream",
+                filename=filename,
+            )
+
     def _resolve_images(self, body: str) -> tuple[str, dict[str, tuple[bytes, str]]]:
         """Swap ``src="images/x.png"`` for ``src="cid:..."`` and read the files.
 
@@ -190,7 +218,7 @@ class SmtpSender:
 
             guessed, _ = mimetypes.guess_type(path.name)
             subtype = (guessed or "image/png").split("/")[-1]
-            cid = f"{uuid.uuid4().hex}@taiwanb2bcrm"
+            cid = f"{uuid.uuid4().hex}@roster"
             found[cid] = (data, subtype)
             return f'<img src="cid:{cid}"'
 

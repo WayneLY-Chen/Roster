@@ -407,9 +407,27 @@ class MailerSection(_Base):
     )
     templates_dir: str = "./templates/mail"
 
+    #: 附件的存放位置。
+    #:
+    #: 刻意不放在 ``templates/`` 底下：那個資料夾會被打包進 exe，而附件是
+    #: 使用者自己的檔案、單檔可以到 20MB。放在專案根目錄跟 data/、output/
+    #: 並列，備份與尋找都直覺，也不會被打包流程掃進去。
+    attachments_dir: str = "./attachments"
+
+    #: 單封信所有附件加起來的上限。
+    #:
+    #: Gmail 的實際上限是 25MB，但那是「編碼後」的大小——附件會用 base64
+    #: 編碼，體積膨脹約 4/3。所以原始檔要抓在 20MB 以內才安全，超過的話
+    #: 是寄出去才失敗，使用者在介面上根本看不出原因。
+    max_attachment_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
+
     @property
     def resolved_templates_dir(self) -> Path:
         return _resolve(self.templates_dir)
+
+    @property
+    def resolved_attachments_dir(self) -> Path:
+        return _resolve(self.attachments_dir)
 
     @property
     def address(self) -> str:
@@ -435,18 +453,51 @@ class SchedulerSection(_Base):
     """
 
     enabled: bool = False
-    #: "daily" | "hourly" | "interval"
-    mode: Literal["daily", "hourly", "interval"] = "daily"
-    #: For mode=daily, 24-hour clock time.
+
+    #: 這個排程到底要做什麼。
+    #:
+    #: ``crawl``           只爬取（原本唯一的行為）
+    #: ``send``            只寄信，不爬取
+    #: ``crawl_and_send``  先爬取，再把新收集到的名單寄出去
+    #:
+    #: 分開成三種而不是兩個開關：「只寄信」是常見需求（名單已經整理好，
+    #: 每月一號寄一批），而「先爬再寄」的順序是有意義的、不能顛倒。
+    action: Literal["crawl", "send", "crawl_and_send"] = "crawl"
+
+    #: "daily" | "hourly" | "interval" | "monthly"
+    mode: Literal["daily", "hourly", "interval", "monthly"] = "daily"
+    #: For mode=daily/monthly, 24-hour clock time.
     at: str = "03:00"
     #: For mode=interval, minutes between runs.
     every_minutes: int = Field(default=360, ge=15, le=10_080)
+    #: For mode=monthly, 每個月的第幾號。
+    #:
+    #: 允許填到 31，但遇到沒有 31 號的月份會退到當月最後一天——設定「每月
+    #: 31 號寄」的人要的是「月底」，二月直接跳過整個月不是他的本意。
+    day_of_month: int = Field(default=1, ge=1, le=31)
+
     #: Sources to crawl; empty means every enabled source.
     sources: list[str] = Field(default_factory=list)
     #: Run verification after each scheduled crawl.
     verify_after_crawl: bool = True
     #: Run a missed job once at start-up instead of waiting for the next slot.
     catch_up: bool = True
+
+    # ---------------------------------------------------------- 排程寄信
+
+    #: 要用哪一份郵件樣板（``templates/mail`` 底下的名稱，就是郵件頁左邊
+    #: 那個下拉選單的內容）。action 含寄信時必填。
+    mail_template: str = ""
+    #: 活動名稱的前綴，實際名稱會再接上執行日期，方便事後在紀錄裡分辨。
+    mail_campaign: str = "排程寄送"
+    #: 隨信附上的檔案（``attachments/`` 底下的檔名）。
+    mail_attachments: list[str] = Field(default_factory=list)
+    #: 排程寄信單次最多寄幾封。
+    #:
+    #: 跟 ``mailer.daily_limit`` 是兩件事：那個是「今天總共」的天花板，這個
+    #: 是「這一次排程」的上限。無人看顧的情況下更需要一個保守的煞車——半夜
+    #: 三點跑掉的批次沒有人會即時發現。
+    mail_batch_limit: int = Field(default=50, ge=1, le=2000)
 
     @field_validator("at")
     @classmethod
@@ -458,6 +509,27 @@ class SchedulerSection(_Base):
         except (ValueError, TypeError) as exc:
             raise ValueError(f"scheduler.at must be HH:MM, got {value!r}") from exc
         return value
+
+    @property
+    def sends_mail(self) -> bool:
+        return self.action in ("send", "crawl_and_send")
+
+    @property
+    def crawls(self) -> bool:
+        return self.action in ("crawl", "crawl_and_send")
+
+    @model_validator(mode="after")
+    def _mail_action_needs_a_template(self) -> "SchedulerSection":
+        """要寄信卻沒選樣板 = 排程時間到了才發現不能跑。
+
+        只在排程真的啟用時擋下來——使用者可能先把動作切成「寄信」再去挑
+        樣板，中間那一刻不該讓整份設定檔驗證失敗。
+        """
+        if self.enabled and self.sends_mail and not self.mail_template.strip():
+            raise ValueError(
+                "scheduler.action 含寄信時必須指定 scheduler.mail_template"
+            )
+        return self
 
 
 class AppConfig(_Base):
@@ -480,6 +552,7 @@ class AppConfig(_Base):
             self.logging.resolved_dir,
             self.exporter.resolved_output_dir,
             self.backup.resolved_dir,
+            self.mailer.resolved_attachments_dir,
         ]
         sqlite_path = self.database.sqlite_path
         if sqlite_path:
@@ -573,17 +646,23 @@ def read_user_settings() -> dict[str, Any]:
 
 
 def save_user_setting(section: str, key: str, value: Any) -> Path:
-    """Persist one setting the user flipped in the GUI, then reload the config.
+    """Persist one setting the user flipped in the GUI, then reload the config."""
+    return save_user_settings(section, {key: value})
 
-    Validates by rebuilding the whole config before writing: a toggle that
-    would produce an invalid configuration should fail at the click, not at the
-    next start-up.
+
+def save_user_settings(section: str, values: dict[str, Any]) -> Path:
+    """Persist several settings in one atomic, validated write.
+
+    一次寫多個而不是逐一呼叫 :func:`save_user_setting`，是因為同一段設定裡
+    的欄位會互相依賴。排程就是實例：``scheduler.action`` 設成寄信時，
+    ``mail_template`` 就變成必填。一次存一個的話，先寫哪一個都會在中途產生
+    一份不合法的設定而被回滾——使用者永遠到不了那個合法的目標狀態。
     """
     settings = read_user_settings()
     previous = settings.get(section, {})
     if not isinstance(previous, dict):
         previous = {}
-    settings[section] = {**previous, key: value}
+    settings[section] = {**previous, **values}
 
     _write_user_settings(settings)
     reset_config()

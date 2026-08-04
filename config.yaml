@@ -115,16 +115,31 @@ backup:
   keep_daily: 14
   keep_weekly: 8
 
-# 自動排程爬取。
-# 注意：這是桌面程式，沒有背景服務——排程只在本程式開啟時才會執行。
+# 自動排程：爬取、寄信，或先爬再寄。
+#
+# 注意：這是桌面程式，沒有背景服務——排程只在本程式開啟時才會執行。要無人
+# 值守請用命令列的 `python main.py schedule`。
+#
+# 這一整段也可以在程式的「設定」頁直接編輯，改完存到 user_settings.yaml，
+# 不會動到這個檔案裡的註解。
 scheduler:
   enabled: false
-  mode: "daily"            # daily（每天固定時間）| hourly（每小時）| interval（固定間隔）
-  at: "03:00"              # mode=daily 時的執行時間，24 小時制
+  action: "crawl"          # crawl（只爬取）| send（只寄信）| crawl_and_send（先爬再寄）
+  mode: "daily"            # daily（每天）| monthly（每月）| hourly（每小時）| interval（固定間隔）
+  at: "03:00"              # mode=daily/monthly 時的執行時間，24 小時制
+  day_of_month: 1          # mode=monthly 時的日期；遇到沒有這天的月份會退到當月最後一天
   every_minutes: 360       # mode=interval 時的間隔分鐘數
   sources: []              # 要爬的來源名稱；留空代表所有已啟用的來源
   verify_after_crawl: true # 每次爬完自動重新驗證信箱
   catch_up: true           # 開啟程式時，若已錯過執行時間就立刻補跑一次
+
+  # --- action 含寄信時才會用到 ---
+  # 排程寄信走的是跟「郵件」頁完全相同的流程，所以每日上限、重複寄送間隔、
+  # 只寄已驗證信箱、強制附上退訂聲明這些防護一個都不會被繞過。
+  mail_template: ""        # templates/mail 底下的樣板名稱；要寄信就必填
+  mail_campaign: "排程寄送"  # 活動名稱前綴，實際名稱會再接上執行日期
+  mail_attachments: []     # attachments/ 底下的檔名
+  mail_batch_limit: 50     # 單次排程最多寄幾封（跟 mailer.daily_limit 是兩回事）
 
 gmail:
   enabled: false
