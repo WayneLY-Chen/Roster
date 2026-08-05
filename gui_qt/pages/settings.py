@@ -411,13 +411,19 @@ class SettingsPage(BasePage):
 
         # 這段只講「使用者要做什麼」與「密碼被放在哪」。不要在這裡提 git——
         # 那是開發流程的事，跟坐在這個畫面前面的人無關。
+        #
+        # 網址做成可點的超連結。要使用者自己把一串網址抄進瀏覽器，是這個
+        # 設定流程裡最容易打錯、也最沒必要的一步。
         note = QLabel(
             "需先在 Google 帳戶開啟兩步驟驗證，再至 "
-            "https://myaccount.google.com/apppasswords 產生應用程式密碼。"
-            "請使用應用程式密碼，不要用你的 Google 帳號密碼。\n"
+            '<a href="https://myaccount.google.com/apppasswords">'
+            "myaccount.google.com/apppasswords</a> 產生應用程式密碼。"
+            "請使用應用程式密碼，不要用你的 Google 帳號密碼。<br>"
             "密碼會存在作業系統的憑證保管庫（Windows 認證管理員／macOS 鑰匙圈／"
             "Linux Secret Service），不會寫進這個資料夾裡的任何檔案。"
         )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setOpenExternalLinks(True)
         note.setObjectName("MutedLabel")
         note.setWordWrap(True)
         section.body_layout.addWidget(note)

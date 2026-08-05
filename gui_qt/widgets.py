@@ -271,8 +271,15 @@ class DataTable(QWidget):
         layout.addWidget(self.view)
 
         self.view.selectionModel().currentRowChanged.connect(self._handle_select)
+        # 只接 activated，不要同時接 doubleClicked。
+        #
+        # 一次雙擊會**同時**送出 doubleClicked 與 activated（實測過），兩個都
+        # 接的話 on_activate 會被呼叫兩次——使用者看到的是「對話框關掉之後
+        # 又自己開一次」，而且每一個用雙擊開啟的視窗都會這樣。
+        #
+        # 留 activated 而不是 doubleClicked：它同時涵蓋雙擊與鍵盤 Enter，
+        # 不用鍵盤的人跟用鍵盤的人都能開得起來。
         self.view.activated.connect(self._handle_activate)
-        self.view.doubleClicked.connect(self._handle_activate)
 
     # ---------------------------------------------------------------- 資料
 

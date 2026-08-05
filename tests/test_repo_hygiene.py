@@ -88,9 +88,19 @@ def test_no_tracked_file_contains_an_absolute_path(tracked_files):
 
 
 def test_shell_scripts_are_executable_and_use_lf(tracked_files):
-    """Mac 使用者要能直接 ``./start.sh``，而且不能被 CRLF 卡住。"""
-    scripts = [name for name in tracked_files if name.endswith(".sh")]
-    assert scripts, "應該要有給 macOS/Linux 用的 .sh 啟動腳本"
+    """Mac 使用者要能直接執行，而且不能被 CRLF 卡住。
+
+    ``.command`` 一起檢查：macOS 的 Finder 不會執行 ``.sh``（會用文字編輯器
+    打開），``.command`` 才是它認得的「雙擊執行」副檔名——所以那個檔案更
+    需要權限與換行都正確，它就是使用者實際會點的那一個。
+    """
+    scripts = [
+        name for name in tracked_files if name.endswith((".sh", ".command"))
+    ]
+    assert scripts, "應該要有給 macOS/Linux 用的啟動腳本"
+    assert any(name.endswith(".command") for name in scripts), (
+        "macOS 的 Finder 不執行 .sh，需要一個 .command 才能雙擊啟動"
+    )
 
     for name in scripts:
         mode = _git("ls-files", "-s", "--", name).split()[0]

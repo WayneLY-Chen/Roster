@@ -99,8 +99,11 @@ class CompanyDetailDialog(QDialog):
         self.company_id = company_id
         self.on_saved = on_saved
 
-        self.resize(780, 640)
-        self.setMinimumSize(680, 560)
+        # 詳細資料頁現在有 12 列（多了英文名稱、傳真、主要產品），照舊的
+        # 640 高度會把每一列壓到文字被切掉一半。高度跟著字型度量走，
+        # macOS 的字比較大也裝得下。
+        self.resize(820, theme.text_box_height(34))
+        self.setMinimumSize(700, 600)
         self.setModal(True)
 
         self._contacts: list[Any] = []
