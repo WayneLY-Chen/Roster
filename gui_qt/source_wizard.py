@@ -319,6 +319,24 @@ class SourceWizardDialog(QDialog):
         collect_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         body_layout.addWidget(collect_note)
 
+        # 分析完才打開。順序上一定是「先分析、才知道有哪些欄位可以選、
+        # 這個名錄有幾頁」——分析之前就讓它們可以按，看起來像是要先填好
+        # 才能按分析，剛好把因果顛倒過來。
+        self._collect_widgets = [
+            self.page_start_entry,
+            self.page_end_entry,
+            self.max_pages_entry,
+            self.default_industry_entry,
+            all_button,
+            none_button,
+            *self.collect_checks.values(),
+        ]
+        self._set_collect_enabled(False)
+
+    def _set_collect_enabled(self, enabled: bool) -> None:
+        for widget in self._collect_widgets:
+            widget.setEnabled(enabled)
+
     def _build_preview_section(self, parent_layout: QVBoxLayout) -> None:
         section = Section("3. 預覽抓到的資料")
 
@@ -507,6 +525,7 @@ class SourceWizardDialog(QDialog):
         self._stop_analyse_progress()
 
         self.last_url = result.url
+        self._set_collect_enabled(True)
         self.list_selector_entry.set(result.list_selector)
         self.next_selector_entry.set(result.next_selector or "")
         self.detail_link_entry.set(result.detail_link_selector or "")

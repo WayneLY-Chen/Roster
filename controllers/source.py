@@ -25,6 +25,9 @@ KNOWN_FIELDS: tuple[str, ...] = (
     "website",
     "address",
     "industry",
+    "english_name",
+    "fax",
+    "products",
     "contact_person",
 )
 

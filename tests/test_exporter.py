@@ -301,6 +301,14 @@ def test_export_all_formats_writes_every_format(db_session, tmp_config):
         ("地址 Address", "address"),
         ("產業 Industry", "industry"),
         ("聯絡人 Contact", "contact_person"),
+        # 新欄位的雙語標題也要能被匯入器認回來——匯出再匯入是常見的工作
+        # 流程，標題漏掉對照的話那幾欄會被當成「認不得的欄位」整個丟掉。
+        ("英文名稱 English Name", "english_name"),
+        ("英文名稱", "english_name"),
+        ("傳真 Fax", "fax"),
+        ("傳真", "fax"),
+        ("主要產品 Products", "products"),
+        ("營業項目", "products"),
         ("備註 Remark", "remark"),
         ("Totally Unknown Column", None),
         ("", None),

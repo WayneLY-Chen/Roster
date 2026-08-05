@@ -46,6 +46,9 @@ COLLECTABLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("website", "網站"),
     ("address", "地址"),
     ("industry", "產業"),
+    ("english_name", "英文名稱"),
+    ("fax", "傳真"),
+    ("products", "主要產品"),
     ("contact_person", "聯絡人"),
 )
 

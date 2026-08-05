@@ -470,19 +470,94 @@ class SettingsController:
                 f"{config.crawler.delay_seconds} 秒"
                 f"（另加最多 {config.crawler.delay_jitter} 秒隨機）"
             ),
-            "每個來源頁數上限": f"{config.crawler.max_pages} 頁",
+            # 名稱不能寫「每個來源頁數上限」——那個講法在這個值真的是天花板
+            # 的時候才對。現在它只是「來源沒指定時的預設」，來源自己填了幾頁
+            # 就是幾頁（見 crawler/base.py 的 page_limit）。
+            "頁數上限預設值": f"{config.crawler.max_pages} 頁（來源自己有設定時以來源為準）",
             "信箱 MX 驗證": "開啟" if config.verifier.check_mx else "關閉",
             "個資欄位加密": "開啟" if config.database.encrypt else "關閉",
-            "匯出資料夾": str(config.exporter.resolved_output_dir),
-            "日誌資料夾": str(config.logging.resolved_dir),
-            "備份資料夾": str(config.backup.resolved_dir),
-            "Gmail 讀信": "已啟用" if config.gmail.enabled else "已停用",
+            # 這三個也要縮寫。上一次只改了「資料庫」那一行，結果畫面上仍然
+            # 印著三行完整路徑——修一半跟沒修一樣。
+            "匯出資料夾": display_path(config.exporter.resolved_output_dir),
+            "日誌資料夾": display_path(config.logging.resolved_dir),
+            "備份資料夾": display_path(config.backup.resolved_dir),
+            # 「Gmail 讀信」看不出是在讀誰的信、讀來做什麼。這個功能是從
+            # 使用者自己的收件匣裡，把寄件人的聯絡資訊抓成聯絡人。
+            "從 Gmail 收件匣抓聯絡人": "已啟用" if config.gmail.enabled else "已停用",
         }
 
     def config_path(self) -> Path:
         from core.config import DEFAULT_CONFIG_PATH
 
         return DEFAULT_CONFIG_PATH
+
+    # --------------------------------------------------- 總覽裡可以改的設定
+
+    #: 總覽表格裡哪幾項可以直接編輯。
+    #:
+    #: ``顯示名稱 -> (設定區段, 鍵, 型別, 選項, 說明)``
+    #:
+    #: 沒有列在這裡的就是唯讀，各有各的理由：
+    #:
+    #: * **遵守 robots.txt** —— 這是唯一一個「關掉會讓程式做出不該做的事」的
+    #:   開關。它留在 config.yaml 裡，要關的人必須自己去編輯設定檔並看到那段
+    #:   註解。介面上一鍵可切太容易誤按，而誤按的後果由使用者承擔。
+    #: * **個資欄位加密** —— 切換會重寫整個資料庫，那件事該在啟動時做完，
+    #:   不是在設定頁按一下就開始。
+    #: * **各種資料夾與資料庫位置** —— 改了要搬檔案，不是改一個字串而已。
+    EDITABLE_SETTINGS: dict[str, tuple[str, str, str, tuple, str]] = {
+        "爬取引擎": (
+            "crawler", "engine", "choice", ("httpx", "playwright"),
+            "playwright 可以爬用 JavaScript 產生內容的網站，但慢很多，"
+            "而且要先執行過 playwright install chromium。",
+        ),
+        "爬取延遲": (
+            "crawler", "delay_seconds", "float", (0.5, 60.0),
+            "每次請求之間至少等幾秒。調低會增加對方站台的負擔，"
+            "也比較容易被判定為異常流量。",
+        ),
+        "頁數上限預設值": (
+            "crawler", "max_pages", "int", (1, 500),
+            "來源自己有設定頁數的話以來源為準；這裡只是沒設定時的預設值。",
+        ),
+        "信箱 MX 驗證": (
+            "verifier", "check_mx", "bool", (),
+            "查詢信箱網域是不是真的收信。關掉會快很多，但無效信箱會留在名單裡。",
+        ),
+        "從 Gmail 收件匣抓聯絡人": (
+            "gmail", "enabled", "bool", (),
+            "開啟後可以用「python main.py gmail」從你自己的收件匣裡，"
+            "把往來對象的公司與聯絡資訊抓成聯絡人。需要先設定好 Gmail 帳號。",
+        ),
+    }
+
+    def is_editable(self, label: str) -> bool:
+        return label in self.EDITABLE_SETTINGS
+
+    def setting_spec(self, label: str):
+        """``(區段, 鍵, 型別, 選項, 說明, 目前的值)``。"""
+        section, key, kind, options, help_text = self.EDITABLE_SETTINGS[label]
+        current = getattr(getattr(self.config, section), key)
+        return section, key, kind, options, help_text, current
+
+    def update_setting(self, label: str, value: Any) -> None:
+        """把總覽裡改的值存起來。
+
+        跟其他設定一樣寫進 user_settings.yaml，不動 config.yaml——後者寫滿了
+        解釋每個設定的註解，程式化改寫會把它們全部洗掉。
+        """
+        from core.config import save_user_setting
+
+        if label not in self.EDITABLE_SETTINGS:
+            raise CRMError(f"「{label}」不能在這裡修改。")
+        section, key, _kind, _options, _help = self.EDITABLE_SETTINGS[label]
+        try:
+            save_user_setting(section, key, value)
+        except CRMError as exc:
+            raise CRMError(f"儲存「{label}」失敗：{exc}") from exc
+        except ValueError as exc:
+            raise CRMError(f"「{label}」的值不合法：{exc}") from exc
+        self.config = get_config()
 
     # ------------------------------------------------------------- 排程
 
@@ -588,6 +663,33 @@ class SettingsController:
         from database.backup import delete_backup
 
         return delete_backup(name, self.config)
+
+    def export_day(self, day, format_name: str = "excel") -> tuple[Path, int]:
+        """把某一天收集到的公司另存一份，回傳 ``(檔案路徑, 筆數)``。
+
+        這是**匯出**，不是備份，而且刻意分開：SQLite 的備份是整個檔案複製，
+        沒有「只備份某一天」這回事——那樣的檔案還原回去會把其他日期的資料
+        一起抹掉。這裡產生的是可以重新匯入的資料檔，適合「把這批單獨留存」
+        或「交給別人」。要能還原整個資料庫，用上面的完整備份。
+        """
+        from datetime import datetime
+
+        from exporter.service import export_companies
+
+        criteria = CompanyFilter(
+            created_after=datetime.combine(day, datetime.min.time()),
+            created_before=datetime.combine(day, datetime.max.time()),
+        )
+        target = (
+            self.config.exporter.resolved_output_dir
+            / f"{day:%Y%m%d}-收集資料.{'xlsx' if format_name == 'excel' else format_name}"
+        )
+        return export_companies(format_name, target, criteria, self.config)
+
+    def crawl_dates(self) -> list[tuple[Any, int]]:
+        """``(日期, 家數)``，最近的排前面。"""
+        with session_scope() as session:
+            return CompanyRepository(session).crawl_dates()
 
     # ----------------------------------------------------------- 資料庫加密
 

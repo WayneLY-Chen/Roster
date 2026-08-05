@@ -37,6 +37,9 @@ class RawCompany(BaseModel):
     website: str | None = None
     address: str | None = None
     industry: str | None = None
+    english_name: str | None = None
+    fax: str | None = None
+    products: str | None = None
     contact_person: str | None = None
     source: str = "unknown"
     source_url: str | None = None
@@ -61,6 +64,9 @@ class CleanCompany(BaseModel):
     website: str | None = None
     address: str | None = None
     industry: str | None = None
+    english_name: str | None = None
+    fax: str | None = None
+    products: str | None = None
     contact_person: str | None = None
     source: str = "unknown"
     source_url: str | None = None
@@ -83,6 +89,9 @@ class CompanyView(BaseModel):
     website: str | None = None
     address: str | None = None
     industry: str | None = None
+    english_name: str | None = None
+    fax: str | None = None
+    products: str | None = None
     contact_person: str | None = None
     source: str | None = None
     source_url: str | None = None

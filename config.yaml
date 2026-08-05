@@ -46,39 +46,31 @@ crawler:
     wait_until: "networkidle"
     nav_timeout_ms: 30000
 
-  # Each source is a named, independently enabled crawl target.
-  # type: "sample"       -> bundled offline fixture, safe for demos and tests
-  # type: "generic_html" -> config-driven CSS-selector scraper
-  sources:
-    - name: "sample"
-      type: "sample"
-      enabled: true
-
-    # Template. Point start_url at a directory you are permitted to crawl,
-    # then map its markup to fields below. Disabled until you fill it in.
-    - name: "example_directory"
-      type: "generic_html"
-      enabled: false
-      start_url: "https://example.com/companies?page={page}"
-      page_start: 1
-      max_pages: 5
-      list_selector: "div.company-card"
-      pagination:
-        type: "query"      # query | next_link | none
-        next_selector: "a.next-page"
-      fields:
-        company_name: { selector: "h3.name" }
-        email: { selector: "a[href^='mailto:']", attr: "href" }
-        phone: { selector: ".tel" }
-        website: { selector: "a.site", attr: "href" }
-        address: { selector: ".addr" }
-        industry: { selector: ".industry" }
-        contact_person: { selector: ".contact" }
-        tax_id: { selector: ".tax-id" }
-
-    # 實際在用的名錄來源放在 custom_sources.yaml（不進版本控制），
-    # 程式載入設定時會自動併進來。要新增來源，用「爬取」頁的自訂網址
-    # 精靈，或照上面的範本自己寫一段。
+  # 爬取來源。預設是空的——要爬哪些網站是使用者自己的決定，程式不預先塞
+  # 任何目標進來。用「爬取」頁的「＋ 自訂網址…」貼上網址即可新增，存好的
+  # 來源會寫進 custom_sources.yaml（不進版本控制），載入時自動併進來。
+  #
+  # 要手寫的話，一個 generic_html 來源長這樣：
+  #
+  #   sources:
+  #     - name: "某某公會會員名錄"
+  #       type: "generic_html"
+  #       enabled: true
+  #       start_url: "https://example.com/companies?page={page}"
+  #       max_pages: 5
+  #       list_selector: "div.company-card"
+  #       default_industry: ""        # 頁面沒寫產業時才套用
+  #       collect_fields: []          # 留空＝全部收集
+  #       pagination:
+  #         type: "query"             # query | next_link | none
+  #         next_selector: "a.next-page"
+  #       fields:
+  #         company_name: { selector: "h3.name" }
+  #         email: { selector: "a[href^='mailto:']", attr: "href" }
+  #         phone: { selector: ".tel" }
+  #
+  # 每個欄位還支援 regex（從值裡再擷取一段）、multiple、separator。
+  sources: []
 
 verifier:
   check_mx: true
@@ -105,6 +97,9 @@ exporter:
     - "website"
     - "address"
     - "industry"
+    - "english_name"
+    - "fax"
+    - "products"
     - "contact_person"
     - "pipeline_stage"
     - "priority"

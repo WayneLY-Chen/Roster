@@ -90,6 +90,14 @@ class Company(Base):
     website: Mapped[str | None] = mapped_column(String(512))
     address: Mapped[str | None] = mapped_column(EncryptedString(512))
     industry: Mapped[str | None] = mapped_column(String(128), index=True)
+    #: 英文名稱。台灣的公協會名錄幾乎都會列，做外銷或對帳時要用。
+    #: 跟中文名一樣是商業識別資訊、不是個資，所以不加密——加密的欄位
+    #: 沒辦法用 SQL 搜尋與排序。
+    english_name: Mapped[str | None] = mapped_column(String(255), index=True)
+    #: 傳真。跟電話同一類，是個資（會連到特定辦公室），所以加密。
+    fax: Mapped[str | None] = mapped_column(EncryptedString(64))
+    #: 主要產品／代理品項。名錄上常見的「代理廠商及代銷產品」。
+    products: Mapped[str | None] = mapped_column(Text)
     contact_person: Mapped[str | None] = mapped_column(EncryptedString(128))
 
     # --- provenance ---

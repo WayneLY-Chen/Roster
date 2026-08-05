@@ -82,6 +82,9 @@ FULL_TEXT_COLUMNS = (
     Company.website,
     Company.address,
     Company.industry,
+    Company.english_name,
+    Company.fax,
+    Company.products,
     Company.contact_person,
     Company.remark,
     Company.source,
@@ -95,6 +98,7 @@ EXACT_ISH_FIELDS = (
     "website",
     "address",
     "industry",
+    "english_name",
     "contact_person",
 )
 
@@ -407,6 +411,9 @@ class CompanyRepository:
                 website=record.website,
                 address=record.address,
                 industry=record.industry,
+                english_name=record.english_name,
+                fax=record.fax,
+                products=record.products,
                 contact_person=record.contact_person,
                 source=record.source,
                 source_url=record.source_url,
@@ -429,6 +436,9 @@ class CompanyRepository:
             "website",
             "address",
             "industry",
+            "english_name",
+            "fax",
+            "products",
             "contact_person",
         )
         for field in fillable:
@@ -636,7 +646,8 @@ class CompanyRepository:
                 continue
             for field in (
                 "tax_id", "email", "phone", "website", "address",
-                "industry", "contact_person", "remark",
+                "industry", "english_name", "fax", "products",
+                "contact_person", "remark",
             ):
                 if not getattr(keeper, field) and getattr(victim, field):
                     setattr(keeper, field, getattr(victim, field))
@@ -678,6 +689,9 @@ class CompanyRepository:
             website=company.website,
             address=company.address,
             industry=company.industry,
+            english_name=company.english_name,
+            fax=company.fax,
+            products=company.products,
             contact_person=company.contact_person,
             source=company.source,
             source_url=company.source_url,

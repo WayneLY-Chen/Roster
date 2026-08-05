@@ -26,6 +26,8 @@ _PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 # Placeholder name -> Chinese description shown in the GUI's helper panel.
 _PLACEHOLDERS: dict[str, str] = {
     "company_name": "公司名稱",
+    "english_name": "公司英文名稱",
+    "products": "主要產品",
     "contact_person": "聯絡人姓名",
     "industry": "產業別",
     "email": "電子信箱",

@@ -75,6 +75,9 @@ ACTIVITY_COLUMNS = [
     ("body", "備註", 220),
 ]
 
+#: 空欄位顯示這個，不要留白。留白看起來像壞掉或還沒載入完。
+NO_DATA = "（無資料）"
+
 ATTACHMENT_COLUMNS = [
     ("filename", "檔名", 220),
     ("size_bytes", "大小（位元組）", 100),
@@ -157,6 +160,9 @@ class CompanyDetailDialog(QDialog):
         self.website_entry.set(company.website)
         self.address_entry.set(company.address)
         self.industry_entry.set(company.industry)
+        self.english_name_entry.set(company.english_name)
+        self.fax_entry.set(company.fax)
+        self.products_entry.set(company.products)
         self.contact_person_entry.set(company.contact_person)
         self.stage_combo.setCurrentText(label(company.pipeline_stage, STAGE_LABELS))
         self.priority_combo.setCurrentText(label(company.priority, PRIORITY_LABELS))
@@ -194,62 +200,79 @@ class CompanyDetailDialog(QDialog):
     def _build_details_tab(self) -> None:
         grid = QGridLayout(self.details_tab)
 
-        self.name_entry = LabeledEntry("公司名稱")
+        # 空欄位一律顯示「無資料」的淡色提示，而不是留白。留白看起來像
+        # 「這個欄位壞了」或「還沒載入完」；寫著無資料才看得出是「爬到的
+        # 頁面上就沒有這一項」。提示文字不是內容，存檔時存進去的仍是空值。
+        def _entry(label_text: str, placeholder: str = NO_DATA) -> LabeledEntry:
+            return LabeledEntry(label_text, placeholder=placeholder)
+
+        self.name_entry = _entry("公司名稱", "必填")
         grid.addWidget(self.name_entry, 0, 0)
-        self.tax_id_entry = LabeledEntry("統一編號")
-        grid.addWidget(self.tax_id_entry, 0, 1)
+        self.english_name_entry = _entry("英文名稱")
+        grid.addWidget(self.english_name_entry, 0, 1)
 
-        self.email_entry = LabeledEntry("電子信箱")
-        grid.addWidget(self.email_entry, 1, 0)
-        self.phone_entry = LabeledEntry("電話")
-        grid.addWidget(self.phone_entry, 1, 1)
+        self.tax_id_entry = _entry("統一編號")
+        grid.addWidget(self.tax_id_entry, 1, 0)
+        self.industry_entry = _entry("產業")
+        grid.addWidget(self.industry_entry, 1, 1)
 
-        self.website_entry = LabeledEntry("網站")
-        grid.addWidget(self.website_entry, 2, 0)
-        self.industry_entry = LabeledEntry("產業")
-        grid.addWidget(self.industry_entry, 2, 1)
+        self.email_entry = _entry("電子信箱")
+        grid.addWidget(self.email_entry, 2, 0)
+        self.phone_entry = _entry("電話")
+        grid.addWidget(self.phone_entry, 2, 1)
 
-        self.address_entry = LabeledEntry("地址")
-        grid.addWidget(self.address_entry, 3, 0)
-        self.contact_person_entry = LabeledEntry("聯絡人")
-        grid.addWidget(self.contact_person_entry, 3, 1)
+        self.website_entry = _entry("公司網址")
+        grid.addWidget(self.website_entry, 3, 0)
+        self.fax_entry = _entry("傳真")
+        grid.addWidget(self.fax_entry, 3, 1)
+
+        self.address_entry = _entry("公司地址")
+        grid.addWidget(self.address_entry, 4, 0)
+        self.contact_person_entry = _entry("聯絡人")
+        grid.addWidget(self.contact_person_entry, 4, 1)
+
+        # 產品描述常常是一整段（「界面活性劑及化學品進口貿易。」），
+        # 給它整列的寬度。
+        self.products_entry = _entry("主要產品／代理品項")
+        grid.addWidget(self.products_entry, 5, 0, 1, 2)
 
         self.stage_combo = WideComboBox()
         self.stage_combo.addItems(stage_labels())
         self.stage_combo.setCurrentText(label(PipelineStage.NEW.value, STAGE_LABELS))
         stage_control = CaptionedControl("業務階段")
         stage_control.attach(self.stage_combo)
-        grid.addWidget(stage_control, 4, 0)
+        grid.addWidget(stage_control, 6, 0)
 
         self.priority_combo = WideComboBox()
         self.priority_combo.addItems(priority_labels())
         self.priority_combo.setCurrentText(label(Priority.MEDIUM.value, PRIORITY_LABELS))
         priority_control = CaptionedControl("優先度")
         priority_control.attach(self.priority_combo)
-        grid.addWidget(priority_control, 4, 1)
+        grid.addWidget(priority_control, 6, 1)
 
         self.status_combo = WideComboBox()
         self.status_combo.addItems(status_labels())
         self.status_combo.setCurrentText(label(RecordStatus.ACTIVE.value, STATUS_LABELS))
         status_control = CaptionedControl("狀態")
         status_control.attach(self.status_combo)
-        grid.addWidget(status_control, 5, 0)
+        grid.addWidget(status_control, 7, 0)
 
-        self.follow_up_entry = LabeledEntry("追蹤日期（YYYY-MM-DD）", placeholder="YYYY-MM-DD")
-        grid.addWidget(self.follow_up_entry, 5, 1)
+        self.follow_up_entry = _entry("追蹤日期（YYYY-MM-DD）", "YYYY-MM-DD")
+        grid.addWidget(self.follow_up_entry, 7, 1)
 
-        self.tags_entry = LabeledEntry("標籤（以逗號分隔）")
-        grid.addWidget(self.tags_entry, 6, 0, 1, 2)
+        self.tags_entry = _entry("標籤（以逗號分隔）")
+        grid.addWidget(self.tags_entry, 8, 0, 1, 2)
 
-        grid.addWidget(caption("備註"), 7, 0, 1, 2)
+        grid.addWidget(caption("備註"), 9, 0, 1, 2)
         self.remark_box = QTextEdit()
+        self.remark_box.setPlaceholderText(NO_DATA)
         self.remark_box.setFixedHeight(theme.text_box_height(6))
-        grid.addWidget(self.remark_box, 8, 0, 1, 2)
+        grid.addWidget(self.remark_box, 10, 0, 1, 2)
 
         save_button = QPushButton("儲存")
         save_button.setObjectName("PrimaryButton")  # 這個對話框最主要的動作
         save_button.clicked.connect(self._save)
-        grid.addWidget(save_button, 9, 1)
+        grid.addWidget(save_button, 11, 1)
 
     def _save(self) -> None:
         self.error_label.setText("")
@@ -273,6 +296,9 @@ class CompanyDetailDialog(QDialog):
             "website": self.website_entry.get() or None,
             "address": self.address_entry.get() or None,
             "industry": self.industry_entry.get() or None,
+            "english_name": self.english_name_entry.get() or None,
+            "fax": self.fax_entry.get() or None,
+            "products": self.products_entry.get() or None,
             "contact_person": self.contact_person_entry.get() or None,
             "pipeline_stage": to_value(self.stage_combo.currentText(), STAGE_LABELS),
             "priority": to_value(self.priority_combo.currentText(), PRIORITY_LABELS),

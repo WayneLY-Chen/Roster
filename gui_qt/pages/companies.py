@@ -73,18 +73,29 @@ from gui_qt.widgets import DataTable, WideComboBox, caption
 ALL = ALL_OPTION
 
 #: 跟 Tk 版 ``gui/pages/companies.py`` 的 COLUMNS 完全一致。
+# 總覽只放「掃名單時真的會看」的欄位。英文名稱、傳真、地址、主要產品這些
+# 是查單一家公司時才需要的資訊，塞進來只會把每一欄擠窄、逼使用者橫向捲動
+# ——它們在「編輯」開的詳細資料視窗裡都有。
 COLUMNS = [
     ("id", "編號", 40),
     ("company_name", "公司名稱", 170),
     ("email", "電子信箱", 140),
     ("phone", "電話", 85),
     ("industry", "產業", 90),
+    ("contact_person", "聯絡人", 80),
     ("pipeline_stage", "業務階段", 80),
     ("priority", "優先度", 65),
     ("status", "狀態", 70),
     ("tags", "標籤", 110),
     ("updated_at", "更新時間", 100),
 ]
+
+#: 沒有值的儲存格顯示這個。
+#:
+#: 表格裡用短破折號而不是「無資料」三個字：一張幾百列的表，每個空格都寫著
+#: 「無資料」會蓋掉真正有資料的欄位，反而更難掃。詳細視窗那邊欄位少、
+#: 一個一個看，那裡才用完整的「（無資料）」。
+EMPTY_CELL = "—"
 
 #: 搜尋框 debounce 的間隔。
 SEARCH_DEBOUNCE_MS = 300
@@ -422,16 +433,24 @@ class CompaniesPage(BasePage):
 
     @staticmethod
     def _to_row(view: CompanyView) -> dict[str, Any]:
+        def shown(value: Any) -> Any:
+            """空的就顯示破折號，不要留白。
+
+            留白讓人分不出「這一家沒有這項資料」與「程式沒抓／沒載入」。
+            """
+            return value if (value or "").strip() else EMPTY_CELL
+
         return {
             "id": view.id,
             "company_name": view.company_name,
-            "email": view.email,
-            "phone": view.phone,
-            "industry": view.industry,
+            "email": shown(view.email),
+            "phone": shown(view.phone),
+            "industry": shown(view.industry),
+            "contact_person": shown(view.contact_person),
             "pipeline_stage": label(view.pipeline_stage, STAGE_LABELS),
             "priority": label(view.priority, PRIORITY_LABELS),
             "status": label(view.status, STATUS_LABELS),
-            "tags": view.tags,
+            "tags": view.tags or EMPTY_CELL,
             "updated_at": view.updated_at.strftime("%Y-%m-%d %H:%M") if view.updated_at else "",
         }
 

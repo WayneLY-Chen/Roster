@@ -61,6 +61,9 @@ _CLASS_HINTS: dict[str, tuple[str, ...]] = {
     "address": ("addr", "address", "location", "地址", "位置"),
     "industry": ("industry", "category", "cate", "type", "產業", "行業", "類別"),
     "contact_person": ("contact", "person", "owner", "聯絡", "窗口"),
+    "english_name": ("english", "eng-name", "en-name", "英文"),
+    "fax": ("fax", "傳真"),
+    "products": ("product", "goods", "items", "產品", "營業項目", "代銷"),
     "website": ("website", "site", "url", "homepage", "網站", "網址"),
     "tax_id": ("tax", "vat", "uniform", "統編", "統一編號"),
 }
@@ -776,6 +779,11 @@ def discover_from_html(html: str, url: str) -> DiscoveryResult:
         or _by_text_pattern("address", items, _ADDRESS_RE, _ADDRESS_RE.pattern),
         "industry": lambda: _by_class_hint("industry", items),
         "contact_person": lambda: _by_class_hint("contact_person", items),
+        # 這三個只靠 class/id 名稱猜。它們沒有像信箱或電話那樣的內容特徵，
+        # 硬用內容比對只會抓到一堆不相干的文字。
+        "english_name": lambda: _by_class_hint("english_name", items),
+        "fax": lambda: _by_class_hint("fax", items),
+        "products": lambda: _by_class_hint("products", items),
         "tax_id": lambda: _guess_tax_id(items),
     }
     for name, guesser in guessers.items():

@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -203,8 +204,27 @@ class SettingsPage(BasePage):
 
     def _build_overview_section(self) -> None:
         section = Section("總覽")
-        self.overview_table = DataTable(columns=[("key", "設定項目", 220), ("value", "數值", 440)])
+        self.overview_table = DataTable(
+            columns=[("key", "設定項目", 220), ("value", "數值", 440)],
+            on_activate=self._edit_setting_row,
+        )
+        # 右鍵也能改。表格看起來像唯讀的東西，沒有任何提示的話使用者不會
+        # 想到去點兩下——所以兩種常見的操作都接上，下面再寫一行提示。
+        self.overview_table.view.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.overview_table.view.customContextMenuRequested.connect(
+            self._show_overview_menu
+        )
         section.body_layout.addWidget(self.overview_table)
+
+        hint = QLabel(
+            "可以修改的項目：點兩下或按右鍵編輯，改完重新啟動程式後生效。"
+            "其餘項目（資料夾位置、遵守 robots.txt、個資加密）要在設定檔裡改。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        section.body_layout.addWidget(hint)
 
         config_row = QHBoxLayout()
         # QLabel + setWordWrap(True) + stretch=1，旁邊的按鈕 stretch=0：
@@ -219,6 +239,93 @@ class SettingsPage(BasePage):
         section.body_layout.addLayout(config_row)
 
         self._body_layout.addWidget(section)
+
+    # ------------------------------------------------- 總覽裡直接改設定
+
+    def _show_overview_menu(self, position) -> None:
+        """右鍵選單。唯讀的項目也要給回饋，不然使用者會以為程式沒反應。"""
+        from PySide6.QtWidgets import QMenu
+
+        row = self.overview_table.selected_row()
+        index = self.overview_table.view.indexAt(position)
+        if index.isValid():
+            row = self.overview_table.model.row_at(index.row())
+        if row is None:
+            return
+
+        label = row["key"]
+        menu = QMenu(self)
+        if self.controller.is_editable(label):
+            menu.addAction(f"編輯「{label}」").triggered.connect(
+                lambda _checked=False: self._edit_setting(label)
+            )
+        else:
+            action = menu.addAction("這一項不能在這裡修改")
+            action.setEnabled(False)
+        menu.exec(self.overview_table.view.viewport().mapToGlobal(position))
+
+    def _edit_setting_row(self, row: dict) -> None:
+        """表格被點兩下。"""
+        self._edit_setting(row.get("key", ""))
+
+    def _edit_setting(self, label: str) -> None:
+        if not self.controller.is_editable(label):
+            self.status(f"「{label}」需要在 config.yaml 裡修改", "muted")
+            return
+
+        _section, _key, kind, options, help_text, current = self.controller.setting_spec(
+            label
+        )
+        value = self._ask_for_value(label, kind, options, help_text, current)
+        if value is None:
+            return
+
+        try:
+            self.controller.update_setting(label, value)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        self.status(f"「{label}」已更新，重新啟動程式後生效", "success")
+        self.refresh()
+
+    def _ask_for_value(self, label, kind, options, help_text, current):
+        """依型別問使用者要改成什麼。取消時回 ``None``。"""
+        title = f"修改「{label}」"
+
+        if kind == "bool":
+            reply = QMessageBox.question(
+                self,
+                title,
+                f"{help_text}\n\n目前：{'開啟' if current else '關閉'}\n"
+                f"要改成「{'關閉' if current else '開啟'}」嗎？",
+            )
+            return (not current) if reply == QMessageBox.StandardButton.Yes else None
+
+        if kind == "choice":
+            choice, ok = QInputDialog.getItem(
+                self, title, help_text, list(options),
+                list(options).index(current) if current in options else 0,
+                False,
+            )
+            return choice if ok else None
+
+        if kind == "int":
+            low, high = options
+            value, ok = QInputDialog.getInt(
+                self, title, help_text, int(current), int(low), int(high)
+            )
+            return value if ok else None
+
+        if kind == "float":
+            low, high = options
+            value, ok = QInputDialog.getDouble(
+                self, title, help_text, float(current), float(low), float(high), 1
+            )
+            return value if ok else None
+
+        text, ok = QInputDialog.getText(self, title, help_text, text=str(current))
+        return text if ok else None
 
     def _build_encryption_section(self) -> None:
         """個資欄位加密的狀態。
@@ -686,12 +793,47 @@ class SettingsPage(BasePage):
         section.body_layout.addLayout(buttons)
 
         note = QLabel(
-            "每日與每週備份會依保留數量自動清理，這裡的刪除是給手動備份、"
-            "或想立刻騰出空間時用的。"
+            "上面是**完整備份**：整個資料庫的副本，「還原所選」會把資料庫換成"
+            "那個時間點的狀態。每日與每週備份會依保留數量自動清理，"
+            "手動備份會一直留著。"
         )
         note.setObjectName("MutedLabel")
         note.setWordWrap(True)
+        note.setText(note.text().replace("**", ""))     # QLabel 不吃 Markdown
         section.body_layout.addWidget(note)
+
+        # --- 單日匯出 ---
+        #
+        # 使用者想要的是「把某一天收集的那批單獨存一份」。那件事沒辦法用備份
+        # 做到——SQLite 的備份是整個檔案複製，「只備份星期二」還原回去會把
+        # 其他日期的資料一起抹掉。所以這裡產生的是可以重新匯入的資料檔，
+        # 並且明講兩者的差別，不要讓使用者以為它能拿來還原。
+        divider = QLabel("")
+        section.body_layout.addWidget(divider)
+
+        section.body_layout.addWidget(caption("單獨存下某一天收集到的資料"))
+
+        day_row = QHBoxLayout()
+        self.backup_day_combo = WideComboBox()
+        day_row.addWidget(self.backup_day_combo, 1)
+
+        self.backup_day_format = WideComboBox()
+        self.backup_day_format.addItems(["excel", "csv", "json"])
+        day_row.addWidget(self.backup_day_format)
+
+        export_day_button = QPushButton("匯出這一天")
+        export_day_button.clicked.connect(self._export_selected_day)
+        day_row.addWidget(export_day_button)
+        day_row.addStretch(1)
+        section.body_layout.addLayout(day_row)
+
+        day_note = QLabel(
+            "這是匯出，不是備份：產生的是可以重新匯入的資料檔，適合把某一批"
+            "單獨留存或交給別人，但沒辦法拿來還原整個資料庫。"
+        )
+        day_note.setObjectName("MutedLabel")
+        day_note.setWordWrap(True)
+        section.body_layout.addWidget(day_note)
 
         self._body_layout.addWidget(section)
 
@@ -721,6 +863,7 @@ class SettingsPage(BasePage):
             "password_status": self.controller.credential_status("gmail_app_password"),
             "daily_limit": mail_controller.daily_limit(),
             "backups": self.controller.backups(),
+            "crawl_dates": self.controller.crawl_dates(),
         }
 
     def _apply_refresh(self, data: dict[str, Any]) -> None:
@@ -731,6 +874,7 @@ class SettingsPage(BasePage):
         self._apply_gmail_status(data["address_status"], data["password_status"])
         self.daily_limit_entry.set(str(data["daily_limit"]))
         self._apply_backups(data["backups"])
+        self._refresh_backup_days(data["crawl_dates"])
         # 排程表單在 UI 執行緒直接讀設定就好——都是已經載入的設定值與檔名
         # 清單，沒有資料庫查詢，不值得再多開一個背景工作。
         self._load_scheduler()
@@ -746,9 +890,8 @@ class SettingsPage(BasePage):
         # 常常被截圖下來問問題——要開實際位置的話旁邊就有「開啟設定資料夾」。
         from core.config import display_path
 
-        self.config_label.setText(
-            f"設定值於 {display_path(config_path)} 中編輯，重新啟動應用程式後才會生效。"
-        )
+        # 上面那行提示已經講了怎麼改設定，這裡只需要說「檔案在哪」。
+        self.config_label.setText(f"設定檔：{display_path(config_path)}")
 
     def _apply_encryption_status(self, report: Any) -> None:
         lines = [f"狀態：{report.describe()}"]
@@ -1069,6 +1212,38 @@ class SettingsPage(BasePage):
             self.report_error(exc)
             return
         self.status(f"已從 {name} 還原 -- 請重新啟動應用程式", "success")
+
+    def _refresh_backup_days(self, dates: list) -> None:
+        previous = self.backup_day_combo.currentData()
+        self.backup_day_combo.blockSignals(True)
+        self.backup_day_combo.clear()
+        for day, count in dates:
+            self.backup_day_combo.addItem(f"{day:%Y-%m-%d}（{count} 家）", day.isoformat())
+        if previous:
+            index = self.backup_day_combo.findData(previous)
+            if index >= 0:
+                self.backup_day_combo.setCurrentIndex(index)
+        self.backup_day_combo.blockSignals(False)
+
+    def _export_selected_day(self) -> None:
+        from datetime import date
+
+        raw = self.backup_day_combo.currentData()
+        if not raw:
+            self.status("還沒有任何收集紀錄可以匯出", "error")
+            return
+
+        try:
+            path, count = self.controller.export_day(
+                date.fromisoformat(raw), self.backup_day_format.currentText()
+            )
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        from core.config import display_path
+
+        self.status(f"已匯出 {count} 家到 {display_path(path)}", "success")
 
     def _delete_selected_backup(self) -> None:
         row = self.backup_table.selected_row()
