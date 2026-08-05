@@ -47,6 +47,29 @@ from verifier.validators import (
 log = get_logger(LogCategory.CRAWL)
 
 
+#: 自由欄位的上限。名錄頁面偶爾會把整段公告文字寫成「標題：內文」，解析出來
+#: 就是一個超長的欄位；截斷比讓詳細資料視窗塞不下好。
+_MAX_EXTRA_FIELDS = 30
+_MAX_EXTRA_VALUE_CHARS = 500
+
+
+def _clean_extra_fields(values: dict[str, str]) -> dict[str, str]:
+    """自由欄位的最低限度整理：去空白、丟空值、限制長度與筆數。
+
+    刻意不做正規化——這些欄位的意義只有那個名錄知道，程式沒有立場改寫它們。
+    """
+    cleaned: dict[str, str] = {}
+    for key, value in values.items():
+        label = str(key).strip()
+        text = str(value).strip()
+        if not label or not text:
+            continue
+        cleaned[label[:60]] = text[:_MAX_EXTRA_VALUE_CHARS]
+        if len(cleaned) >= _MAX_EXTRA_FIELDS:
+            break
+    return cleaned
+
+
 class CleaningService:
     """Normalize, validate and key a scraped record."""
 
@@ -114,6 +137,7 @@ class CleaningService:
             fax=normalize_phone(raw.fax) or None,
             products=(raw.products or "").strip() or None,
             contact_person=normalize_person_name(raw.contact_person),
+            extra_fields=_clean_extra_fields(raw.extra_fields),
             source=raw.source,
             source_url=raw.source_url,
             email_verdict=verdict,

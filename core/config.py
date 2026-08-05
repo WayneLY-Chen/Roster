@@ -227,6 +227,15 @@ class SourceConfig(_Base):
     #: 編碼錯誤或乾脆沒宣告的舊站台（例如 Big5 編碼的網站）。
     encoding: str | None = None
 
+    #: 是否從「標籤︰值」的文字排版補抓欄位。
+    #:
+    #: 預設開啟，因為它只補、不覆蓋：選擇器抓到的值一律優先，這裡填的是選擇器
+    #: 留下的空格。舊式的公會名錄整頁沒有一個 class，「負責人」那一欄沒有任何
+    #: CSS 選擇器指得到，只有這條路抓得到。
+    #:
+    #: 要關掉的情形：頁面內文剛好大量使用冒號，導致自由欄位被灌進雜訊。
+    label_fields: bool = True
+
     # Taiwanese trade-association directories almost all follow the same shape:
     # the list page carries only the company name, and the contact details live
     # on a per-company detail page behind it. ``detail_link`` says how to find

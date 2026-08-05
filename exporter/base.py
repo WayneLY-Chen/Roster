@@ -94,28 +94,59 @@ def _format_value(value: object, date_format: str) -> object:
     return value
 
 
+#: 匯出檔最多附加這麼多個自由欄位。名錄各自的欄位通常不到十個；設上限只是
+#: 為了讓一份混了很多來源的資料不會變成幾百欄的試算表。
+MAX_EXTRA_COLUMNS = 20
+
+
+def extra_columns(rows: list[CompanyView], limit: int = MAX_EXTRA_COLUMNS) -> list[str]:
+    """匯出資料裡出現過的自由欄位名稱，出現次數多的排前面。
+
+    這些欄位是各個名錄自己的（「會員代表」「入會年月日」），欄位名稱由資料
+    決定而不是由設定決定，所以只能在這裡從資料本身推。
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        for key in getattr(row, "extra_fields", None) or {}:
+            counts[key] = counts.get(key, 0) + 1
+    return sorted(counts, key=lambda key: (-counts[key], key))[:limit]
+
+
 def build_dataframe(
     rows: list[CompanyView],
     config: AppConfig | None = None,
     columns: list[str] | None = None,
     translate_headers: bool = True,
 ) -> pd.DataFrame:
-    """Shape rows into the export frame."""
+    """Shape rows into the export frame.
+
+    固定欄位之後會自動接上這批資料裡出現過的自由欄位，一個欄位一欄。少了這
+    一段，使用者在公司詳細資料裡看得到的東西匯出之後就不見了。
+    """
     config = config or get_config()
     columns = columns or resolve_columns(config)
+    # 整包字典塞進一格對誰都沒有用；下面會把它攤成一欄一個欄位。
+    columns = [column for column in columns if column != "extra_fields"]
     date_format = config.exporter.date_format
+    extras = extra_columns(rows)
 
-    records = [
-        {
+    records = []
+    for row in rows:
+        record = {
             column: _format_value(getattr(row, column, None), date_format)
             for column in columns
         }
-        for row in rows
-    ]
-    frame = pd.DataFrame(records, columns=columns)
+        row_extras = getattr(row, "extra_fields", None) or {}
+        for key in extras:
+            record[key] = row_extras.get(key, "")
+        records.append(record)
+
+    all_columns = columns + extras
+    frame = pd.DataFrame(records, columns=all_columns)
 
     if translate_headers:
-        frame = frame.rename(columns={c: HEADER_LABELS.get(c, c) for c in columns})
+        # 自由欄位沒有雙語標題可以查——它們的名稱就是名錄上原本的文字。
+        frame = frame.rename(columns={c: HEADER_LABELS.get(c, c) for c in all_columns})
     return frame
 
 

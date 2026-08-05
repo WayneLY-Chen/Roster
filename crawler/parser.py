@@ -28,6 +28,37 @@ _PHONE_IN_TEXT = re.compile(
 )
 
 
+# <meta charset="big5"> 與舊式的
+# <meta http-equiv="Content-Type" content="text/html; charset=big5">
+# 兩種寫法。用位元組比對是刻意的：這一段本身就是「這頁該怎麼解碼」的答案，
+# 在還沒解碼之前不能先假設一種編碼去讀它。
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]{0,200}?charset\s*=\s*["']?\s*([A-Za-z0-9_\-]{2,20})""",
+    re.IGNORECASE,
+)
+
+#: 這些名稱代表「就是 UTF-8」，宣告了也不必重新解碼。
+_UTF8_NAMES = frozenset({"utf-8", "utf8", "utf_8", "ascii", "us-ascii"})
+
+
+def sniff_declared_encoding(raw: bytes) -> str | None:
+    """回傳 HTML 自己宣告的編碼；沒宣告或宣告的就是 UTF-8 時回傳 ``None``。
+
+    為什麼需要：台灣的公協會名錄有不少是 2000 年代的 ASP／PHP 站，內容是
+    Big5，但 HTTP 標頭常常只寫 ``text/html`` 而不附 charset。少了 charset，
+    HTTP 用戶端只能假設 UTF-8，整頁中文會變成亂碼——而亂碼的公司名稱看起來
+    仍然「有值」，所以不會有任何錯誤，只會安靜地存進一堆看不懂的字。真正的
+    答案就寫在頁面自己的 meta 標籤裡。
+    """
+    match = _META_CHARSET_RE.search(raw[:4096])
+    if match is None:
+        return None
+    name = match.group(1).decode("ascii", errors="ignore").strip().lower()
+    if not name or name in _UTF8_NAMES:
+        return None
+    return name
+
+
 def make_soup(html: str) -> BeautifulSoup:
     """Parse HTML with lxml, falling back to the stdlib parser."""
     try:

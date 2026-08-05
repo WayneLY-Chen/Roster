@@ -359,7 +359,10 @@ def import_data(
         )
     )
     if summary.unmapped_columns:
-        console.print(f"[dim]Ignored columns: {', '.join(summary.unmapped_columns)}[/dim]")
+        console.print(
+            "[dim]Kept as free-form fields: "
+            f"{', '.join(summary.unmapped_columns)}[/dim]"
+        )
 
 
 # ----------------------------------------------------------------------- gui

@@ -43,12 +43,21 @@ _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 _ENCODING_ALIASES = {"big5": "big5hkscs"}
 
 
+def decode_bytes(raw: bytes, encoding: str) -> str:
+    """以指定編碼解碼位元組，未知編碼時退回 UTF-8 而不是讓整頁失敗。"""
+    codec = _ENCODING_ALIASES.get(encoding.lower(), encoding)
+    try:
+        return raw.decode(codec, errors="replace")
+    except LookupError:
+        log.warning("unknown encoding {!r}; falling back to utf-8", encoding)
+        return raw.decode("utf-8", errors="replace")
+
+
 def _decode_body(response: httpx.Response, encoding: str | None) -> str:
     """依指定編碼解碼回應內容；未指定時交給 httpx 自己判斷（標頭或自動偵測）。"""
     if not encoding:
         return response.text
-    codec = _ENCODING_ALIASES.get(encoding.lower(), encoding)
-    return response.content.decode(codec, errors="replace")
+    return decode_bytes(response.content, encoding)
 
 
 def _encode_form_body(data: dict[str, str], encoding: str) -> bytes:
@@ -76,6 +85,11 @@ class FetchResult:
     html: str
     elapsed: float = 0.0
     from_cache: bool = False
+    #: 未經解碼的原始回應內容。分析網址時用得到：頁面可能在 HTML 裡宣告了
+    #: 一個跟 HTTP 標頭不同的編碼（老舊的 Big5 站台幾乎都是這樣），留著原始
+    #: 位元組就能直接換編碼重解一次，不必為了同一頁再送一次請求。
+    #: Playwright 引擎沒有這個東西——它交出來的是瀏覽器解碼後的 DOM。
+    raw: bytes = b""
 
     @property
     def ok(self) -> bool:
@@ -258,6 +272,7 @@ class HttpxFetcher(BaseFetcher):
             url=str(response.url),
             status_code=response.status_code,
             html=_decode_body(response, encoding),
+            raw=response.content,
         )
 
     @staticmethod

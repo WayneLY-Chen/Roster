@@ -182,20 +182,42 @@ def rows_to_records(frame: pd.DataFrame, source_label: str) -> tuple[list[RawCom
             "company_name, company, name, 公司名稱, 廠商名稱"
         )
 
+    # 對應不到的欄位不再丟掉，改成原樣保留為自由欄位。匯出時每個自由欄位
+    # 各佔一欄，不收回來的話「匯出→在 Excel 改→匯入」這一趟就會把它們洗掉。
+    # 空白與 pandas 給無標題欄位取的 "Unnamed: 3" 排除在外，那些是版面不是資料。
+    keepable = [
+        column for column in unmapped
+        if column.strip() and not column.startswith("Unnamed:")
+    ]
+
+    def _cell(row, column: str) -> str:
+        value = row.get(column)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return ""
+        text = str(value).strip()
+        return "" if text.lower() == "nan" else text
+
     records: list[RawCompany] = []
     for _, row in frame.iterrows():
         values: dict[str, str] = {}
         for column, field_name in mapping.items():
-            value = row.get(column)
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                continue
-            text = str(value).strip()
-            if text and text.lower() != "nan":
+            text = _cell(row, column)
+            if text:
                 values[field_name] = text
         if not values.get("company_name"):
             continue
+        extra_fields = {
+            column: text for column in keepable if (text := _cell(row, column))
+        }
         remark = values.pop("remark", None)
-        records.append(RawCompany(**values, source=source_label, extra={"remark": remark} if remark else {}))
+        records.append(
+            RawCompany(
+                **values,
+                source=source_label,
+                extra={"remark": remark} if remark else {},
+                extra_fields=extra_fields,
+            )
+        )
 
     return records, unmapped
 

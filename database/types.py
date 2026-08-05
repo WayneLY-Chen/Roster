@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import String, Text, func
@@ -114,6 +115,40 @@ class EncryptedText(_EncryptedValue, TypeDecorator):
 
     impl = Text
     cache_ok = True
+
+
+class EncryptedJson(_EncryptedValue, TypeDecorator):
+    """加密的 JSON 物件欄位，Python 端看到的是 ``dict[str, str]``。
+
+    用來裝各個名錄自己才有的欄位（「會員代表」「入會年月日」「註冊編號」）。
+    為什麼加密：這些欄位裝什麼是那個公會決定的，不是我們能預先分類的——
+    「會員代表︰陳萬中」裝的就是人名。既然裝得下個資，就照個資處理。
+
+    注意：**就地修改字典不會被寫回資料庫**。SQLAlchemy 只在屬性被重新指派時
+    才標記為髒資料，``company.extra_fields["x"] = 1`` 不算。要更新一律整個換掉。
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
+        if not value:
+            return None
+        payload = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return super().process_bind_param(payload, dialect)
+
+    def process_result_value(self, value: Any, dialect: Any) -> dict[str, str]:
+        plain = super().process_result_value(value, dialect)
+        if not plain:
+            return {}
+        try:
+            data = json.loads(plain)
+        except (TypeError, ValueError):
+            # 壞掉的一格 JSON 不該讓整份清單開不起來。
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): str(v) for k, v in data.items()}
 
 
 def is_encrypted_column(column: Any) -> bool:

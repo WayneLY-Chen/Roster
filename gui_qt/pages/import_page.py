@@ -220,7 +220,8 @@ class ImportPage(BasePage):
             f"已讀取筆數：{summary.rows_read}\n"
             f"新增：{summary.records_new}    合併：{summary.records_merged}\n"
             f"重複：{summary.records_duplicate}    無效：{summary.records_invalid}\n"
-            f"未對應欄位：{unmapped}"
+            f"沒有固定欄位可對應：{unmapped}\n"
+            "（這些會以原本的欄位名稱保留，在公司的「詳細資料」裡看得到）"
         )
         self.import_status.setText("匯入完成。")
         self.status("匯入完成", "success")

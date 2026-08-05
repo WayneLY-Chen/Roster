@@ -30,6 +30,7 @@ from core.logging_setup import get_logger
 from core.schemas import RawCompany
 from crawler.base import BaseSource, PageBatch
 from crawler.fetcher import BaseFetcher
+from crawler.labels import MIN_PAIRS, parse_record, split_cjk_english
 from crawler.parser import (
     extract_field,
     extract_record,
@@ -161,7 +162,9 @@ class GenericHtmlSource(BaseSource):
         absolute = urljoin(page_url, href)
         return absolute if absolute.startswith(("http://", "https://")) else None
 
-    def _merge_detail(self, record_values: dict, detail_url: str) -> None:
+    def _merge_detail(
+        self, record_values: dict, detail_url: str, extra_fields: dict[str, str]
+    ) -> None:
         """Fetch a detail page and fill in whatever the list page lacked.
 
         List-page values win: they are cheaper and already verified against
@@ -188,6 +191,10 @@ class GenericHtmlSource(BaseSource):
             if value and not record_values.get(key):
                 record_values[key] = value
 
+        # 明細頁才是「標籤︰值」排版最常出現的地方——列表頁只給名稱，明細頁
+        # 才把負責人、傳真、統編一項一項列出來。
+        self._harvest_labels(soup, record_values, extra_fields)
+
         # Even without explicit rules, a detail page is the natural place to
         # find the contact address the list page omitted.
         if not record_values.get("email"):
@@ -199,6 +206,35 @@ class GenericHtmlSource(BaseSource):
             if phones:
                 record_values["phone"] = phones[0]
 
+    def _harvest_labels(self, scope, values: dict, extra_fields: dict[str, str]) -> None:
+        """從「標籤︰值」的文字排版補欄位，並收下沒有對應欄位的部分。
+
+        只補選擇器沒抓到的欄位——設定好的規則永遠優先，這裡是補漏不是覆蓋。
+
+        為什麼要有這一段：舊式的公會名錄整頁只有 ``<table>`` 與 ``<font>``，
+        沒有 class 也沒有標題標籤，「負責人」那一欄根本沒有 CSS 選擇器指得到。
+        唯一穩定的線索是標籤就寫在值前面，所以只能從文字解析。
+        """
+        if not self.source_config.label_fields:
+            return
+
+        parsed = parse_record(scope.get_text(" ", strip=True))
+        if parsed.pair_count < MIN_PAIRS:
+            return          # 一兩個冒號可能只是內文，不是這種排版
+
+        for name, value in parsed.fields.items():
+            if name in _KNOWN_FIELDS and not values.get(name):
+                values[name] = value
+
+        # 標題列常常是「中文名稱　English Name」並排，兩個都要。
+        if not values.get("english_name"):
+            _chinese, english = split_cjk_english(parsed.heading)
+            if english:
+                values["english_name"] = english
+
+        for label, value in parsed.extra.items():
+            extra_fields.setdefault(label, value)
+
     def _to_record(self, item, page_url: str) -> RawCompany | None:
         """Turn one list item into a record, or ``None`` when it has no name."""
         extracted = extract_record(item, self.source_config.fields, page_url)
@@ -207,9 +243,12 @@ class GenericHtmlSource(BaseSource):
         if not name:
             return None
 
+        extra_fields: dict[str, str] = {}
         detail_url = self._detail_url(item, page_url)
         if detail_url:
-            self._merge_detail(extracted, detail_url)
+            self._merge_detail(extracted, detail_url, extra_fields)
+
+        self._harvest_labels(item, extracted, extra_fields)
 
         # Configured selectors win; page-wide harvesting only fills gaps.
         if not extracted.get("email"):
@@ -229,4 +268,5 @@ class GenericHtmlSource(BaseSource):
             source=self.label,
             source_url=page_url,
             extra=extra,
+            extra_fields=extra_fields,
         )

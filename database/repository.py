@@ -415,6 +415,7 @@ class CompanyRepository:
                 fax=record.fax,
                 products=record.products,
                 contact_person=record.contact_person,
+                extra_fields=dict(record.extra_fields),
                 source=record.source,
                 source_url=record.source_url,
                 status=record.status.value,
@@ -445,6 +446,17 @@ class CompanyRepository:
             incoming = getattr(record, field)
             if incoming and not getattr(existing, field):
                 setattr(existing, field, incoming)
+
+        # 自由欄位逐個 key 補，規則跟固定欄位一致：只填空的，不覆蓋既有值。
+        # 整個字典換掉（而不是就地改）是必要的——SQLAlchemy 不會偵測到
+        # 字典的就地修改，改了也不會寫回資料庫。
+        if record.extra_fields:
+            merged = dict(existing.extra_fields or {})
+            for key, value in record.extra_fields.items():
+                if value and not merged.get(key):
+                    merged[key] = value
+            if merged != (existing.extra_fields or {}):
+                existing.extra_fields = merged
 
         if record.source_url:
             existing.source_url = record.source_url
@@ -651,6 +663,14 @@ class CompanyRepository:
             ):
                 if not getattr(keeper, field) and getattr(victim, field):
                     setattr(keeper, field, getattr(victim, field))
+
+            if victim.extra_fields:
+                merged = dict(keeper.extra_fields or {})
+                for key, value in victim.extra_fields.items():
+                    if value and not merged.get(key):
+                        merged[key] = value
+                keeper.extra_fields = merged
+
             existing_tags = {tag.name for tag in keeper.tags}
             for tag in victim.tags:
                 if tag.name not in existing_tags:
@@ -693,6 +713,7 @@ class CompanyRepository:
             fax=company.fax,
             products=company.products,
             contact_person=company.contact_person,
+            extra_fields=dict(company.extra_fields or {}),
             source=company.source,
             source_url=company.source_url,
             status=company.status,

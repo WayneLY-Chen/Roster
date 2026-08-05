@@ -40,7 +40,7 @@ from core.constants import (
     Priority,
     RecordStatus,
 )
-from database.types import EncryptedString, EncryptedText
+from database.types import EncryptedJson, EncryptedString, EncryptedText
 
 
 def now() -> datetime:
@@ -99,6 +99,18 @@ class Company(Base):
     #: 主要產品／代理品項。名錄上常見的「代理廠商及代銷產品」。
     products: Mapped[str | None] = mapped_column(Text)
     contact_person: Mapped[str | None] = mapped_column(EncryptedString(128))
+    #: 這個名錄有、但程式沒有對應欄位的東西，原樣保留。
+    #:
+    #: 每個公會列的欄位都不一樣——旅行公會有「會員代表」「入會年月日」
+    #: 「註冊編號」，化工公會有「代理廠商及代銷產品」。要嘛替每一種名錄加一個
+    #: 欄位（加不完，而且對其他名錄全是空的），要嘛丟掉（使用者實際看到的東西
+    #: 就這樣消失了）。存成 key/value 是第三條路：抓到什麼就存什麼，在詳細資料
+    #: 裡照原本的標籤顯示。
+    #:
+    #: 代價是它不能用 SQL 搜尋或排序，所以只有「已知欄位裝不下」的東西才放這裡。
+    extra_fields: Mapped[dict[str, str]] = mapped_column(
+        EncryptedJson, default=dict, nullable=True
+    )
 
     # --- provenance ---
     source: Mapped[str | None] = mapped_column(String(128), index=True)

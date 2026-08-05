@@ -43,6 +43,11 @@ class RawCompany(BaseModel):
     contact_person: str | None = None
     source: str = "unknown"
     source_url: str | None = None
+    #: 名錄上有、但上面沒有對應欄位的東西，key 是名錄原本的標籤文字。
+    #: 會被原樣存進資料庫並顯示在公司詳細資料裡。
+    extra_fields: dict[str, str] = Field(default_factory=dict)
+    #: 呼叫端之間傳遞的暫時資訊（匯入的備註、Gmail 抓到的職稱）。
+    #: 跟 ``extra_fields`` 不同，**不會**進資料庫——各自的呼叫端自己取用。
     extra: dict[str, Any] = Field(default_factory=dict)
 
     def is_empty(self) -> bool:
@@ -74,6 +79,8 @@ class CleanCompany(BaseModel):
     email_checked_at: datetime | None = None
     status: RecordStatus = RecordStatus.ACTIVE
     remark: str | None = None
+    #: 名錄上有、但這裡沒有對應欄位的東西，以原本的標籤為 key 保留。
+    extra_fields: dict[str, str] = Field(default_factory=dict)
 
 
 class CompanyView(BaseModel):
@@ -101,6 +108,8 @@ class CompanyView(BaseModel):
     email_verdict: str = EmailVerdict.UNKNOWN.value
     follow_up_date: date | None = None
     remark: str | None = None
+    #: 這個名錄自己才有的欄位，key 是名錄上原本的標籤文字。
+    extra_fields: dict[str, str] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None

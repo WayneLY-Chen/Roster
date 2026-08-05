@@ -30,8 +30,9 @@ from core.constants import LogCategory
 from core.errors import CrawlError
 from core.logging_setup import get_logger
 from core.schemas import RawCompany
-from crawler.fetcher import BaseFetcher, build_fetcher
-from crawler.parser import extract_record, make_soup
+from crawler.fetcher import BaseFetcher, build_fetcher, decode_bytes
+from crawler.labels import MIN_PAIRS, parse_record, split_cjk_english
+from crawler.parser import extract_record, make_soup, sniff_declared_encoding
 from verifier.classify import classify
 from verifier.normalize import normalize_phone, normalize_tax_id
 from verifier.validators import is_valid_email, is_valid_phone
@@ -106,6 +107,11 @@ class DiscoveryResult:
     #: 知道自己該把它調到多少——不告訴他的話，他會存下一個「只爬前幾頁」的
     #: 來源，然後以為程式不會自動翻頁。
     page_count: int = 0
+    #: 頁面自己宣告的編碼（例如 ``big5``）。UTF-8 或沒宣告時是 None。
+    encoding: str | None = None
+    #: 從「標籤︰值」排版讀到、但沒有對應欄位的東西，用來給使用者看預覽。
+    #: key 是名錄上的標籤，value 是前幾筆的樣本。
+    extra_field_samples: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -140,6 +146,7 @@ class DiscoveryResult:
             fields={key: guess.to_rule() for key, guess in self.fields.items()},
             detail_link=detail_link,
             label=name,
+            encoding=self.encoding,
         )
 
 
@@ -244,19 +251,101 @@ def find_list_selector(soup: BeautifulSoup) -> tuple[str, list[Tag], list[str]]:
         )
         best_selector, best_items = inner_selector, inner_items
 
-    # A tag-only selector may over-match; check it and warn rather than silently
-    # collecting the wrong nodes.
-    matched = soup.select(best_selector)
-    if len(matched) > len(best_items) * 1.5:
-        notes.append(
-            f"選擇器 {best_selector} 在整頁比對到 {len(matched)} 個區塊，"
-            f"但偵測到的清單只有 {len(best_items)} 筆，建議手動確認。"
-        )
+    # A tag-only selector may over-match. Try to narrow it first; only warn if
+    # narrowing fails, rather than silently collecting the wrong nodes.
+    scoped = _scope_selector(soup, best_selector, best_items)
+    if scoped != best_selector:
+        best_selector = scoped
+    else:
+        matched = soup.select(best_selector)
+        if len(matched) > len(best_items) * 1.5:
+            notes.append(
+                f"選擇器 {best_selector} 在整頁比對到 {len(matched)} 個區塊，"
+                f"但偵測到的清單只有 {len(best_items)} 筆，建議手動確認。"
+            )
     return best_selector, best_items, notes
+
+
+def _anchor_css(node: Tag) -> str | None:
+    """節點能不能當「錨點」——有 id 或有意義的 class 才算得上獨一無二。"""
+    node_id = node.get("id")
+    if isinstance(node_id, str) and node_id.strip():
+        return f"#{node_id.strip()}"
+    css = _css_for(node)
+    return css if "." in css else None
+
+
+def _scope_selector(soup: BeautifulSoup, selector: str, items: list[Tag]) -> str:
+    """把過於籠統的選擇器縮小到只選中真正的清單。
+
+    ``table`` 這種只有標籤名的選擇器，在真正爬取時會把版面用的表格一起選進來
+    ——2000 年代那批用巢狀表格排版的名錄尤其嚴重。偵測階段是靠「兄弟節點分組」
+    找到清單的，那個資訊在存成 ``list_selector`` 之後就沒了，所以必須在這裡把
+    範圍寫進選擇器本身。
+
+    作法是往上找最近一個帶 id 或 class 的祖先當前綴，並且**驗證**加了前綴之後
+    選到的節點與偵測到的清單完全一致——猜一個看起來比較精確的選擇器，卻選到
+    另一批節點，比原本的問題更糟。
+    """
+    wanted = {id(node) for node in items}
+
+    def selects(candidate: str) -> set[int] | None:
+        try:
+            return {id(node) for node in soup.select(candidate) if isinstance(node, Tag)}
+        except Exception:
+            return None
+
+    current = selects(selector)
+    if current is None or len(current) <= len(items) * 1.2:
+        return selector
+
+    for ancestor in items[0].parents:
+        if not isinstance(ancestor, Tag) or ancestor.name in ("html", "[document]"):
+            break
+        anchor = _anchor_css(ancestor)
+        if anchor is None:
+            continue
+        candidate = f"{anchor} {selector}"
+        if selects(candidate) == wanted:
+            return candidate
+
+    return selector
 
 
 #: 內層元素要比外層多這麼多倍，才值得往下鑽。
 _DRILL_DOWN_RATIO = 1.5
+
+#: 行內元素不會是「一筆紀錄」，它們是紀錄裡面的一個片段。列出來擋掉是因為
+#: 光看數量的話它們一定贏——一張卡片裡有十幾個 ``<font>``、好幾個 ``<a>``。
+_INLINE_TAGS = frozenset({
+    "a", "span", "font", "b", "strong", "em", "i", "u", "small", "big",
+    "label", "abbr", "cite", "code", "sub", "sup", "br", "img", "wbr",
+})
+
+#: 內層元素的文字量至少要佔外層的這個比例，才可能是「一組紀錄」。
+#: 一個分類容器裡的公司卡片幾乎涵蓋容器全部的文字；而容器裡的某一個欄位
+#: （或所有連結加起來）只佔一小部分。這是分辨「往下鑽對了」與「鑽過頭、
+#: 鑽進欄位裡」最直接的訊號。
+_DRILL_DOWN_TEXT_COVERAGE = 0.5
+
+#: 內層元素裡「本身就像一筆紀錄」的比例下限。
+_DRILL_DOWN_RECORD_RATIO = 0.5
+
+
+def _looks_like_a_record(text: str) -> bool:
+    """一段文字像不像「一家公司」而不是「一家公司的某一欄」。
+
+    判準是兩個獨立訊號取聯集：帶著公司名稱的特徵字（有限公司、企業社、
+    工廠……），或帶著聯絡資訊（信箱、電話）。兩者都沒有的多半是欄位本身
+    ——「負責人︰王大明」「地址︰台北市……」。
+
+    為什麼要兩個而不是一個：只看名稱特徵，會擋掉品牌式命名的名錄
+    （台積電、Google 都不帶特徵字）；只看聯絡資訊，會擋掉只列名稱、
+    聯絡方式在明細頁的名錄。任一成立就放行。
+    """
+    if _has_company_marker(text):
+        return True
+    return bool(_EMAIL_RE.search(text) or _PHONE_RE.search(text))
 
 
 def _looks_like_a_name(node: Tag) -> bool:
@@ -277,10 +366,13 @@ def _refine_to_inner_items(
     if not outer_items:
         return None
 
+    outer_chars = sum(len(_text(item)) for item in outer_items)
     counter: Counter[str] = Counter()
     examples: dict[str, Tag] = {}
     for item in outer_items:
         for child in item.find_all(True):
+            if child.name in _INLINE_TAGS:
+                continue
             if not _looks_like_a_name(child):
                 continue
             signature = _signature(child)
@@ -306,6 +398,18 @@ def _refine_to_inner_items(
         # drilled past the record into its individual fields.
         if sum(1 for n in inner_items if _looks_like_a_name(n)) < len(inner_items) * 0.8:
             continue
+        # 內層必須裝得下外層大部分的文字。少了這一關，一個 24 筆的名錄會被
+        # 「每張卡片裡的連結」打敗——連結比較多，但每個連結只有幾個字，整筆
+        # 資料就這樣被拆散了。
+        inner_texts = [_text(node) for node in inner_items]
+        inner_chars = sum(len(text) for text in inner_texts)
+        if outer_chars and inner_chars < outer_chars * _DRILL_DOWN_TEXT_COVERAGE:
+            continue
+        # 而且內層自己要像一筆紀錄。文字量這一關擋不掉「一筆紀錄的十個列」
+        # ——那十列加起來當然涵蓋整筆資料，但每一列都只是一個欄位。
+        records = sum(1 for text in inner_texts if _looks_like_a_record(text))
+        if records < len(inner_items) * _DRILL_DOWN_RECORD_RATIO:
+            continue
         return candidate, inner_items
 
     return None
@@ -314,24 +418,43 @@ def _refine_to_inner_items(
 # ------------------------------------------------------------------ fields
 
 
+#: 這些欄位的值是「這一家公司的」，每筆本來就該不一樣。相異率低於門檻代表
+#: 抓到的是全站共用的東西，不是這一家的資料。
+#:
+#: 這不是理論上的顧慮：實測有名錄把每一筆的 ``<a href>`` 都寫死成同一個網址
+#: （顯示的連結文字才是真的），照抓的話 1470 家公司會全部拿到同一個網站。
+#: 產業、地址不在這張清單裡——同一個公會的會員本來就可能全是同一個行業、
+#: 全在同一個城市。
+_PER_COMPANY_FIELDS = frozenset({"email", "phone", "fax", "website", "tax_id"})
+_MIN_PER_COMPANY_DISTINCT_RATIO = 0.5
+
+
 def _validated(field_name: str, selector: str, attr: str, items: list[Tag],
                regex: str | None = None) -> FieldGuess | None:
     """Apply a candidate rule to every item and keep it if it hits often enough."""
     rule = FieldRule(selector=selector, attr=attr, regex=regex)
     samples: list[str] = []
-    hits = 0
+    values: list[str] = []
     for item in items:
         from crawler.parser import extract_field
 
         value = extract_field(item, rule)
         if value:
-            hits += 1
+            values.append(value)
             if len(samples) < 3:
                 samples.append(value[:80])
 
-    hit_rate = hits / len(items) if items else 0.0
+    hit_rate = len(values) / len(items) if items else 0.0
     if hit_rate < MIN_FIELD_HIT_RATE:
         return None
+    if field_name in _PER_COMPANY_FIELDS and len(values) > 2:
+        distinct_ratio = len(set(values)) / len(values)
+        if distinct_ratio < _MIN_PER_COMPANY_DISTINCT_RATIO:
+            log.debug(
+                "rejecting {} rule {!r}: {:.0%} of items share the same value",
+                field_name, selector, 1 - distinct_ratio,
+            )
+            return None
     return FieldGuess(
         field=field_name, selector=selector, attr=attr, regex=regex,
         hit_rate=hit_rate, samples=samples,
@@ -458,7 +581,11 @@ def _has_company_marker(value: str) -> bool:
     if any(marker in text for marker in _COMPANY_MARKERS):
         return True
     # 單字尾要夠長才算，兩三個字的「更多」「查看」不會誤中。
-    if len(text) >= 4 and text.endswith(_COMPANY_SUFFIXES):
+    #
+    # 地址要先排除。「…中山北路二段45號」結尾的「號」正好也在單字尾清單裡
+    # （「祥發包裝材料行」「豫味開封包子店」那一類名稱靠的就是它），不擋掉
+    # 的話每一個地址都會被當成公司名稱。
+    if len(text) >= 4 and text.endswith(_COMPANY_SUFFIXES) and not _ADDRESS_RE.search(text):
         return True
     lowered = text.lower()
     return any(marker in lowered for marker in _COMPANY_MARKERS_EN)
@@ -486,6 +613,12 @@ def _score_name_values(values: list[str], item_count: int) -> float:
         return 0.0
     usable_ratio = len(usable) / len(values)
 
+    # 地址欄長得非常像公司名稱：每一列都不一樣、長度合理、而且「…一段1號」
+    # 的「號」正好也是台灣小型商家常見的名稱結尾。少了這一關，一個沒有公司
+    # 名稱的頁面會拿地址頂替，而那比誠實回報「找不到」糟得多。
+    if sum(1 for v in usable if _ADDRESS_RE.search(v)) > len(usable) / 2:
+        return 0.0
+
     marker_ratio = sum(1 for v in usable if _has_company_marker(v)) / len(usable)
 
     average_length = sum(len(v) for v in usable) / len(usable)
@@ -510,6 +643,44 @@ def _values_for(items: list[Tag], selector: str, attr: str = "text") -> list[str
         if value:
             values.append(value.strip())
     return values
+
+
+def _first_text_node(item: Tag) -> Tag | None:
+    """區塊裡第一個「自己就帶著文字」的最小元素。
+
+    取最小的那一層是重點：``<td><font>公司名</font></td>`` 要的是 ``font``，
+    因為 ``td`` 選出來的文字在別的欄位上會連標籤帶值一起吃進去。
+
+    class 或 id 已經寫明是別的欄位（``tel``、``addr``）的節點直接跳過——那是
+    頁面自己給的答案，比「它排在最前面」可靠。
+    """
+    for node in item.find_all(True):
+        if node.find(True) is not None:
+            continue                    # 還有子元素，不是最小的那一層
+        if _names_another_field(node):
+            continue
+        text = _text(node)
+        if text and not _is_obviously_not_a_name(text):
+            return node
+    return None
+
+
+def _names_another_field(node: Tag) -> bool:
+    """節點的 class/id 是不是指名了「公司名稱以外」的某個欄位。"""
+    tokens = list(node.get("class") or [])
+    if isinstance(tokens, str):
+        tokens = tokens.split()
+    if node.get("id"):
+        tokens.append(str(node.get("id")))
+    haystack = " ".join(tokens).lower()
+    if not haystack:
+        return False
+    return any(
+        hint in haystack
+        for field_name, hints in _CLASS_HINTS.items()
+        if field_name != "company_name"
+        for hint in hints
+    )
 
 
 def _guess_company_name(items: list[Tag]) -> FieldGuess | None:
@@ -545,6 +716,14 @@ def _guess_company_name(items: list[Tag]) -> FieldGuess | None:
             haystack = " ".join(tokens).lower()
             if any(hint in haystack for hint in _CLASS_HINTS["company_name"]):
                 structural[_css_for(node)] += 2.0
+
+    # 每一筆的第一段文字。上面三種候選都需要頁面有標題標籤、連結或 class，
+    # 而舊式的公會名錄三者皆無——整頁只有 <table> 與 <font>，公司名稱就是
+    # 卡片裡的第一段字。少了這一條，那類名錄一律回報「找不到公司名稱」。
+    for item in items:
+        first = _first_text_node(item)
+        if first is not None:
+            structural[_css_for(first)] += 2.0
 
     best: FieldGuess | None = None
     best_score = 0.0
@@ -589,6 +768,10 @@ def _guess_phone(items: list[Tag]) -> FieldGuess | None:
     )
 
 
+#: 連結文字長得像網址時才拿來當網址用（而不是「官方網站」這種說明文字）。
+_URL_IN_TEXT = r"(?:https?://|www\.)[^\s<>\"']+"
+
+
 def _guess_website(items: list[Tag], page_host: str) -> FieldGuess | None:
     """An outbound link is usually the company's own site."""
     counter: Counter[str] = Counter()
@@ -602,7 +785,23 @@ def _guess_website(items: list[Tag], page_host: str) -> FieldGuess | None:
                 counter[_css_for(node)] += 1
 
     for selector, _count in counter.most_common(3):
-        guess = _validated("website", selector, "href", items)
+        # ``[href^='http']`` 不能省。候選選擇器常常只是「a」，而同一筆資料裡
+        # 排在前面的往往是 mailto 連結——取第一個相符節點就會把信箱當成網址。
+        # 這個條件把 mailto:／tel:／javascript: 全部排除在外。
+        scoped = f"{selector}[href^='http']"
+
+        # 先看連結**文字**。理由是實測踩到的：有名錄在公司沒有網址時，直接把
+        # 上一家的 href 留在那裡，只把連結文字清空——照 href 抓的話，一整串
+        # 沒有網站的公司會被填上別人的網址，而畫面上根本看不到那個網址。
+        # 連結文字是使用者實際看得到的東西，兩者不一致時它才是對的。
+        # 文字不像網址（「官方網站」「前往」）時這一條命中率不足，自動落到
+        # 下面用 href，一般網站的行為完全不變。
+        guess = _validated("website", scoped, "text", items, regex=_URL_IN_TEXT)
+        if guess:
+            guess.reason = "連結文字就是網址"
+            return guess
+
+        guess = _validated("website", scoped, "href", items)
         if guess:
             guess.reason = "指向外部網域的連結"
             return guess
@@ -826,12 +1025,24 @@ def discover_from_html(html: str, url: str) -> DiscoveryResult:
         )
 
     result.preview = build_preview(items, result, url)
+
+    if result.extra_field_samples:
+        listed = "、".join(list(result.extra_field_samples)[:8])
+        result.notes.append(
+            f"這個名錄還有程式沒有固定欄位的資料：{listed}。"
+            "會照原本的名稱一起收下來，在公司的「詳細資料」裡看得到、也可以修改。"
+        )
+
     _add_quality_notes(result)
     return result
 
 
 def build_preview(items: list[Tag], result: DiscoveryResult, url: str, limit: int = 10):
-    """Extract records exactly as a real crawl would, for the preview table."""
+    """Extract records exactly as a real crawl would, for the preview table.
+
+    「exactly」包含標籤解析——爬取時會補的欄位，預覽也要補，否則使用者會看到
+    一片空白就以為這個名錄抓不到東西，而實際上抓得到。
+    """
     rules = {name: guess.to_rule() for name, guess in result.fields.items()}
     preview: list[RawCompany] = []
     skipped_ads = 0
@@ -845,7 +1056,12 @@ def build_preview(items: list[Tag], result: DiscoveryResult, url: str, limit: in
         if not classify(name, values.get("website")).is_company:
             skipped_ads += 1
             continue
-        preview.append(RawCompany(**values, source="preview", source_url=url))
+        extra_fields = _apply_labels_for_preview(item, values, result)
+        preview.append(
+            RawCompany(
+                **values, source="preview", source_url=url, extra_fields=extra_fields
+            )
+        )
 
     if skipped_ads:
         result.notes.append(
@@ -853,6 +1069,29 @@ def build_preview(items: list[Tag], result: DiscoveryResult, url: str, limit: in
             "verifier.filter_advertisements 關閉）。"
         )
     return preview
+
+
+def _apply_labels_for_preview(
+    item: Tag, values: dict[str, str | None], result: DiscoveryResult
+) -> dict[str, str]:
+    """對一筆預覽套用標籤解析，順便記下有哪些自由欄位可以給使用者看。"""
+    parsed = parse_record(item.get_text(" ", strip=True))
+    if parsed.pair_count < MIN_PAIRS:
+        return {}
+
+    for name, value in parsed.fields.items():
+        if not values.get(name):
+            values[name] = value
+    if not values.get("english_name"):
+        _chinese, english = split_cjk_english(parsed.heading)
+        if english:
+            values["english_name"] = english
+
+    for label, value in parsed.extra.items():
+        samples = result.extra_field_samples.setdefault(label, [])
+        if len(samples) < 3:
+            samples.append(value[:60])
+    return dict(parsed.extra)
 
 
 def _add_quality_notes(result: DiscoveryResult) -> None:
@@ -902,8 +1141,24 @@ def discover(
         if owned:
             fetcher.close()
 
-    log.info("analysing {} ({} bytes)", url, len(page.html))
-    result = discover_from_html(page.html, page.url)
+    # 頁面自己宣告的編碼優先於 HTTP 標頭。台灣不少公協會名錄是 Big5 的舊站，
+    # 標頭只寫 text/html 不附 charset，這時 HTTP 用戶端只能假設 UTF-8，整頁
+    # 中文會變成亂碼——而亂碼的公司名稱看起來仍然「有值」，不會有任何錯誤。
+    # 原始位元組留在 FetchResult 裡，所以換編碼重解不必再送一次請求。
+    html = page.html
+    declared = sniff_declared_encoding(page.raw) if page.raw else None
+    if declared:
+        html = decode_bytes(page.raw, declared)
+        log.info("page declares charset {!r}; re-decoded", declared)
+
+    log.info("analysing {} ({} bytes)", url, len(html))
+    result = discover_from_html(html, page.url)
+    result.encoding = declared
+    if declared:
+        result.notes.append(
+            f"這個網站用的是 {declared.upper()} 編碼（不是現在通用的 UTF-8），"
+            "已自動處理，中文不會變成亂碼。"
+        )
     log.info(
         "discovery: list={!r} items={} fields={}",
         result.list_selector, result.item_count, sorted(result.fields),

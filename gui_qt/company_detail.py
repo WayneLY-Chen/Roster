@@ -31,9 +31,13 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -174,6 +178,7 @@ class CompanyDetailDialog(QDialog):
             company.follow_up_date.strftime("%Y-%m-%d") if company.follow_up_date else ""
         )
         self.tags_entry.set(", ".join(company.tags))
+        self._set_extra_fields(company.extra_fields)
         self.remark_box.setPlainText(company.remark or "")
 
         self._contacts = list(data["contacts"])
@@ -201,7 +206,17 @@ class CompanyDetailDialog(QDialog):
     # -- details tab ------------------------------------------------------
 
     def _build_details_tab(self) -> None:
-        grid = QGridLayout(self.details_tab)
+        # 這一頁會長高：固定欄位之外還有「其他欄位」，而那一區有幾列是名錄
+        # 決定的，不是我們能事先算出來的。放進捲動區之後，欄位再多也只是往下
+        # 捲，不會把每一列壓到文字被切掉。
+        scroller = QScrollArea(self.details_tab)
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QScrollArea.Shape.NoFrame)
+        page = QWidget()
+        scroller.setWidget(page)
+        QVBoxLayout(self.details_tab).addWidget(scroller)
+
+        grid = QGridLayout(page)
 
         # 空欄位一律顯示「無資料」的淡色提示，而不是留白。留白看起來像
         # 「這個欄位壞了」或「還沒載入完」；寫著無資料才看得出是「爬到的
@@ -266,16 +281,82 @@ class CompanyDetailDialog(QDialog):
         self.tags_entry = _entry("標籤（以逗號分隔）")
         grid.addWidget(self.tags_entry, 8, 0, 1, 2)
 
-        grid.addWidget(caption("備註"), 9, 0, 1, 2)
+        self._build_extra_fields(grid, row=9)
+
+        grid.addWidget(caption("備註"), 12, 0, 1, 2)
         self.remark_box = QTextEdit()
         self.remark_box.setPlaceholderText(NO_DATA)
         self.remark_box.setFixedHeight(theme.text_box_height(6))
-        grid.addWidget(self.remark_box, 10, 0, 1, 2)
+        grid.addWidget(self.remark_box, 13, 0, 1, 2)
 
         save_button = QPushButton("儲存")
         save_button.setObjectName("PrimaryButton")  # 這個對話框最主要的動作
         save_button.clicked.connect(self._save)
-        grid.addWidget(save_button, 11, 1)
+        grid.addWidget(save_button, 14, 1)
+
+    # -- 其他欄位 ---------------------------------------------------------
+
+    def _build_extra_fields(self, grid: QGridLayout, row: int) -> None:
+        """名錄自己才有的欄位，一列一項，名稱與內容都可以改。
+
+        每個名錄列的東西都不一樣——旅行公會有「會員代表」「入會年月日」，
+        化工公會有「代理廠商及代銷產品」。上面那些固定欄位裝不下它們，而丟掉
+        等於使用者在網頁上看得到、在這裡卻找不到。
+        """
+        grid.addWidget(caption("其他欄位"), row, 0, 1, 2)
+
+        hint = QLabel("這一區是名錄上有、但上面沒有對應欄位的資料，照原本的名稱保留。")
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        grid.addWidget(hint, row + 1, 0, 1, 2)
+
+        self.extra_table = QTableWidget(0, 2)
+        self.extra_table.setHorizontalHeaderLabels(["欄位名稱", "內容"])
+        header = self.extra_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.extra_table.verticalHeader().setVisible(False)
+        self.extra_table.setFixedHeight(theme.text_box_height(6))
+        grid.addWidget(self.extra_table, row + 2, 0, 1, 2)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        add_button = QPushButton("新增欄位")
+        add_button.clicked.connect(lambda: self._append_extra_row("", ""))
+        buttons.addWidget(add_button)
+        remove_button = QPushButton("刪除這一列")
+        remove_button.setObjectName("DangerButton")
+        remove_button.clicked.connect(self._remove_extra_row)
+        buttons.addWidget(remove_button)
+        grid.addLayout(buttons, row + 3, 0, 1, 2)
+
+    def _append_extra_row(self, name: str, value: str) -> None:
+        row = self.extra_table.rowCount()
+        self.extra_table.insertRow(row)
+        self.extra_table.setItem(row, 0, QTableWidgetItem(name))
+        self.extra_table.setItem(row, 1, QTableWidgetItem(value))
+
+    def _remove_extra_row(self) -> None:
+        row = self.extra_table.currentRow()
+        if row >= 0:
+            self.extra_table.removeRow(row)
+
+    def _set_extra_fields(self, values: dict[str, str]) -> None:
+        self.extra_table.setRowCount(0)
+        for name, value in values.items():
+            self._append_extra_row(name, value)
+
+    def _collect_extra_fields(self) -> dict[str, str]:
+        """讀回表格內容。沒有名稱的列直接丟掉——那是使用者按了新增卻沒填。"""
+        collected: dict[str, str] = {}
+        for row in range(self.extra_table.rowCount()):
+            name_item = self.extra_table.item(row, 0)
+            value_item = self.extra_table.item(row, 1)
+            name = name_item.text().strip() if name_item else ""
+            if not name:
+                continue
+            collected[name] = value_item.text().strip() if value_item else ""
+        return collected
 
     def _save(self) -> None:
         self.error_label.setText("")
@@ -303,6 +384,7 @@ class CompanyDetailDialog(QDialog):
             "fax": self.fax_entry.get() or None,
             "products": self.products_entry.get() or None,
             "contact_person": self.contact_person_entry.get() or None,
+            "extra_fields": self._collect_extra_fields(),
             "pipeline_stage": to_value(self.stage_combo.currentText(), STAGE_LABELS),
             "priority": to_value(self.priority_combo.currentText(), PRIORITY_LABELS),
             "status": to_value(self.status_combo.currentText(), STATUS_LABELS),
