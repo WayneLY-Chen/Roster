@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 產生 Roster.app —— 可以直接放進「應用程式」或 Dock 的 macOS 應用程式。
 #
-# start.command 雙擊得起來，但會跟著開一個 Terminal 視窗。.app 不會，
+# 啟動.command 雙擊得起來，但會跟著開一個 Terminal 視窗。.app 不會，
 # 而且可以設圖示、可以固定在 Dock，看起來就跟一般的 Mac 應用程式一樣。
 #
 # 這裡不是 PyInstaller 打包：產生的 .app 只是一層薄殼，執行時仍然用專案
@@ -20,6 +20,10 @@ fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
+# 版本號從程式本身讀，不要在這裡寫死——寫死的那一份永遠會忘記跟著改。
+version="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$here/core/constants.py" | head -1)"
+version="${version:-1.0.0}"
+
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -29,8 +33,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>Roster</string>
     <key>CFBundleDisplayName</key><string>名單匠</string>
     <key>CFBundleIdentifier</key><string>tw.roster.app</string>
-    <key>CFBundleVersion</key><string>1.3.0</string>
-    <key>CFBundleShortVersionString</key><string>1.3.0</string>
+    <key>CFBundleVersion</key><string>${version}</string>
+    <key>CFBundleShortVersionString</key><string>${version}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>Roster</string>
     <key>CFBundleIconFile</key><string>icon.icns</string>
@@ -64,7 +68,8 @@ elif [ -f "$here/assets/icon.png" ] && command -v sips >/dev/null 2>&1; then
     iconutil -c icns "$iconset" -o "$app/Contents/Resources/icon.icns" 2>/dev/null || true
 fi
 
-echo "已建立 $app"
+echo "已建立 $app（版本 $version）"
 echo
 echo "把它拖進「應用程式」資料夾或 Dock 就可以用了。"
-echo "第一次開啟如果被 Gatekeeper 擋下來，按右鍵 -> 打開。"
+# 這個 .app 是在這台機器上產生的，不是從網路下載的，所以不帶隔離標記，
+# 也就不會出現「Apple 無法驗證是否為惡意軟體」那個視窗。

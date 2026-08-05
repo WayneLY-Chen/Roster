@@ -5,7 +5,7 @@
 
 Python 3.12+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / macOS / Linux ｜ 也可用命令列操作
 
-最新版本 **v1.6.0** — 這一版改了什麼見 [`CHANGELOG.md`](CHANGELOG.md)
+最新版本 **v1.6.1** — 這一版改了什麼見 [`CHANGELOG.md`](CHANGELOG.md)
 
 > **使用前請先閱讀本文件最後的[免責聲明](#免責聲明)。**
 > 本工具僅供蒐集網站公開顯示的商業聯絡資訊，使用者須自行確認每一個爬取目標的合法性並自負全部責任。
@@ -52,9 +52,31 @@ macOS 還會順便產生 `Roster.app`。可以重複執行，已經裝好的部�
 | 開啟程式 | `Windows/啟動.bat` | `macOS/啟動.command` 或 `Roster.app` | `Linux/start.sh` |
 | 命令列 | `Windows/命令列.bat` | `macOS/命令列.command` | `Linux/console.sh` |
 
-**macOS 第一次開啟要按右鍵 →「打開」。** Gatekeeper 會擋下未簽章的程式，
-直接雙擊只會跳「來自未識別的開發者」而且沒有繼續的選項，右鍵開啟才會給你
-那個按鈕。之後就可以正常雙擊了。
+#### macOS 出現「Apple 無法驗證是否為惡意軟體」
+
+macOS 會替**所有**從瀏覽器下載的檔案貼上隔離標記，沒有付費的 Apple 開發者
+簽章就一律顯示這個訊息。macOS 15 (Sequoia) 起，以前那個「按右鍵 →『打開』」
+的做法已經被 Apple 拿掉，右鍵沒有用。
+
+**一行指令解決**（終端機）：
+
+```bash
+xattr -dr com.apple.quarantine ~/Desktop/Roster
+```
+
+路徑換成你資料夾實際的位置——打完 `com.apple.quarantine` 留一個空白，
+再把資料夾拖進終端機視窗，路徑會自動填好。之後雙擊就正常了。
+
+**或者一開始就用 git 下載**，clone 下來的檔案不算「從網路下載」，不會被貼
+標記，下載完直接雙擊就能用：
+
+```bash
+git clone https://github.com/WayneLY-Chen/Roster.git
+```
+
+安裝程式跑完會自動解除整個資料夾的隔離標記，所以只要能讓「安裝.command」
+執行一次（上面任一種方法），之後的啟動都不會再被擋。
+`macOS/開不起來 請先看這個.txt` 裡有同樣的說明。
 
 > `Roster.app` 是 `macOS/建立App.command` 產生的，只是一層薄殼——執行時仍然
 > 使用專案資料夾裡的 `.venv`，所以改了程式碼不用重新產生，代價是它不能單獨

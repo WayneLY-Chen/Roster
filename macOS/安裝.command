@@ -6,7 +6,7 @@
 #
 # 可以重複執行：已經裝好的話會直接跳過，只做缺的部分。
 #
-# 第一次執行如果被 Gatekeeper 擋下來，按右鍵 ->「打開」。
+# 第一次執行被擋下來的話，看同一個資料夾裡的「開不起來 請先看這個.txt」。
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -68,15 +68,30 @@ fi
 
 # -------------------------------------------------------------- 啟動方式
 say "4/4  建立啟動方式"
-chmod +x "$here/start.sh" "$here/console.sh" "$here/start.command" \
-         "$here/make_macos_app.sh" 2>/dev/null || true
+chmod +x "$here/macOS/啟動.command" "$here/macOS/命令列.command" \
+         "$here/macOS/建立App.command" 2>/dev/null || true
 
-if "$here/make_macos_app.sh" >/dev/null 2>&1; then
+if "$here/macOS/建立App.command" >/dev/null 2>&1; then
     printf "   已建立 Roster.app\n"
     app_made=1
 else
-    printf "   Roster.app 建立失敗，用 start.command 也可以\n"
+    printf "   Roster.app 建立失敗，用 啟動.command 也可以\n"
     app_made=0
+fi
+
+# ------------------------------------------------------- 解除下載隔離標記
+#
+# 從瀏覽器下載的 ZIP 解開之後，每個檔案都帶著 com.apple.quarantine 這個標記，
+# 雙擊時 macOS 會顯示「Apple 無法驗證……是否為惡意軟體」。macOS 15 起，以前
+# 那個「按右鍵 -> 打開」的繞法已經被拿掉，剩下的官方途徑是到系統設定裡對**每
+# 一個檔案**分別按一次「仍要打開」。
+#
+# 使用者已經自己執行到這一步了，等於已經決定要信任這份程式；在這裡把標記一次
+# 解除，之後的每一次啟動才不會再被擋。只影響這個資料夾，不動任何系統設定。
+if command -v xattr >/dev/null 2>&1; then
+    if xattr -dr com.apple.quarantine "$here" 2>/dev/null; then
+        printf "   已解除「下載自網路」的隔離標記（之後雙擊不會再被擋）\n"
+    fi
 fi
 
 # ------------------------------------------------------------------ 完成
@@ -85,9 +100,7 @@ printf "接下來怎麼開啟：\n"
 if [ "$app_made" -eq 1 ]; then
     printf "  * 把 Roster.app 拖進「應用程式」資料夾或 Dock，之後點一下就開\n"
 fi
-printf "  * 或直接雙擊 start.command\n\n"
-printf "第一次開啟如果出現「來自未識別的開發者」，按右鍵 ->「打開」。\n"
-printf "那是 macOS 對所有未簽章程式的預設行為。\n\n"
+printf "  * 或直接雙擊 macOS 資料夾裡的 啟動.command\n\n"
 
 if [ "$app_made" -eq 1 ] && [ -d "$here/Roster.app" ]; then
     printf "現在要開啟嗎？[Y/n] "
