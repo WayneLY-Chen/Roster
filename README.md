@@ -40,7 +40,7 @@ Windows 安裝時記得勾選 *Add python.exe to PATH*）。
 |---|---|---|
 | Windows | `Windows/` | `安裝.bat` |
 | macOS | `macOS/` | `安裝.command` |
-| Linux | `Linux/` | `./start.sh`（會提示怎麼安裝） |
+| Linux | `Linux/` | `./install.sh` |
 
 安裝程式會建立虛擬環境、下載套件（約 150 MB，需要幾分鐘），
 macOS 還會順便產生 `Roster.app`。可以重複執行，已經裝好的部分會直接跳過。
@@ -318,8 +318,8 @@ CSV 預設用 `utf-8-sig`，否則繁體中文版 Excel 會把中文顯示成亂
 HTML，而且純 HTML 的信比較容易被判定成垃圾郵件。圖片以 **CID 附件**內嵌，
 因為 Gmail 會把 `data:` URI 的圖片擋掉。
 
-可用變數：`{company_name}`、`{contact_person}`、`{industry}`、`{email}`、
-`{phone}`、`{website}`、`{city}`
+可用變數：`{company_name}`、`{english_name}`、`{contact_person}`、`{industry}`、
+`{products}`、`{email}`、`{phone}`、`{website}`、`{city}`
 
 打錯的變數（例如 `{compnay_name}`）會直接報錯，不會把它原樣寄出去。
 
@@ -422,7 +422,7 @@ HTML，而且純 HTML 的信比較容易被判定成垃圾郵件。圖片以 **C
 
 ## 命令列
 
-執行 `console.bat`（macOS 是 `./console.sh`）後：
+開啟命令列（`Windows/命令列.bat`、`macOS/命令列.command`、`Linux/console.sh`）之後：
 
 ```bash
 python main.py --help                  # 列出所有指令

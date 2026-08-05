@@ -13,11 +13,10 @@ python_bin="$here/.venv/bin/python"
 if [ ! -x "$python_bin" ]; then
     cat <<EOF
 
-[ERROR] Virtual environment not found: .venv/bin/python
+[ERROR] Not installed yet.
 
-Run these two commands in this folder first:
-    python3 -m venv .venv
-    .venv/bin/python -m pip install -r requirements.txt
+Run the setup script in this same folder first:
+    ./install.sh
 
 EOF
     exit 1

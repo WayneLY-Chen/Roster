@@ -18,7 +18,7 @@ macOS 還會順便產生 `Roster.app`。可以重複執行，已經裝好的部�
 ```
 Windows/   安裝.bat   啟動.bat   命令列.bat
 macOS/     安裝.command   啟動.command   命令列.command   建立App.command
-Linux/     start.sh   console.sh
+Linux/     install.sh   start.sh   console.sh
 ```
 
 根目錄也順手整理過：打包相關的檔案移到 `packaging/`。

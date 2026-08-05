@@ -15,7 +15,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
 
 if [ ! -x "$here/.venv/bin/python" ]; then
-    echo "[ERROR] Virtual environment not found. Run: python3 -m venv .venv"
+    echo "[ERROR] Not installed yet. Run ./install.sh in this same folder first."
     exit 1
 fi
 
