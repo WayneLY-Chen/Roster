@@ -69,6 +69,7 @@ log = get_logger(LogCategory.GUI)
 #:     logs.LogsPage              日誌    📜
 #:     settings.SettingsPage      設定    ⚙️
 #:     feedback.FeedbackPage      反饋    💬
+#:     changelog.ChangelogPage    更新資訊 🆕
 #:
 #: title 是頁面的識別字串（``show_page()``、``self.pages``、``nav_buttons``
 #: 都拿它當 key），改字等於改 key，要一起改。
@@ -86,8 +87,8 @@ PAGE_CLASSES: tuple[type[BasePage], ...] = (
     MailPage,
     LogsPage,
     SettingsPage,
-    ChangelogPage,
     FeedbackPage,
+    ChangelogPage,
 )
 
 MIN_WIDTH = 1100

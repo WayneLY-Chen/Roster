@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog  # noqa: E402
 import core.config as config_module  # noqa: E402
 from gui_qt.app import PAGE_CLASSES  # noqa: E402
 from gui_qt.pages.feedback import FeedbackPage  # noqa: E402
+from gui_qt.pages.settings import SettingsPage  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -82,7 +83,8 @@ def page(qt_app, feedback_config, database):
 def test_feedback_is_reachable_from_the_sidebar():
     """藏在設定頁最下面等於沒有——回報問題不是一種設定。"""
     assert FeedbackPage in PAGE_CLASSES
-    assert PAGE_CLASSES[-1] is FeedbackPage       # 排最後，在「設定」之後
+    # 在「設定」之後。使用者是在別的地方卡住之後才會想回報。
+    assert PAGE_CLASSES.index(FeedbackPage) > PAGE_CLASSES.index(SettingsPage)
 
 
 def test_the_hint_never_uses_markdown(page):
