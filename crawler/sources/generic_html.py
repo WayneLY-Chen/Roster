@@ -29,6 +29,7 @@ from core.errors import CrawlError, RobotsDisallowedError, SourceConfigError
 from core.logging_setup import get_logger
 from core.schemas import RawCompany
 from crawler.base import BaseSource, PageBatch
+from crawler.documents import extract_records, is_wanted
 from crawler.fetcher import BaseFetcher
 from crawler.labels import MIN_PAIRS, parse_record, split_cjk_english
 from crawler.parser import (
@@ -73,7 +74,20 @@ class GenericHtmlSource(BaseSource):
             raise SourceConfigError(
                 f"source {source_config.name!r} needs both start_url and list_selector"
             )
+        # 設了頁面動作卻用 httpx，動作會被安靜地忽略——使用者只會看到「怎麼
+        # 還是抓不到電話」。這種安靜失敗一定要講出來。
+        if self.source_config.page_actions and self.config.crawler.engine != "playwright":
+            log.warning(
+                "{}: 這個來源設定了頁面動作（點按、捲動），但目前的爬取引擎是 "
+                "{}，動作不會被執行。要讓它生效，請把設定裡的爬取引擎改成 "
+                "playwright。",
+                self.name, self.config.crawler.engine,
+            )
+
         self._details_fetched = 0
+        self._documents_fetched = 0
+        # 同一份名冊 PDF 常常每一頁都掛同一個連結；下載一次就夠了。
+        self._seen_documents: set[str] = set()
 
     def iter_pages(self) -> Iterator[PageBatch]:
         if self.fetcher is None:
@@ -102,7 +116,11 @@ class GenericHtmlSource(BaseSource):
             method = self.source_config.method
             form_data = self._form_data(page_number) if method == "POST" else None
             result = self.fetcher.fetch(
-                url, method=method, data=form_data, encoding=self.source_config.encoding
+                url,
+                method=method,
+                data=form_data,
+                encoding=self.source_config.encoding,
+                actions=self.source_config.page_actions,
             )
             fetched += 1
             soup = make_soup(result.html)
@@ -114,6 +132,7 @@ class GenericHtmlSource(BaseSource):
                 items = select_items(soup, self.source_config.list_selector or "")
                 records = [self._to_record(item, result.url) for item in items]
                 records = [r for r in records if r is not None]
+                records.extend(self._records_from_documents(soup, result.url))
                 log.info("{}: page {} -> {} records", self.name, page_number, len(records))
                 yield PageBatch(page_number=page_number, url=result.url, records=records)
                 yielded += 1
@@ -205,6 +224,52 @@ class GenericHtmlSource(BaseSource):
             phones = harvest_phones(soup)
             if phones:
                 record_values["phone"] = phones[0]
+
+    def _records_from_documents(self, soup, page_url: str) -> list[RawCompany]:
+        """讀頁面上連出去的 PDF／Excel／Word，把裡面的名單也收進來。
+
+        只有使用者在來源上勾選了格式才會執行；沒勾就一個檔案都不下載。
+        下載並解析別人的檔案跟讀網頁不是同一件事，該由使用者明確決定。
+        """
+        wanted = self.source_config.document_kinds
+        if not wanted or self.fetcher is None:
+            return []
+
+        collected: list[RawCompany] = []
+        for anchor in soup.find_all("a", href=True):
+            if self._documents_fetched >= self.source_config.max_documents:
+                log.info("{}: 已達檔案讀取上限 {}", self.name,
+                         self.source_config.max_documents)
+                break
+
+            href = anchor["href"]
+            if not isinstance(href, str) or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
+            target = urljoin(page_url, href)
+            if not is_wanted(target, wanted) or target in self._seen_documents:
+                continue
+            self._seen_documents.add(target)
+
+            try:
+                page = self.fetcher.fetch(target)
+            except RobotsDisallowedError:
+                raise
+            except CrawlError as exc:
+                log.debug("檔案讀取失敗 {}：{}", target, exc)
+                continue
+            self._documents_fetched += 1
+
+            try:
+                result = extract_records(page.raw or page.html.encode(), target, self.label)
+            except CrawlError as exc:
+                log.warning("{} 解析失敗：{}", target, exc)
+                continue
+
+            for record in result.records:
+                record.source_url = target
+            collected.extend(result.records)
+
+        return collected
 
     def _harvest_labels(self, scope, values: dict, extra_fields: dict[str, str]) -> None:
         """從「標籤︰值」的文字排版補欄位，並收下沒有對應欄位的部分。

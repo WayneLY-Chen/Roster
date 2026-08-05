@@ -30,6 +30,7 @@ from core.constants import LogCategory
 from core.errors import CrawlError
 from core.logging_setup import get_logger
 from core.schemas import RawCompany
+from crawler.documents import KIND_BY_KEY
 from crawler.fetcher import BaseFetcher, build_fetcher, decode_bytes
 from crawler.labels import MIN_PAIRS, parse_record, split_cjk_english
 from crawler.parser import extract_record, make_soup, sniff_declared_encoding
@@ -112,6 +113,12 @@ class DiscoveryResult:
     #: 從「標籤︰值」排版讀到、但沒有對應欄位的東西，用來給使用者看預覽。
     #: key 是名錄上的標籤，value 是前幾筆的樣本。
     extra_field_samples: dict[str, list[str]] = field(default_factory=dict)
+    #: 偵測到「不點就看不到資料」的按鈕時，建議的頁面動作。
+    #: 需要瀏覽器引擎才能執行，所以只是建議，由使用者決定要不要開。
+    suggested_actions: list[dict[str, object]] = field(default_factory=list)
+    #: 這一頁連出去的檔案，格式 → 幾個。介面靠它決定哪些格式勾得動——
+    #: 一個頁面上根本沒有 PDF，卻讓使用者勾「讀 PDF」，勾了也不會發生任何事。
+    document_links: dict[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -161,6 +168,21 @@ def _signature(node: Tag) -> str:
     return f"{node.name}.{'.'.join(sorted(classes))}" if classes else node.name
 
 
+#: Bootstrap 那類「排版用、跟內容無關」的 class，選擇器不該用它們。
+#:
+#: 規則刻意寫得緊：先前是 ``(col|row|p|m|d)-?\w{0,3}\d*``，那個式子會把
+#: ``more``、``main``、``date``、``post`` 這些**真正有意義**的 class 一起濾掉
+#: （``m`` + 最多三個字），結果是「載入更多」按鈕的選擇器退化成一個光禿禿的
+#: ``button``，在整頁比對到幾十個元素。工具類別的特徵是「帶數字或帶連字號」，
+#: 照著這個特徵寫就不會誤傷。
+_UTILITY_CLASS = re.compile(
+    r"(?:col|row)(?:-[\w-]+)?"      # col, col-6, col-md-4, row
+    r"|[pm][xytblrse]?-\d+"          # p-3, mt-2, px-4
+    r"|d-[\w-]+"                     # d-flex, d-none
+    r"|[gh]-\d+"                     # g-3, h-100
+)
+
+
 def _css_for(node: Tag) -> str:
     """Shortest stable CSS selector for an element (tag or tag.class)."""
     classes = node.get("class") or []
@@ -169,7 +191,7 @@ def _css_for(node: Tag) -> str:
     # Skip utility classes that carry no meaning and change between builds.
     meaningful = [
         c for c in classes
-        if len(c) > 1 and not c.isdigit() and not re.fullmatch(r"(col|row|p|m|d)-?\w{0,3}\d*", c)
+        if len(c) > 1 and not c.isdigit() and not _UTILITY_CLASS.fullmatch(c)
     ]
     return f"{node.name}.{meaningful[0]}" if meaningful else node.name
 
@@ -854,6 +876,91 @@ def find_detail_link_selector(items: list[Tag], page_host: str) -> str | None:
     return None
 
 
+#: 把資料藏在按鈕後面的常見寫法。這些字出現在按鈕上，代表「這一頁的原始
+#: HTML 裡沒有那筆資料」——不點它就永遠抓不到。
+_REVEAL_WORDS = (
+    "顯示電話", "查看電話", "看電話", "顯示聯絡", "查看聯絡", "顯示信箱",
+    "查看信箱", "顯示手機", "展開", "看詳細", "顯示完整",
+    "show phone", "show contact", "show email", "reveal", "view number",
+)
+
+#: 「還有更多沒載入」的按鈕。
+_LOAD_MORE_WORDS = (
+    "載入更多", "看更多", "更多結果", "顯示更多", "load more", "show more",
+    "view more", "more results",
+)
+
+#: 一個按鈕文字要在多少比例的項目上出現，才算「每一列都有一顆」。
+_REVEAL_HIT_RATE = 0.5
+
+
+def _clickable_selector(node: Tag) -> str:
+    """給一個按鈕，回傳指得到它、而且不會誤中別的東西的選擇器。"""
+    css = _css_for(node)
+    return css if "." in css else f"{node.name}"
+
+
+def find_page_actions(soup: BeautifulSoup, items: list[Tag]) -> list[dict[str, object]]:
+    """找出「不點就看不到資料」的按鈕，回傳建議的頁面動作。
+
+    兩種情形分開處理，因為做法不一樣：
+
+    * **每一列各有一顆**（「顯示電話」）→ ``click_all``，全部按一次。
+    * **整頁只有一顆**（「載入更多」）→ ``click``，連按數次把清單展開。
+
+    只做建議。真正要不要執行由使用者決定——這件事需要瀏覽器引擎，比一般爬取
+    慢得多，不該自作主張替他打開。
+    """
+    actions: list[dict[str, object]] = []
+
+    if items:
+        counter: Counter[str] = Counter()
+        for item in items:
+            for node in item.find_all(("button", "a", "span", "div")):
+                text = _text(node).lower()
+                if any(word in text for word in _REVEAL_WORDS):
+                    counter[_clickable_selector(node)] += 1
+        for selector, count in counter.most_common(2):
+            if count >= len(items) * _REVEAL_HIT_RATE:
+                actions.append({"type": "click_all", "selector": selector})
+
+    for node in soup.find_all(("button", "a")):
+        text = _text(node).lower()
+        if any(word in text for word in _LOAD_MORE_WORDS):
+            actions.append(
+                {"type": "click", "selector": _clickable_selector(node), "times": 10}
+            )
+            break
+
+    return actions
+
+
+def find_document_links(soup: BeautifulSoup, base_url: str) -> dict[str, int]:
+    """這一頁連出去哪些可以讀的檔案，以及各有幾個。
+
+    介面靠這個決定「讀 PDF」那些勾選框哪幾個打得動。一個頁面上根本沒有 PDF，
+    卻讓使用者勾「讀 PDF」，勾了不會發生任何事——那比不給選項更讓人困惑。
+    """
+    from urllib.parse import urljoin
+
+    from crawler.documents import kind_for
+
+    counts: dict[str, int] = {}
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"]
+        if not isinstance(href, str) or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        target = urljoin(base_url, href)
+        if target in seen:
+            continue
+        seen.add(target)
+        kind = kind_for(target)
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
 def find_next_selector(soup: BeautifulSoup) -> str | None:
     """Locate a "next page" link by rel, text, class, title or aria-label."""
     node = soup.select_one("a[rel='next']")
@@ -1022,6 +1129,25 @@ def discover_from_html(html: str, url: str) -> DiscoveryResult:
             f"偵測到共 {result.page_count} 頁（每頁 {result.item_count} 筆，"
             f"全部爬完約 {estimated} 筆）。「頁數上限」已自動填成 {result.page_count}"
             "，要少爬一點可以自己調小。"
+        )
+
+    result.document_links = find_document_links(soup, url)
+    if result.document_links:
+        listed = "、".join(
+            f"{count} 個 {KIND_BY_KEY[kind].label.split('（')[0]}"
+            for kind, count in result.document_links.items()
+        )
+        result.notes.append(
+            f"這一頁還連出去 {listed}。名冊做成檔案掛在網站上是常見做法——"
+            "要一起讀的話，在下面把對應的格式勾起來。"
+        )
+
+    result.suggested_actions = find_page_actions(soup, items)
+    if result.suggested_actions:
+        result.notes.append(
+            "這一頁有「顯示電話 / 載入更多」之類的按鈕——那些資料不在原始網頁裡，"
+            "要按下去才會出現。勾選「先點開頁面上的按鈕」就會自動點，"
+            "但那需要用瀏覽器引擎，比一般爬取慢很多。"
         )
 
     result.preview = build_preview(items, result, url)

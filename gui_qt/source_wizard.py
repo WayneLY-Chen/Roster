@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.errors import CrawlError, CRMError, RobotsDisallowedError
+from crawler.documents import DOCUMENT_KINDS
 from crawler.pipeline import COLLECTABLE_FIELDS
 from controllers.source import KNOWN_FIELDS, PREVIEW_FIELDS, SourceWizardController
 from core.i18n import field_label
@@ -76,6 +77,9 @@ PREVIEW_COLUMNS = [
     ("address", "地址", 200),
     ("industry", "產業", 100),
 ]
+
+#: 格式代碼 -> 給人看的短名稱（「PDF 檔」而不是「PDF 檔（.pdf）」）。
+DOCUMENT_LABELS = {kind.key: kind.label.split("（")[0] for kind in DOCUMENT_KINDS}
 
 #: 中文標籤 -> 欄位代碼，是 ``field_label`` 的反查表。
 _FIELD_CODE_BY_LABEL: dict[str, str] = {field_label(code): code for code in KNOWN_FIELDS}
@@ -191,7 +195,10 @@ class SourceWizardDialog(QDialog):
         self.preview_rows: list[dict[str, Any]] = []
         self._editing_field: str | None = None
 
+        self._suggested_actions: list[dict] = []
+
         self.analyse_task: BackgroundTask | None = None
+        self.explore_task: BackgroundTask | None = None
         self.preview_task: BackgroundTask | None = None
         self.crawl_task: BackgroundTask | None = None
 
@@ -239,7 +246,25 @@ class SourceWizardDialog(QDialog):
         self.analyse_button = QPushButton("分析網頁")
         self.analyse_button.clicked.connect(self._start_analyse)
         row.addWidget(self.analyse_button)
+
+        # 不知道名錄在哪一頁的時候用這個。名錄常常藏在「關於我們 → 組織 →
+        # 會員專區」底下三層，從首頁完全看不出來。
+        self.explore_button = QPushButton("找名錄…")
+        self.explore_button.setToolTip(
+            "不確定名錄在哪一頁時，貼上這個網站的任一個網址，\n"
+            "程式會在站內找出看起來像廠商名錄的頁面。"
+        )
+        self.explore_button.clicked.connect(self._start_explore)
+        row.addWidget(self.explore_button)
         section.body_layout.addLayout(row)
+
+        hint = QLabel(
+            "知道名錄網址就按「分析網頁」；只知道網站、不知道名錄在哪一頁，"
+            "按「找名錄…」讓程式去站內找。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        section.body_layout.addWidget(hint)
 
         self.analyse_progress = QProgressBar()
         self.analyse_progress.setRange(0, 0)  # 不定進度：分析中沒有百分比可言
@@ -332,6 +357,97 @@ class SourceWizardDialog(QDialog):
             *self.collect_checks.values(),
         ]
         self._set_collect_enabled(False)
+
+        # 檔案格式的勾選**不**跟著分析開關。它跟「這一頁有哪些欄位」無關，
+        # 而且「找名錄…」是在分析之前按的，那時候也要能決定要不要找 PDF。
+        self._build_document_controls(body_layout)
+
+    def _build_document_controls(self, body_layout: QVBoxLayout) -> None:
+        """要不要順便讀頁面上連出去的 PDF／Excel／Word。
+
+        跟「要收集哪些欄位」放在一起：兩者都是「你想要什麼資料」的決定，
+        使用者在同一個地方一次勾完。
+
+        **預設全部不勾。** 讀別人的檔案跟讀網頁不是同一件事：檔案通常大得多，
+        而且使用者未必想要那些內容——這要他自己決定，不能預設幫他決定。
+        """
+        body_layout.addWidget(caption("要不要順便讀頁面上的檔案（預設不讀）"))
+
+        row = QHBoxLayout()
+        self.document_checks: dict[str, QCheckBox] = {}
+        for kind in DOCUMENT_KINDS:
+            check = QCheckBox(kind.label)
+            check.setChecked(False)
+            # 分析之前一律不能勾：要先知道這一頁到底有沒有這種檔案。
+            check.setEnabled(False)
+            self.document_checks[kind.key] = check
+            row.addWidget(check)
+        row.addStretch(1)
+        body_layout.addLayout(row)
+
+        self.document_note = QLabel("分析網頁之後，這一頁真的有的檔案格式才會亮起來。")
+        self.document_note.setWordWrap(True)
+        self.document_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
+        body_layout.addWidget(self.document_note)
+
+        note = QLabel(
+            "不少公協會沒有把會員名冊做成網頁，而是掛一個 PDF 或 Excel，"
+            "常常還要先點進某個子頁面才看得到那個連結。勾了之後，爬取時遇到"
+            "這種連結就會跟進去把裡面的名單讀出來。\n"
+            "讀出來的內容不像廠商名冊時（章程、會議記錄、年報那一類）會整份略過，"
+            "不會把雜訊收進資料庫。"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
+        body_layout.addWidget(note)
+
+        # 「不點就看不到」的按鈕。跟上面的檔案格式擺在一起：都是「這個名錄的
+        # 資料還藏在哪裡」的決定。分析時偵測到才會啟用。
+        self.click_check = QCheckBox("先點開頁面上的按鈕（顯示電話／載入更多）")
+        self.click_check.setChecked(False)
+        self.click_check.setEnabled(False)
+        body_layout.addWidget(self.click_check)
+
+        self.click_note = QLabel(
+            "分析時如果發現「顯示電話」「載入更多」之類的按鈕，這一項才會啟用。"
+            "那些資料不在原始網頁裡，要按下去才會出現——需要用瀏覽器引擎，"
+            "比一般爬取慢很多。"
+        )
+        self.click_note.setWordWrap(True)
+        self.click_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
+        body_layout.addWidget(self.click_note)
+
+    def _apply_document_links(self, found: dict) -> None:
+        """依照分析結果決定哪些格式勾得動，並把找到的數量講出來。
+
+        沒找到的格式維持停用。勾了不會發生任何事的選項比沒有那個選項更糟——
+        使用者會以為自己已經打開了，然後納悶名冊怎麼沒抓進來。
+        """
+        for key, check in self.document_checks.items():
+            available = key in found
+            check.setEnabled(available)
+            if not available:
+                check.setChecked(False)
+
+        if not found:
+            self.document_note.setText(
+                "這一頁沒有連出去的 PDF／Excel／Word／PowerPoint 檔。"
+            )
+            return
+
+        listed = "、".join(
+            f"{count} 個 {DOCUMENT_LABELS.get(key, key)}" for key, count in found.items()
+        )
+        self.document_note.setText(f"這一頁連出去 {listed}，要一起讀就勾起來。")
+
+    def _selected_document_kinds(self) -> list[str]:
+        return [key for key, check in self.document_checks.items() if check.isChecked()]
+
+    def _selected_page_actions(self) -> list[dict]:
+        """使用者勾了「先點開按鈕」時，分析階段偵測到的那些動作。"""
+        if not self.click_check.isChecked():
+            return []
+        return list(self._suggested_actions)
 
     def _set_collect_enabled(self, enabled: bool) -> None:
         for widget in self._collect_widgets:
@@ -516,9 +632,101 @@ class SourceWizardDialog(QDialog):
         )
         self.analyse_task.start(url)
 
+    # ------------------------------------------------------ 站內尋找名錄
+
+    def _start_explore(self) -> None:
+        """在整個網站裡找名錄頁。"""
+        from crawler.explore import DEFAULT_PAGE_BUDGET
+
+        if self.explore_task is not None and self.explore_task.running:
+            return
+        url = self.url_entry.text().strip()
+        if not url:
+            QMessageBox.critical(
+                self, "自訂網址精靈", "請先貼上這個網站的任一個網址（首頁就可以）。"
+            )
+            return
+
+        budget = DEFAULT_PAGE_BUDGET
+        # 先講清楚會做什麼、要等多久再開始。這個動作會對別人的網站送出
+        # 幾十次請求，不該按下去才發現。
+        seconds = int(budget * (self.controller.crawl_delay() + 0.5))
+        reply = QMessageBox.question(
+            self,
+            "在整個網站裡找名錄",
+            f"程式會從這個網址出發，在同一個網站裡最多讀 {budget} 頁，"
+            f"找出看起來像廠商名錄的頁面。\n\n"
+            f"預估需要 {seconds // 60} 分 {seconds % 60} 秒"
+            "（每次請求之間有禮貌延遲，這是對方網站的規矩）。\n\n"
+            "要開始嗎？",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.explore_button.setEnabled(False)
+        self.analyse_button.setEnabled(False)
+        self.analyse_progress.setRange(0, budget)
+        self.analyse_progress.setValue(0)
+        self.analyse_progress.show()
+        self.summary_label.setText("正在站內尋找名錄…")
+        self.notes_label.setText("")
+
+        self.explore_task = BackgroundTask(
+            self,
+            worker=self.controller.explore,
+            on_done=self._on_explore_done,
+            on_error=self._on_explore_error,
+            on_progress=self._on_explore_progress,
+        )
+        self.explore_task.start(url, document_kinds=self._selected_document_kinds())
+
+    def _on_explore_progress(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        if payload.get("stage") == "exploring":
+            self.analyse_progress.setValue(int(payload.get("done", 0)))
+            self.summary_label.setText(
+                f"正在站內尋找名錄…已讀 {payload.get('done', 0)}／"
+                f"{payload.get('total', 0)} 頁"
+            )
+
+    def _stop_explore_progress(self) -> None:
+        self.analyse_progress.hide()
+        self.analyse_progress.setRange(0, 0)   # 還原成分析用的不定進度
+        self.explore_button.setEnabled(True)
+        self.analyse_button.setEnabled(True)
+
+    def _on_explore_done(self, result: Any) -> None:
+        self.explore_task = None
+        self._stop_explore_progress()
+
+        if not result.candidates:
+            self.summary_label.setText("這個網站裡沒有找到看起來像廠商名錄的頁面。")
+            self.notes_label.setText("\n".join(result.notes))
+            return
+
+        from gui_qt.explore_dialog import ExploreResultsDialog
+
+        dialog = ExploreResultsDialog(self, result)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.chosen_url:
+            self.summary_label.setText(
+                f"找到 {len(result.candidates)} 個名錄頁，尚未選擇。"
+            )
+            return
+
+        # 挑好之後直接走原本的分析流程——後面的每一步都不必知道網址是怎麼來的。
+        self.url_entry.setText(dialog.chosen_url)
+        self._start_analyse()
+
+    def _on_explore_error(self, exc: Exception) -> None:
+        self.explore_task = None
+        self._stop_explore_progress()
+        self._on_analyse_error(exc)
+
     def _stop_analyse_progress(self) -> None:
         self.analyse_progress.hide()
         self.analyse_button.setEnabled(True)
+        self.explore_button.setEnabled(True)
 
     def _on_analyse_done(self, result: Any) -> None:
         self.analyse_task = None
@@ -526,6 +734,14 @@ class SourceWizardDialog(QDialog):
 
         self.last_url = result.url
         self._set_collect_enabled(True)
+
+        # 「不點就看不到」的按鈕：偵測到才讓使用者勾得動，沒偵測到就維持停用
+        # ——給一個按了不會有任何作用的勾選框，比不給更糟。
+        self._apply_document_links(dict(getattr(result, "document_links", {}) or {}))
+        self._suggested_actions = list(getattr(result, "suggested_actions", []))
+        self.click_check.setEnabled(bool(self._suggested_actions))
+        if not self._suggested_actions:
+            self.click_check.setChecked(False)
         self.list_selector_entry.set(result.list_selector)
         self.next_selector_entry.set(result.next_selector or "")
         self.detail_link_entry.set(result.detail_link_selector or "")
@@ -833,6 +1049,8 @@ class SourceWizardDialog(QDialog):
                 max_details=max_details,
                 default_industry=self.default_industry_entry.get(),
                 collect_fields=self._selected_collect_fields(),
+                document_kinds=self._selected_document_kinds(),
+                page_actions=self._selected_page_actions(),
                 page_start=page_start,
                 page_end=page_end,
             )

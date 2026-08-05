@@ -69,6 +69,32 @@ def _preload_worker_modules() -> None:
     preload()
 
 
+def drain_qt_thread_pool(timeout_ms: int = 10_000) -> None:
+    """等 ``QThreadPool`` 借出去的執行緒全部跑完。
+
+    為什麼一定要做：``BackgroundTask`` 把工作丟進**全域**的執行緒池，那個池
+    活得比任何一個測試都久。一個測試如果沒等它的工作結束就結束了，那條執行緒
+    會繼續跑——而下一個測試的 fixture 在拆除時會 ``engine.dispose()``，把它
+    正在用的 SQLite 連線關掉。之後那條執行緒再送一次 SQL 就是在用已經釋放的
+    記憶體，直譯器直接以 access violation 收場，而且回報的位置是**後面某個
+    測試**，跟真正的肇事者完全對不起來。
+
+    在測試之間排乾執行緒池，這條路就斷了。
+    """
+    try:
+        from PySide6.QtCore import QThreadPool
+    except Exception:      # pragma: no cover - 沒有 Qt 的環境
+        return
+    QThreadPool.globalInstance().waitForDone(timeout_ms)
+
+
+@pytest.fixture(autouse=True)
+def _no_background_threads_leak_between_tests():
+    """每一個測試結束都把執行緒池排乾，不管它有沒有用到資料庫。"""
+    yield
+    drain_qt_thread_pool()
+
+
 @pytest.fixture
 def tmp_config(tmp_path: Path) -> AppConfig:
     """An :class:`AppConfig` rooted entirely under ``tmp_path``.
@@ -154,6 +180,11 @@ def db_session(patch_config: AppConfig):
     try:
         yield session
     finally:
+        # 先等背景執行緒收工，再拆引擎。順序不能反：dispose() 會把它們正在
+        # 用的 SQLite 連線關掉，之後那條執行緒再送一次 SQL 就是在用已經釋放
+        # 的記憶體。autouse 的排乾 fixture 不夠——finalizer 是後進先出，
+        # db_session 比它晚建立，所以會比它先拆。
+        drain_qt_thread_pool()
         session.close()
         session_module.reset_engine()
 

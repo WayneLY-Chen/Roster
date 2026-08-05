@@ -93,7 +93,6 @@ PAGE_CLASSES: tuple[type[BasePage], ...] = (
 
 MIN_WIDTH = 1100
 MIN_HEIGHT = 700
-SIDEBAR_WIDTH = 210
 
 
 class _SchedulerBridge(QObject):
@@ -190,7 +189,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self, grid: QGridLayout) -> None:
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(SIDEBAR_WIDTH)
+        sidebar.setFixedWidth(theme.sidebar_width())
 
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(18, 24, 18, 18)

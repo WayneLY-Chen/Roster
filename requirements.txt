@@ -18,6 +18,13 @@ truststore>=0.9.0
 pandas>=2.2.0,<3.0
 openpyxl>=3.1.2
 
+# --- 文件檔裡的名單 ---
+# 不少公協會把會員名冊做成 PDF 或 Word 掛在網站上，而不是做成網頁。
+# pdfplumber 除了文字之外還讀得出表格結構，那正是名冊最常見的排版。
+pdfplumber>=0.11.0
+python-docx>=1.1.0
+python-pptx>=1.0.0
+
 # --- persistence ---
 SQLAlchemy>=2.0.30
 

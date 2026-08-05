@@ -80,6 +80,20 @@ class RobotsPolicy:
             return None
         return self._rules_for(url).crawl_delay
 
+    def sitemaps(self, url: str) -> list[str]:
+        """網站在 robots.txt 裡公告的 sitemap 網址。
+
+        探索整個網站時這是最該先看的東西：網站自己列出「我有哪些頁面」，
+        照著看比一頁一頁點連結去猜少了非常多次請求——對對方的伺服器也客氣得多。
+        """
+        rules = self._rules_for(url)
+        if rules.parser is None:
+            return []
+        try:
+            return list(rules.parser.site_maps() or [])
+        except Exception:  # pragma: no cover - 壞掉的 robots.txt 不該讓探索中止
+            return []
+
     def close(self) -> None:
         if self._owns_client and self._client is not None:
             self._client.close()

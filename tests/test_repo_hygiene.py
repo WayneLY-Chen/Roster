@@ -124,6 +124,8 @@ _IMPORT_TO_PACKAGE = {
     "bs4": "beautifulsoup4",
     "dns": "dnspython",
     "PIL": "pillow",
+    "docx": "python-docx",
+    "pptx": "python-pptx",
 }
 
 #: 專案自己的頂層套件，不是外部相依。

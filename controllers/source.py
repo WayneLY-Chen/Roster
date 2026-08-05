@@ -58,6 +58,46 @@ class SourceWizardController:
         report({"stage": "done"})
         return result
 
+    def crawl_delay(self) -> float:
+        """設定裡的請求間隔秒數。介面用它估算「這會跑多久」。"""
+        from core.config import get_config
+
+        return float(get_config().crawler.delay_seconds)
+
+    def explore(
+        self,
+        url: str,
+        *,
+        report: Callable[[Any], None],
+        cancel_event,
+        page_budget: int | None = None,
+        document_kinds: list[str] | None = None,
+    ) -> Any:
+        """在整個網站裡找名錄頁。Suitable as a task worker。
+
+        跟 :meth:`analyse` 走同一套 fetcher，所以 robots.txt 與請求間隔延遲
+        一樣適用。``page_budget`` 是硬上限，同時決定要等多久。
+        """
+        from crawler.explore import DEFAULT_PAGE_BUDGET, explore
+
+        budget = page_budget or DEFAULT_PAGE_BUDGET
+
+        def progress(done: int, total: int, current: str) -> None:
+            report({"stage": "exploring", "done": done, "total": total, "url": current})
+
+        report({"stage": "starting", "total": budget})
+        # 取消時回傳已經找到的東西，不是丟掉。使用者按取消多半是「夠了」，
+        # 而不是「這些我不要」——把找到的名錄一起丟掉等於白等那幾十秒。
+        result = explore(
+            url,
+            page_budget=budget,
+            on_progress=progress,
+            cancel_event=cancel_event,
+            document_kinds=document_kinds or (),
+        )
+        report({"stage": "done"})
+        return result
+
     def build_source(
         self,
         url: str,
@@ -70,6 +110,8 @@ class SourceWizardController:
         max_details: int | None = None,
         default_industry: str = "",
         collect_fields: list[str] | None = None,
+        document_kinds: list[str] | None = None,
+        page_actions: list[dict] | None = None,
         page_start: int = 1,
         page_end: int | None = None,
     ) -> SourceConfig:
@@ -79,7 +121,7 @@ class SourceWizardController:
         before this can be saved -- an empty name, no list selector, no
         company-name rule, or a selector pydantic itself rejects.
         """
-        from core.config import FieldRule, PaginationRule
+        from core.config import FieldRule, PageAction, PaginationRule
 
         clean_name = name.strip()
         if not clean_name:
@@ -136,6 +178,8 @@ class SourceWizardController:
                 label=clean_name,
                 default_industry=default_industry.strip(),
                 collect_fields=list(collect_fields or []),
+                document_kinds=list(document_kinds or []),
+                page_actions=[PageAction(**a) for a in (page_actions or [])],
                 page_start=page_start,
                 page_end=page_end,
             )

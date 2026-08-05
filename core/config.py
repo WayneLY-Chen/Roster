@@ -181,6 +181,42 @@ class PlaywrightSection(_Base):
     nav_timeout_ms: int = Field(default=30_000, ge=1_000, le=300_000)
 
 
+class PageAction(_Base):
+    """頁面載入之後、開始擷取之前要做的一個動作。
+
+    有一類名錄把電話與信箱藏在「顯示電話」按鈕後面，或是只先載入前 20 筆、
+    要按「載入更多」才會出現其餘的。那些資料在原始 HTML 裡根本不存在——不做
+    這個動作就永遠抓不到。
+
+    四種動作涵蓋了絕大多數情形：
+
+    ``click``      按一次（關閉 cookie 提示、展開整份清單）。
+    ``click_all``  把符合的**每一個**都按一次（每一列各有一顆「顯示電話」）。
+    ``scroll``     往下捲（無限捲動的清單）。
+    ``wait``       單純等一下，給非同步載入的內容一點時間。
+
+    只有 ``crawler.engine`` 設成 ``playwright`` 時才會執行——httpx 拿到的是
+    伺服器吐出來的原始 HTML，上面沒有任何東西可以按。
+    """
+
+    type: Literal["click", "click_all", "scroll", "wait"] = "click"
+    #: 要操作的元素。``scroll`` 與 ``wait`` 不需要。
+    selector: str | None = None
+    #: 重複幾次。``click`` 用來連按「載入更多」，``scroll`` 用來連續下捲。
+    times: int = Field(default=1, ge=1, le=100)
+    #: 每一次動作之後等多久（毫秒），讓內容有時間出現。
+    wait_ms: int = Field(default=400, ge=0, le=10_000)
+    #: 找不到元素時要不要當成錯誤。預設不要——「同意 cookie」那顆按鈕
+    #: 第二頁就不會再出現，那是正常的，不該讓整趟爬取停下來。
+    required: bool = False
+
+    @model_validator(mode="after")
+    def _needs_a_selector(self) -> "PageAction":
+        if self.type in ("click", "click_all") and not (self.selector or "").strip():
+            raise ValueError(f"page action {self.type!r} 需要 selector")
+        return self
+
+
 class FieldRule(_Base):
     """How to pull one field out of a list item's markup."""
 
@@ -269,6 +305,25 @@ class SourceConfig(_Base):
     #:
     #: ``company_name`` 不用列，它一律會被收集——那是必填欄位。
     collect_fields: list[str] = Field(default_factory=list)
+
+    #: 這個來源要不要順便讀頁面上連出去的檔案，以及讀哪幾種
+    #: （``pdf``／``excel``／``word``，見 :mod:`crawler.documents`）。
+    #:
+    #: **預設是空的，也就是完全不下載任何檔案。** 下載並解析別人的檔案跟讀
+    #: 網頁不是同一件事：檔案通常大得多、下載一次就是一次完整傳輸，而且使用者
+    #: 未必想要那些內容。所以這件事一定要使用者自己勾選，不能預設幫他決定。
+    #:
+    #: 不少公協會沒有把會員名冊做成網頁，而是掛一個 PDF 或 Excel 在網站上，
+    #: 常常還要先點進某個子頁面才看得到那個連結——勾了之後，爬取時遇到這種
+    #: 連結就會跟進去把裡面的名單讀出來。
+    document_kinds: list[str] = Field(default_factory=list)
+
+    #: 一次爬取最多讀幾個檔案。每一個都是一次完整下載，要有上限。
+    max_documents: int = Field(default=20, ge=0, le=500)
+
+    #: 頁面載入之後、開始擷取之前要做的動作（點「顯示電話」、按「載入更多」、
+    #: 往下捲）。只有 ``crawler.engine`` 是 ``playwright`` 時才會執行。
+    page_actions: list[PageAction] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _page_range_is_sane(self) -> "SourceConfig":

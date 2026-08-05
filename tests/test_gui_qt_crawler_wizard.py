@@ -143,6 +143,8 @@ class _FakeSourceController:
         max_details=None,
         default_industry="",
         collect_fields=None,
+        document_kinds=None,
+        page_actions=None,
         page_start=1,
         page_end=None,
     ):
@@ -157,6 +159,8 @@ class _FakeSourceController:
             "max_details": max_details,
             "default_industry": default_industry,
             "collect_fields": collect_fields,
+            "document_kinds": document_kinds,
+            "page_actions": page_actions,
             "page_start": page_start,
             "page_end": page_end,
         }

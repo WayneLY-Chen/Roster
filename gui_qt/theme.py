@@ -245,6 +245,16 @@ def input_width(digits: int, *, has_spin_buttons: bool = False) -> int:
     return width + 18 if has_spin_buttons else width
 
 
+def sidebar_width() -> int:
+    """側邊欄寬度。
+
+    寫死像素在這裡特別危險：側邊欄同時裝著標題、九顆導覽按鈕與版本資訊，
+    macOS 的系統介面字比 Windows 大一號，Windows 上剛好的寬度到了 Mac 就會
+    把「更新資訊」這種四個字的按鈕文字切掉。以字寬推導才能兩邊都對。
+    """
+    return max(_metric("digit") * 22 + 36, 190)
+
+
 def ui_family() -> str:
     """目前使用的介面字族。"""
     return _resolved or QApplication.font().family()

@@ -218,3 +218,95 @@ def test_platform_font_preference_puts_the_native_family_first():
         assert mac_index < windows_index
     elif sys.platform == "win32":
         assert windows_index < mac_index
+
+
+# --------------------------------------------------- 整個介面的文字寬度
+
+
+#: 量測本身的誤差容許值。QLabel 沒有內距、QPushButton 的內距由樣式表決定，
+#: 這裡的估算不可能跟 Qt 的排版完全一致，差幾個 px 不算問題。
+_WIDTH_TOLERANCE = 6
+
+_BUTTON_PADDING = 26
+_COMBO_CHROME = 36
+
+
+def _text_and_padding(widget) -> tuple[str, int] | None:
+    """這個元件要顯示的最長文字，以及文字以外要留的空間。"""
+    from PySide6.QtWidgets import QCheckBox, QComboBox, QLabel, QPushButton, QRadioButton
+
+    if isinstance(widget, QComboBox):
+        texts = [widget.itemText(i) for i in range(widget.count())]
+        texts = texts or [widget.currentText()]
+        metrics = QFontMetrics(widget.font())
+        return max(texts, key=metrics.horizontalAdvance, default=""), _COMBO_CHROME
+    if isinstance(widget, (QPushButton, QCheckBox, QRadioButton)):
+        return widget.text(), _BUTTON_PADDING
+    if isinstance(widget, QLabel) and not widget.wordWrap():
+        return widget.text(), 0
+    return None
+
+
+def _widgets_whose_text_does_not_fit(app) -> list[str]:
+    offenders: list[str] = []
+    for widget in app.allWidgets():
+        if not widget.isVisible() or widget.width() <= 1:
+            continue
+        found = _text_and_padding(widget)
+        if found is None:
+            continue
+        text, padding = found
+        # 富文字（超連結、粗體）量不準，而且它們一律有換行，跳過。
+        if not text or "<" in text:
+            continue
+        needed = QFontMetrics(widget.font()).horizontalAdvance(text) + padding
+        if needed > widget.width() + _WIDTH_TOLERANCE:
+            offenders.append(
+                f"{type(widget).__name__}「{text[:40]}」需要 {needed}px，只有 {widget.width()}px"
+            )
+    return offenders
+
+
+#: 10 = Windows 的設定，13 = macOS 的系統介面字級，16 = 放大顯示的使用者。
+@pytest.mark.parametrize("point_size", [10, 13, 16])
+def test_no_text_in_the_whole_window_is_cut_off(qt_app, point_size, monkeypatch):
+    """整個介面掃一遍，確認沒有任何元件的文字放不下自己的框。
+
+    這是重複發生過好幾次的一類問題，成因都一樣：版面尺寸寫死成像素。
+    macOS 的系統介面字比 Windows 大一號，Windows 上剛好的寬度到了 Mac 就會
+    少掉最後一兩個字——「（全部啟用）」變成「（全部啟用」。逐個元件檢查比
+    等使用者截圖回報快得多。
+    """
+    from core.config import get_config
+    from gui_qt.app import MainWindow
+
+    original_font = qt_app.font()
+
+    # MainWindow 建立時會把字型設回平台預設；換成我們要模擬的字級，
+    # 這正是那個函式在 macOS 上會做的事。
+    def fake_configure(app) -> str:
+        font = QFont(theme.ui_family())
+        font.setPointSize(point_size)
+        app.setFont(font)
+        theme._measure(font)
+        return font.family()
+
+    monkeypatch.setattr(theme, "configure_fonts", fake_configure)
+
+    window = MainWindow(get_config())
+    try:
+        window.resize(1280, 860)
+        window.show()
+        qt_app.processEvents()
+        for button in window.nav_buttons.values():
+            button.click()          # 每一頁都要建出來才量得到
+            qt_app.processEvents()
+
+        offenders = _widgets_whose_text_does_not_fit(qt_app)
+        assert not offenders, "這些元件的文字會被截斷：\n" + "\n".join(offenders)
+    finally:
+        window.close()
+        window.deleteLater()
+        qt_app.setFont(original_font)
+        theme._measure(original_font)
+        qt_app.processEvents()

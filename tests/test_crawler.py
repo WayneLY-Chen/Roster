@@ -890,7 +890,7 @@ def test_crawl_pipeline_lazily_builds_and_closes_a_network_fetcher(
         def __init__(self) -> None:
             self.closed = False
 
-        def fetch(self, url, *, method="GET", data=None, encoding=None):
+        def fetch(self, url, *, method="GET", data=None, encoding=None, actions=()):
             return FetchResult(
                 url=url, status_code=200,
                 html="<div class='item'><h3 class='n'>Foo</h3></div>",

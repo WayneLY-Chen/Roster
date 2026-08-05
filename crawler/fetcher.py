@@ -14,7 +14,9 @@ from __future__ import annotations
 import random
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urlencode
 
 import httpx
@@ -74,6 +76,70 @@ def _encode_form_body(data: dict[str, str], encoding: str) -> bytes:
 
 class TransientFetchError(CrawlError):
     """A failure that may resolve on retry (timeout, 503, connection reset)."""
+
+
+#: 一次 ``click_all`` 最多按幾個元素。一頁 200 列、每列一顆「顯示電話」是常
+#: 態，全部按完要花不少時間，但如果一頁有上千個相符元素，那多半是選擇器寫錯了。
+MAX_CLICKS_PER_ACTION = 300
+
+
+def _run_page_actions(page: Any, actions: Sequence[Any]) -> None:
+    """在擷取之前，把使用者設定的動作在頁面上做一遍。
+
+    每一個動作都獨立處理失敗：「同意 cookie」那顆按鈕第二頁就不會再出現，
+    那是正常的，不該讓整趟爬取停下來。只有標了 ``required`` 的動作失敗才會
+    往上丟——那代表使用者說「沒做到這件事，這一頁的資料就是不完整的」。
+    """
+    for action in actions:
+        try:
+            _run_one_action(page, action)
+        except CrawlError:
+            raise
+        except Exception as exc:
+            if getattr(action, "required", False):
+                raise CrawlError(
+                    f"頁面動作 {action.type}（{action.selector}）失敗：{exc}"
+                ) from exc
+            log.debug("頁面動作 {} 略過：{}", action.type, exc)
+
+
+def _run_one_action(page: Any, action: Any) -> None:
+    wait_ms = getattr(action, "wait_ms", 400)
+    times = getattr(action, "times", 1)
+    selector = (getattr(action, "selector", None) or "").strip()
+
+    if action.type == "wait":
+        page.wait_for_timeout(wait_ms)
+        return
+
+    if action.type == "scroll":
+        for _ in range(times):
+            page.mouse.wheel(0, 20_000)
+            page.wait_for_timeout(wait_ms)
+        return
+
+    if action.type == "click":
+        for _ in range(times):
+            element = page.query_selector(selector)
+            if element is None:
+                break          # 「載入更多」按完就消失了，那是做完了不是失敗
+            element.click()
+            page.wait_for_timeout(wait_ms)
+        return
+
+    if action.type == "click_all":
+        elements = page.query_selector_all(selector)[:MAX_CLICKS_PER_ACTION]
+        for element in elements:
+            try:
+                element.click()
+            except Exception as exc:
+                # 一顆按不動（被蓋住、已經展開）不該讓其餘 199 顆都不按。
+                log.debug("click_all 有一個元素按不動：{}", exc)
+        if elements:
+            page.wait_for_timeout(wait_ms)
+        return
+
+    log.warning("不認得的頁面動作：{}", action.type)
 
 
 @dataclass(slots=True)
@@ -150,6 +216,7 @@ class BaseFetcher(ABC):
         method: str = "GET",
         data: dict[str, str] | None = None,
         encoding: str | None = None,
+        actions: Sequence[Any] = (),
     ) -> FetchResult:
         """Fetch one URL, honouring robots.txt, the delay, and the retry budget.
 
@@ -181,7 +248,10 @@ class BaseFetcher(ABC):
             ),
         )
         started = time.monotonic()
-        result = retryer(self._fetch_once, url, method=method, data=data, encoding=encoding)
+        result = retryer(
+            self._fetch_once, url, method=method, data=data,
+            encoding=encoding, actions=actions,
+        )
         result.elapsed = time.monotonic() - started
         log.debug("fetched {} [{}] in {:.2f}s", url, result.status_code, result.elapsed)
         return result
@@ -194,6 +264,7 @@ class BaseFetcher(ABC):
         method: str = "GET",
         data: dict[str, str] | None = None,
         encoding: str | None = None,
+        actions: Sequence[Any] = (),
     ) -> FetchResult:
         """Single attempt. Raise :class:`TransientFetchError` to trigger retry."""
 
@@ -235,6 +306,7 @@ class HttpxFetcher(BaseFetcher):
         method: str = "GET",
         data: dict[str, str] | None = None,
         encoding: str | None = None,
+        actions: Sequence[Any] = (),
     ) -> FetchResult:
         try:
             if method == "POST":
@@ -337,6 +409,7 @@ class PlaywrightFetcher(BaseFetcher):
         method: str = "GET",
         data: dict[str, str] | None = None,
         encoding: str | None = None,
+        actions: Sequence[Any] = (),
     ) -> FetchResult:
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -357,6 +430,8 @@ class PlaywrightFetcher(BaseFetcher):
                 raise TransientFetchError(f"{url} returned {status}")
             if status >= 400:
                 raise CrawlError(f"{url} returned {status}")
+            if actions:
+                _run_page_actions(page, actions)
             return FetchResult(url=page.url, status_code=status or 200, html=page.content())
         except PlaywrightTimeout as exc:
             raise TransientFetchError(f"timeout loading {url}") from exc
