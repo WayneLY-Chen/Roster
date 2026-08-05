@@ -9,13 +9,11 @@
 # 單獨搬到別台電腦（它要找得到專案資料夾）。
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app="$here/Roster.app"
 
 if [ ! -x "$here/.venv/bin/python" ]; then
-    echo "[ERROR] 還沒建立虛擬環境。先執行："
-    echo "    python3 -m venv .venv"
-    echo "    .venv/bin/python -m pip install -r requirements.txt"
+    echo "[錯誤] 還沒安裝。請先雙擊同一個資料夾裡的「安裝.command」。"
     exit 1
 fi
 

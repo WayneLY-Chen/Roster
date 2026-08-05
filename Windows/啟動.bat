@@ -6,16 +6,14 @@ REM  batch file when it contains non-ASCII text, so all Chinese lives
 REM  in the application itself, not in here.
 REM ---------------------------------------------------------------
 setlocal
-pushd "%~dp0"
+pushd "%~dp0.."
 title Roster
 
 if not exist ".venv\Scripts\python.exe" (
     echo.
-    echo [ERROR] Virtual environment not found: .venv\Scripts\python.exe
+    echo [ERROR] Not installed yet.
     echo.
-    echo Run these two commands in this folder first:
-    echo     python -m venv .venv
-    echo     .venv\Scripts\pip install -r requirements.txt
+    echo Double-click the setup file in this same folder first.
     echo.
     popd
     pause

@@ -5,7 +5,7 @@
 
 Python 3.12+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / macOS / Linux ｜ 也可用命令列操作
 
-最新版本 **v1.3.0** — 這一版改了什麼見 [`CHANGELOG.md`](CHANGELOG.md)
+最新版本 **v1.5.0** — 這一版改了什麼見 [`CHANGELOG.md`](CHANGELOG.md)
 
 > **使用前請先閱讀本文件最後的[免責聲明](#免責聲明)。**
 > 本工具僅供蒐集網站公開顯示的商業聯絡資訊，使用者須自行確認每一個爬取目標的合法性並自負全部責任。
@@ -31,53 +31,76 @@ Python 3.12+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / 
 
 ## 安裝
 
-需要 **Python 3.12 或更新版本**。
+需要 **Python 3.12 或更新版本**（[官方下載](https://www.python.org/downloads/)。
+Windows 安裝時記得勾選 *Add python.exe to PATH*）。
 
-**Windows**
+打開你的作業系統對應的資料夾，**雙擊「安裝」**，剩下的它會自己做完：
 
-```bat
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-```
-
-**macOS / Linux**
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-chmod +x start.sh console.sh
-```
-
-只有要爬「用 JavaScript 動態產生內容」的網站時，才需要多裝一次瀏覽器：
-
-```bash
-.venv/bin/python -m playwright install chromium     # Windows 用 .venv\Scripts\python
-```
-
-裝好之後，日常使用點兩下（或執行）這兩個檔案就好：
-
-| Windows | macOS / Linux | 用途 |
+| 你的系統 | 打開這個資料夾 | 雙擊 |
 |---|---|---|
-| `start.bat` | `./start.sh` | 開啟視窗介面 |
-| `console.bat` | `./console.sh` | 開啟已啟用虛擬環境的命令列 |
+| Windows | `Windows/` | `安裝.bat` |
+| macOS | `macOS/` | `安裝.command` |
+| Linux | `Linux/` | `./start.sh`（會提示怎麼安裝） |
+
+安裝程式會建立虛擬環境、下載套件（約 150 MB，需要幾分鐘），
+macOS 還會順便產生 `Roster.app`。可以重複執行，已經裝好的部分會直接跳過。
+
+### 日常啟動
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| 開啟程式 | `Windows/啟動.bat` | `macOS/啟動.command` 或 `Roster.app` | `Linux/start.sh` |
+| 命令列 | `Windows/命令列.bat` | `macOS/命令列.command` | `Linux/console.sh` |
+
+**macOS 第一次開啟要按右鍵 →「打開」。** Gatekeeper 會擋下未簽章的程式，
+直接雙擊只會跳「來自未識別的開發者」而且沒有繼續的選項，右鍵開啟才會給你
+那個按鈕。之後就可以正常雙擊了。
+
+> `Roster.app` 是 `macOS/建立App.command` 產生的，只是一層薄殼——執行時仍然
+> 使用專案資料夾裡的 `.venv`，所以改了程式碼不用重新產生，代價是它不能單獨
+> 搬到別台電腦。要那樣的話得用 PyInstaller 打包（設定檔是
+> `packaging/roster.spec`）。
+
+### 爬 JavaScript 網站才需要的額外步驟
+
+只有要爬「用 JavaScript 動態產生內容」的網站時，才需要多裝一次瀏覽器。
+開啟命令列之後執行：
+
+```bash
+python -m playwright install chromium
+```
+
+### 搬動資料夾
 
 啟動腳本都以自己所在的位置推算路徑，整個資料夾搬到哪裡、改成什麼名字都能用。
 
-> 如果搬動資料夾後 `pip`、`pytest` 這些指令失效，那是 Python 虛擬環境本身
+> 如果搬動之後 `pip`、`pytest` 這些指令失效，那是 Python 虛擬環境本身
 > 不可搬移的已知行為。改用 `python -m pip`、`python -m pytest` 即可，
-> 或直接重建 `.venv`。
+> 或重新執行一次安裝檔。
 
 ---
 
 ## 五分鐘上手
 
-1. 依上方步驟建好環境
-2. 執行 `start.bat`（macOS 是 `./start.sh`）
-3. 到「**爬取**」頁 → 來源選 `sample` → 按「**開始爬取**」
-4. 到「**公司**」頁，會看到 7 筆範例資料
-5. 到「**匯出**」頁 → 格式選 Excel → 按「**匯出**」
+### 先確認整條流程正常（不用連網）
 
-`sample` 是內建的離線範例名錄，不會連網，用來確認整條流程正常。
+1. 依上方步驟建好環境，啟動程式
+2. 到「**匯入**」頁 → 按「**下載範例檔**」→ 存成 Excel
+3. 打開那個檔案，第二個分頁有逐欄說明。照著填幾家公司，存檔
+4. 回到「**匯入**」頁 → 「選擇檔案…」選它 → 確認欄位對應 → 按「**匯入**」
+5. 到「**公司**」頁看資料，再到「**匯出**」頁匯出來對一次
+
+這一輪完全不會連到任何網站，用來確認安裝沒問題。
+
+### 開始爬第一個名錄
+
+1. 到「**爬取**」頁 → 按「**＋ 自訂網址…**」
+2. 貼上你有權限爬取的名錄網址 → 按「**分析網頁**」
+3. 程式會告訴你抓到幾筆、有哪些欄位、這個名錄總共幾頁
+4. 在「預覽抓到的資料」確認內容 → 填來源名稱 → 「**儲存並立即爬取**」
+
+程式**不預先附任何爬取來源**——要爬哪些網站是你自己的決定，
+而且你必須先確認那個網站允許被爬取（見文末的[免責聲明](#免責聲明)）。
 
 ---
 
@@ -404,7 +427,8 @@ HTML，而且純 HTML 的信比較容易被判定成垃圾郵件。圖片以 **C
 ```bash
 python main.py --help                  # 列出所有指令
 python main.py gui                     # 開啟視窗介面
-python main.py crawl -s sample         # 爬取指定來源
+python main.py crawl --list            # 列出已設定的來源
+python main.py crawl -s 來源名稱        # 爬取指定來源
 python main.py crawl --url URL         # 直接爬一個網址
 python main.py enrich                  # 補抓信箱
 python main.py verify                  # 重新驗證所有信箱

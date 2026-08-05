@@ -16,7 +16,7 @@ REM  derived from %~dp0 (the folder THIS file lives in), and keeps
 REM  working wherever the project is moved to.
 REM ---------------------------------------------------------------
 setlocal
-pushd "%~dp0"
+pushd "%~dp0.."
 title Roster - command line
 
 if not exist ".venv\Scripts\python.exe" (

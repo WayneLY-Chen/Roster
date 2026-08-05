@@ -5,7 +5,7 @@
 # project folder can be renamed or moved anywhere without breaking.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
 
 python_bin="$here/.venv/bin/python"

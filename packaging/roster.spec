@@ -13,7 +13,8 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
 
-ROOT = Path(SPECPATH)
+# 這份 spec 住在 packaging/ 底下，所以專案根目錄是它的上一層。
+ROOT = Path(SPECPATH).parent
 
 # 這些是使用者的資料與設定，不能打包進去——程式第一次啟動會自己建立，
 # 打包進去等於把開發機的資料庫發給每個使用者。
@@ -69,7 +70,7 @@ excludes = [
 a = Analysis(
     # app_main.py 而不是 main.py：後者是 Typer 命令列程式，沒給子指令時
     # 只會印出說明——配上 console=False 就等於「點兩下毫無反應」。
-    ["app_main.py"],
+    [str(Path(SPECPATH) / "app_main.py")],
     pathex=[str(ROOT)],
     binaries=[],
     datas=datas,

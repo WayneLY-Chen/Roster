@@ -68,7 +68,7 @@ def test_the_changelog_is_bundled_into_the_exe():
     """打包後那一頁會不會是空的——只有真的去打包才會發現，所以在這裡擋。"""
     from pathlib import Path
 
-    spec = (Path(__file__).resolve().parent.parent / "roster.spec").read_text(
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "roster.spec").read_text(
         encoding="utf-8"
     )
     assert "CHANGELOG.md" in spec, "roster.spec 的 datas 沒有帶上 CHANGELOG.md"
