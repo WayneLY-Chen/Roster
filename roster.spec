@@ -21,6 +21,9 @@ datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "config.yaml"), "."),
     (str(ROOT / "templates"), "templates"),
+    # 「更新資訊」頁直接讀這個檔案。漏掉的話打包後那一頁會是空的，而且
+    # 只有真的去打包、真的去點那一頁才會發現。
+    (str(ROOT / "CHANGELOG.md"), "."),
 ]
 
 # 控制器用延遲 import，PyInstaller 的靜態分析看不到那些字串裡的模組名；

@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from datetime import datetime
+from datetime import date, datetime
 
 from core.errors import CRMError
 from core.schemas import CompanyFilter, CompanyView
@@ -141,12 +141,14 @@ class CompaniesPage(BasePage):
         delete_button.clicked.connect(self._delete_selected)
         header.addWidget(delete_button)
 
-        # 只有在「收集日期」選了某一天時才會啟用。整批刪除是不可復原的，
-        # 選著「全部」時按下去等於清空整個資料庫——那顆按鈕不該存在。
-        self.delete_day_button = QPushButton("刪除該日全部")
+        # 永遠可以按。選了「收集日期」就刪那一天，沒選就刪今天收集到的——
+        # 「把剛剛爬壞的那批清掉」是最常見的需求，不該逼使用者先去下拉選單
+        # 挑一個日期才點得下去。按鈕文字會跟著變，按下去之前就看得出會刪什麼。
+        #
+        # 不管哪一種都只刪「某一天」，不會有「刪除全部」這個選項——那個沒有
+        # 任何安全的按錯方式。
+        self.delete_day_button = QPushButton("刪除今日新增")
         self.delete_day_button.setObjectName("DangerButton")
-        self.delete_day_button.setEnabled(False)
-        self.delete_day_button.setToolTip("先在下面的「收集日期」選一天")
         self.delete_day_button.clicked.connect(self._delete_selected_day)
         header.addWidget(self.delete_day_button)
 
@@ -300,12 +302,20 @@ class CompaniesPage(BasePage):
         self._update_delete_day_button()
         self._run_search()
 
+    def target_delete_date(self):
+        """「刪除」按鈕會動到哪一天：選了日期就是那天，沒選就是今天。"""
+        return self.selected_date() or date.today()
+
     def _update_delete_day_button(self) -> None:
         day = self.selected_date()
-        self.delete_day_button.setEnabled(day is not None)
-        self.delete_day_button.setToolTip(
-            f"刪除 {day:%Y-%m-%d} 收集到的所有公司" if day else "先在下面的「收集日期」選一天"
-        )
+        if day is None:
+            self.delete_day_button.setText("刪除今日新增")
+            self.delete_day_button.setToolTip(
+                "刪除今天收集到的所有公司。要刪別天的，先在下面的「收集日期」選那一天。"
+            )
+        else:
+            self.delete_day_button.setText(f"刪除 {day:%m-%d} 全部")
+            self.delete_day_button.setToolTip(f"刪除 {day:%Y-%m-%d} 收集到的所有公司")
 
     def _apply_date_options(self, dates: list) -> None:
         """重填日期選單，保留目前選的那一天。"""
@@ -323,17 +333,30 @@ class CompaniesPage(BasePage):
         self._update_delete_day_button()
 
     def _delete_selected_day(self) -> None:
-        day = self.selected_date()
-        if day is None:
-            self.status("請先在「收集日期」選一天", "error")
+        day = self.target_delete_date()
+
+        # 家數要問資料庫，不能用畫面上的列數——使用者可能同時下了關鍵字或
+        # 產業篩選，表格上看到的只是那一天的一部分，但刪除是刪整天。
+        try:
+            count = self.controller.count(
+                CompanyFilter(
+                    created_after=datetime.combine(day, datetime.min.time()),
+                    created_before=datetime.combine(day, datetime.max.time()),
+                )
+            )
+        except CRMError as exc:
+            self.report_error(exc)
             return
 
-        count = self.table.row_count()
+        if not count:
+            self.status(f"{day:%Y-%m-%d} 沒有收集到任何公司", "error")
+            return
+
         reply = QMessageBox.question(
             self,
-            "刪除該日全部公司",
+            "刪除整天的公司",
             f"確定要刪除 {day:%Y-%m-%d} 收集到的全部公司嗎？\n"
-            f"目前這一天有 {count} 家，連同底下的聯絡人、活動記錄與附件都會一起刪除。\n\n"
+            f"這一天共 {count} 家，連同底下的聯絡人、活動記錄與附件都會一起刪除。\n\n"
             "這個動作無法復原。需要保險的話，先到「設定」頁建立一份備份。",
         )
         if reply != QMessageBox.StandardButton.Yes:

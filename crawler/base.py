@@ -59,10 +59,19 @@ class BaseSource(ABC):
 
     @property
     def page_limit(self) -> int:
-        """收錄頁數上限：來源自訂上限、頁碼範圍與全域上限三者取最小。"""
-        limits = [self.config.crawler.max_pages]
-        if self.source_config.max_pages:
-            limits.append(self.source_config.max_pages)
+        """這一次最多收錄幾頁。
+
+        ``crawler.max_pages`` 是**預設值**，不是天花板——只有在來源自己沒有
+        指定時才生效。以前是三者取最小，結果是：一個 24 頁的名錄，使用者在
+        來源上明確填了 24，卻只被爬了 10 頁（全域預設值），而且畫面上顯示
+        「完成」，看不出被截斷過。使用者明確講了 24 就是 24。
+
+        頁碼範圍（``page_start``/``page_end``）不一樣，那是使用者對「這一次
+        要爬哪幾頁」的直接指定，仍然要生效。
+        """
+        limits: list[int] = [
+            self.source_config.max_pages or self.config.crawler.max_pages
+        ]
         page_count = self.source_config.page_count
         if page_count is not None:
             limits.append(page_count)

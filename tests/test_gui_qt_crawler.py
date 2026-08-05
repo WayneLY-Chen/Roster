@@ -103,16 +103,41 @@ def test_optional_int_rejects_non_integers_and_non_positive():
     assert CrawlerPage._optional_int("5", "最多幾頁") == 5
 
 
-def test_start_crawl_rejects_to_page_before_from_page(qt_app, patch_config):
+def test_the_crawl_page_does_not_duplicate_the_source_settings(qt_app, patch_config):
+    """頁數範圍與欄位選擇只住在「自訂網址」精靈裡，不在這一頁重複一份。
+
+    同一個概念散在兩個地方，使用者會不確定哪個才算數；更實際的問題是
+    ——寫在這一頁的東西自動排程根本看不到，排程跑的時候沒有人在這裡填。
+    """
     page = CrawlerPage(_FakeApp())
     page.ensure_built()
 
-    page.from_page_entry.set("5")
-    page.to_page_entry.set("2")
+    for removed in ("from_page_entry", "to_page_entry", "max_pages_entry", "field_checks"):
+        assert not hasattr(page, removed), f"{removed} 應該只存在於自訂網址精靈裡"
+
+
+def test_starting_a_crawl_uses_the_sources_own_settings(qt_app, patch_config, monkeypatch):
+    """這一頁只挑來源、按下去，頁數範圍一律照來源自己的設定。"""
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    started: list[tuple] = []
+    monkeypatch.setattr(
+        page, "_clear_log", lambda: None
+    )
+
+    class _FakeTask:
+        running = False
+
+        def start(self, *args):
+            started.append(args)
+
+    monkeypatch.setattr("gui_qt.pages.crawler.BackgroundTask", lambda *a, **k: _FakeTask())
     page._start_crawl()
 
-    assert page.crawl_task is None
-    assert page.app.messages[-1] == ("結束頁不能小於起始頁", "error")
+    assert started, "應該要真的啟動一次爬取"
+    # (source, max_pages, from_page, to_page) —— 後三個一律 None。
+    assert started[0][1:] == (None, None, None)
 
 
 def test_crawl_against_sample_source_completes_and_bumps_version(

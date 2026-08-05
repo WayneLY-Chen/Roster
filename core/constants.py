@@ -14,7 +14,9 @@ PROJECT_NAME = "Roster"
 #: 匯出檔案的 generator 欄位等對外字串上——爬取時對方站台看到的就是這個名字，
 #: 所以它要能對應到一個真實存在的東西。
 DISPLAY_NAME = "名單匠"
-VERSION = "1.0.0"
+#: 版本號跟著 CHANGELOG.md 走——那份是「這一版改了什麼」的唯一出處，
+#: 「更新資訊」頁直接讀它，不另外維護一份會過期的副本。
+VERSION = "1.1.0"
 
 
 class StrEnum(str, Enum):

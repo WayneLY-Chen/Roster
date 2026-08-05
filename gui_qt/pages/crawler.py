@@ -124,25 +124,21 @@ class CrawlerPage(BasePage):
             self.report_error(exc)
             source_names = []
 
+        # 這一頁只做一件事：挑一個來源、按下去。
+        #
+        # 起始頁／結束頁／最多幾頁以前放在這裡，但它們是「這個來源要怎麼爬」
+        # 的設定，不是「這一次」的決定——而且寫在這一頁的東西自動排程根本
+        # 看不到。全部搬到「＋ 自訂網址…」裡跟著來源存起來，同一個概念不要
+        # 散在兩個地方，使用者才不會不確定哪個才算數。
         input_row = QHBoxLayout()
         self.source_combo = _LabeledCombo("來源", [ALL_ENABLED, *source_names])
         input_row.addWidget(self.source_combo)
-
-        self.from_page_entry = LabeledEntry("起始頁（選填）")
-        input_row.addWidget(self.from_page_entry)
-
-        self.to_page_entry = LabeledEntry("結束頁（選填）")
-        input_row.addWidget(self.to_page_entry)
-
-        self.max_pages_entry = LabeledEntry("最多幾頁（選填）")
-        input_row.addWidget(self.max_pages_entry)
         input_row.addStretch(1)
         controls.body_layout.addLayout(input_row)
 
         page_note = QLabel(
-            "上面三個是「這一次執行」的臨時覆寫，留空就照來源自己的設定跑。"
-            "要收集哪些欄位、預設產業、常用的頁數範圍，都在「＋ 自訂網址…」"
-            "裡設定並存進該來源——那些設定排程爬取也會套用，寫在這一頁的不會。"
+            "要爬幾頁、收集哪些欄位、這個來源屬於哪個產業，都在「＋ 自訂網址…」"
+            "裡設定並跟著來源存起來——自動排程去爬的時候也會照著做。"
         )
         page_note.setObjectName("MutedLabel")
         page_note.setWordWrap(True)
@@ -221,23 +217,11 @@ class CrawlerPage(BasePage):
         source = self.source_combo.get()
         source = None if source == ALL_ENABLED else source
 
-        try:
-            max_pages = self._optional_int(self.max_pages_entry.get(), "最多幾頁")
-            from_page = self._optional_int(self.from_page_entry.get(), "起始頁")
-            to_page = self._optional_int(self.to_page_entry.get(), "結束頁")
-        except ValueError as exc:
-            self.status(str(exc), "error")
-            return
-
-        if from_page is not None and to_page is not None and to_page < from_page:
-            self.status("結束頁不能小於起始頁", "error")
-            return
+        # 頁數範圍一律照來源自己的設定跑（在「＋ 自訂網址…」裡設定）。
+        max_pages = from_page = to_page = None
 
         self._clear_log()
-        span = ""
-        if from_page is not None or to_page is not None:
-            span = f"，第 {from_page or 1} 頁至{f'第 {to_page} 頁' if to_page else '最後'}"
-        self._append_log(f"開始爬取（{source or '全部啟用來源'}{span}）...")
+        self._append_log(f"開始爬取（{source or '全部啟用來源'}）...")
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.app.status_bar.start_progress()

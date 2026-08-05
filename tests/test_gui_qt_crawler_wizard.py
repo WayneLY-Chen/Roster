@@ -87,6 +87,8 @@ class _FakeDiscoveryResult:
     next_selector: str | None = None
     notes: list[str] = dc_field(default_factory=list)
     detail_link_selector: str | None = None
+    page_url_template: str | None = None
+    page_count: int = 0
 
     @property
     def ok(self) -> bool:

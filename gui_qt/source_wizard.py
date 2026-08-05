@@ -51,7 +51,14 @@ from core.i18n import field_label
 from gui_qt import theme
 from gui_qt.pages.base import bump_data_version
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, LabeledEntry, Section, WideComboBox
+from gui_qt.widgets import (
+    DataTable,
+    LabeledEntry,
+    Section,
+    WideComboBox,
+    caption,
+    inline_caption,
+)
 
 FIELD_COLUMNS = [
     ("field", "欄位", 110),
@@ -242,7 +249,7 @@ class SourceWizardDialog(QDialog):
         parent_layout.addWidget(section)
 
     def _build_summary_section(self, parent_layout: QVBoxLayout) -> None:
-        section = Section("2. 分析結果")
+        section = Section("2. 分析結果與收集設定")
 
         self.summary_label = QLabel("尚未分析。請先貼上網址並按「分析網頁」。")
         self.summary_label.setWordWrap(True)
@@ -253,7 +260,64 @@ class SourceWizardDialog(QDialog):
         self.notes_label.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         section.body_layout.addWidget(self.notes_label)
 
+        self._build_collect_controls(section.body_layout)
         parent_layout.addWidget(section)
+
+    def _build_collect_controls(self, body_layout: QVBoxLayout) -> None:
+        """要爬幾頁、要收集哪些欄位。
+
+        放在第 2 步而不是「進階設定」裡：這些是「你想要什麼資料」的決定，
+        每個人都要做一次。進階設定裡的是 CSS 選擇器——那才是「自動偵測猜錯
+        時才需要碰」的東西，兩者不是同一種。
+
+        這些設定會跟著來源存起來，所以自動排程去爬的時候也照著做。
+        """
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet(f"color: {theme.pick(theme.BORDER)};")
+        body_layout.addWidget(divider)
+
+        pages_row = QHBoxLayout()
+        self.page_start_entry = LabeledEntry("從第幾頁開始", value="1")
+        pages_row.addWidget(self.page_start_entry)
+        self.page_end_entry = LabeledEntry("爬到第幾頁為止（留空＝不限）")
+        pages_row.addWidget(self.page_end_entry)
+        self.max_pages_entry = LabeledEntry("最多爬幾頁", value="3")
+        pages_row.addWidget(self.max_pages_entry)
+        # 名錄網站幾乎都是一個分類一頁，分類本身就是產業——但它寫在麵包屑或
+        # 頁面標題裡，逐列抓的欄位規則抓不到它，產業欄就永遠是空的。
+        self.default_industry_entry = LabeledEntry("這個來源的產業（頁面沒寫時才套用）")
+        pages_row.addWidget(self.default_industry_entry)
+        body_layout.addLayout(pages_row)
+
+        collect_header = QHBoxLayout()
+        collect_header.addWidget(caption("要收集哪些欄位（公司名稱一定會收集）"))
+        collect_header.addStretch(1)
+        all_button = QPushButton("全選")
+        all_button.clicked.connect(lambda: self._set_all_collect(True))
+        collect_header.addWidget(all_button)
+        none_button = QPushButton("全不選")
+        none_button.clicked.connect(lambda: self._set_all_collect(False))
+        collect_header.addWidget(none_button)
+        body_layout.addLayout(collect_header)
+
+        checks_row = QHBoxLayout()
+        self.collect_checks: dict[str, QCheckBox] = {}
+        for field, label_text in COLLECTABLE_FIELDS:
+            check = QCheckBox(label_text)
+            check.setChecked(True)
+            self.collect_checks[field] = check
+            checks_row.addWidget(check)
+        checks_row.addStretch(1)
+        body_layout.addLayout(checks_row)
+
+        collect_note = QLabel(
+            "沒勾的欄位在寫入資料庫前會被清空。這些設定跟著這個來源存起來，"
+            "所以自動排程去爬的時候也會照著做。"
+        )
+        collect_note.setWordWrap(True)
+        collect_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
+        body_layout.addWidget(collect_note)
 
     def _build_preview_section(self, parent_layout: QVBoxLayout) -> None:
         section = Section("3. 預覽抓到的資料")
@@ -275,12 +339,12 @@ class SourceWizardDialog(QDialog):
 
         row = QHBoxLayout()
         self.name_entry = LabeledEntry("來源名稱")
-        row.addWidget(self.name_entry)
+        row.addWidget(self.name_entry, 1)
 
-        self.max_pages_entry = LabeledEntry("頁數上限", value="3")
-        row.addWidget(self.max_pages_entry)
+        # 「最多爬幾頁」搬到第 2 步跟其他收集設定放在一起了——同一個概念散在
+        # 兩個地方，使用者會不確定哪個才算數。
 
-        # 靠下對齊：這一列前面兩個是「說明文字在上、輸入框在下」的直向堆疊，
+        # 靠下對齊：這一列前面的是「說明文字在上、輸入框在下」的直向堆疊，
         # 按鈕預設會對齊整個堆疊的垂直中心，看起來浮在說明文字那一排。
         bottom = Qt.AlignmentFlag.AlignBottom
 
@@ -360,47 +424,6 @@ class SourceWizardDialog(QDialog):
         detail_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         body_layout.addWidget(detail_note)
 
-        # --- 這個來源自己的收集設定（會被存起來，排程爬取也適用）---
-
-        collect_row = QHBoxLayout()
-        self.page_start_entry = LabeledEntry("從第幾頁開始", value="1")
-        collect_row.addWidget(self.page_start_entry)
-        self.page_end_entry = LabeledEntry("爬到第幾頁為止（留空＝不限）")
-        collect_row.addWidget(self.page_end_entry)
-        # 名錄網站幾乎都是一個分類一頁，分類本身就是產業——但它寫在麵包屑或
-        # 頁面標題裡，逐列抓的欄位規則抓不到它，產業欄就永遠是空的。
-        self.default_industry_entry = LabeledEntry(
-            "這個來源的產業（頁面沒寫時才套用）"
-        )
-        collect_row.addWidget(self.default_industry_entry)
-        body_layout.addLayout(collect_row)
-
-        collect_header = QHBoxLayout()
-        collect_header.addWidget(QLabel("要收集哪些欄位（公司名稱一定會收集）"))
-        collect_header.addStretch(1)
-        all_button = QPushButton("全選")
-        all_button.clicked.connect(lambda: self._set_all_collect(True))
-        collect_header.addWidget(all_button)
-        body_layout.addLayout(collect_header)
-
-        checks_row = QHBoxLayout()
-        self.collect_checks: dict[str, QCheckBox] = {}
-        for field, label_text in COLLECTABLE_FIELDS:
-            check = QCheckBox(label_text)
-            check.setChecked(True)
-            self.collect_checks[field] = check
-            checks_row.addWidget(check)
-        checks_row.addStretch(1)
-        body_layout.addLayout(checks_row)
-
-        collect_note = QLabel(
-            "沒勾的欄位在寫入資料庫前會被清空。這些設定存在這個來源上，"
-            "所以自動排程去爬的時候也會照著做。"
-        )
-        collect_note.setWordWrap(True)
-        collect_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
-        body_layout.addWidget(collect_note)
-
         fields_title = QLabel("偵測到的欄位")
         title_font = fields_title.font()
         title_font.setBold(True)
@@ -417,21 +440,21 @@ class SourceWizardDialog(QDialog):
 
         edit_row = QHBoxLayout()
         self.selector_entry = LabeledEntry("取值位置（CSS 選擇器）")
-        edit_row.addWidget(self.selector_entry)
+        edit_row.addWidget(self.selector_entry, 1)
 
         self.attr_entry = LabeledEntry("要取什麼（text＝文字、href＝連結）")
-        edit_row.addWidget(self.attr_entry)
+        edit_row.addWidget(self.attr_entry, 1)
 
+        # 靠下對齊。旁邊兩個是 LabeledEntry（說明在上、輸入框在下，兩行高），
+        # 按鈕預設會對齊整個堆疊的垂直中心，看起來就浮在說明文字那一排。
         apply_button = QPushButton("套用")
         apply_button.clicked.connect(self._apply_edit)
-        edit_row.addWidget(apply_button)
-        edit_row.addStretch(1)
+        edit_row.addWidget(apply_button, 0, Qt.AlignmentFlag.AlignBottom)
         body_layout.addLayout(edit_row)
 
         new_field_row = QHBoxLayout()
-        new_field_caption = QLabel("新增欄位：")
-        new_field_caption.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
-        new_field_row.addWidget(new_field_caption)
+        new_field_caption = inline_caption("新增欄位：")
+        new_field_row.addWidget(new_field_caption, 0, Qt.AlignmentFlag.AlignBottom)
 
         self.new_field_combo = WideComboBox()
         self.new_field_combo.addItems([field_label(code) for code in KNOWN_FIELDS])
@@ -491,6 +514,15 @@ class SourceWizardDialog(QDialog):
             # 上限預設抓這一頁實際找到的筆數，超過 100 家的名錄才不會被
             # 悄悄截斷。
             self.max_details_entry.set(str(max(100, result.item_count)))
+
+        # 頁數上限比照辦理。這個欄位原本固定預設 3，而使用者沒有辦法知道
+        # 該調到多少——一個 24 頁的名錄就這樣只被爬了 3 頁，看起來像是程式
+        # 不會自動翻頁。偵測得出總頁數時就直接填進去。
+        if result.page_count > 1:
+            self.max_pages_entry.set(str(result.page_count))
+            self.max_details_entry.set(
+                str(max(100, result.page_count * result.item_count))
+            )
 
         self.field_rules = {
             code: {

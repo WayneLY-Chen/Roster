@@ -44,6 +44,7 @@ from gui_qt.pages.companies import CompaniesPage
 from gui_qt.pages.contacts import ContactsPage
 from gui_qt.pages.crawler import CrawlerPage
 from gui_qt.pages.dashboard import DashboardPage
+from gui_qt.pages.changelog import ChangelogPage
 from gui_qt.pages.export_page import ExportPage
 from gui_qt.pages.feedback import FeedbackPage
 from gui_qt.pages.import_page import ImportPage
@@ -85,6 +86,7 @@ PAGE_CLASSES: tuple[type[BasePage], ...] = (
     MailPage,
     LogsPage,
     SettingsPage,
+    ChangelogPage,
     FeedbackPage,
 )
 

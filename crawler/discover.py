@@ -95,6 +95,14 @@ class DiscoveryResult:
     notes: list[str] = field(default_factory=list)
     #: Selector for a per-company detail page, when the list only has names.
     detail_link_selector: str | None = None
+    #: 從數字分頁推出來的網址樣板（含 ``{page}``），沒有就是 None。
+    page_url_template: str | None = None
+    #: 這個名錄總共有幾頁。0 代表沒偵測到，1 代表只有一頁。
+    #:
+    #: 這個數字必須讓使用者看到。頁數上限的預設值是保守的，而使用者沒有辦法
+    #: 知道自己該把它調到多少——不告訴他的話，他會存下一個「只爬前幾頁」的
+    #: 來源，然後以為程式不會自動翻頁。
+    page_count: int = 0
 
     @property
     def ok(self) -> bool:
@@ -645,21 +653,101 @@ def find_detail_link_selector(items: list[Tag], page_host: str) -> str | None:
 
 
 def find_next_selector(soup: BeautifulSoup) -> str | None:
-    """Locate a "next page" link by rel, text or class."""
+    """Locate a "next page" link by rel, text, class, title or aria-label."""
     node = soup.select_one("a[rel='next']")
     if node is not None:
         return "a[rel='next']"
 
     for anchor in soup.find_all("a", href=True):
         haystack = " ".join(
-            [_text(anchor).lower(), " ".join(anchor.get("class") or []),
-             str(anchor.get("title") or "")]
+            [
+                _text(anchor).lower(),
+                " ".join(anchor.get("class") or []),
+                str(anchor.get("title") or ""),
+                # 只有圖示、沒有文字的「下一頁」按鈕，可讀性資訊都放在
+                # aria-label 裡——不看它就等於看不到那顆按鈕。
+                str(anchor.get("aria-label") or ""),
+            ]
         ).lower()
         if any(marker in haystack for marker in _NEXT_TEXT):
             selector = _css_for(anchor)
             if len(soup.select(selector)) <= 3:
                 return selector
     return None
+
+
+#: 一個查詢參數要出現這麼多個不同的數字，才算是分頁而不是巧合。
+_MIN_PAGE_LINKS = 2
+
+#: 常見的頁碼參數名稱。不在這個清單裡也還是會被認出來（判斷依據是「值是
+#: 連續的數字」），列出來只是為了在多個候選之間挑一個最像的。
+_PAGE_PARAM_HINTS = ("page", "p", "pg", "pageno", "page_no", "pageindex", "start", "offset")
+
+
+def find_query_pagination(soup: BeautifulSoup, url: str) -> tuple[str, int] | None:
+    """從「1 2 3 4 5」這種數字分頁推出帶 ``{page}`` 的網址樣板。
+
+    回傳 ``(網址樣板, 看到的最大頁碼)``，找不到就是 ``None``。
+
+    為什麼需要這個：:func:`find_next_selector` 只認得「下一頁」這種**文字**
+    連結。但台灣的名錄網站絕大多數是純數字分頁——底下一排 1 2 3 4 5，沒有
+    任何一個連結寫著「下一頁」。對那些站台，文字比對永遠找不到東西，來源就
+    被存成「只爬第一頁」，而使用者完全不會知道自己只拿到第一頁。
+
+    判斷方式是比較每個連結與目前網址的查詢參數：只有一個參數不同、而且那個
+    參數的值是數字，就是頁碼。要看到至少兩個不同的數字才算數——只有一個的話
+    可能只是某個帶編號的連結，不是分頁。
+    """
+    from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+
+    base = urlsplit(url)
+    base_params = dict(parse_qsl(base.query))
+
+    # 參數名稱 -> 看到的頁碼集合
+    candidates: dict[str, set[int]] = {}
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"]
+        if not isinstance(href, str) or href.startswith(("#", "javascript:")):
+            continue
+
+        target = urlsplit(urljoin(url, href))
+        if target.netloc != base.netloc or target.path != base.path:
+            continue        # 連到別的頁面，不是同一份清單的分頁
+
+        params = dict(parse_qsl(target.query))
+        differing = [
+            key for key in set(params) | set(base_params)
+            if params.get(key) != base_params.get(key)
+        ]
+        if len(differing) != 1:
+            continue
+
+        key = differing[0]
+        value = params.get(key, "")
+        if not value.isdigit():
+            continue
+        candidates.setdefault(key, set()).add(int(value))
+
+    usable = {k: v for k, v in candidates.items() if len(v) >= _MIN_PAGE_LINKS}
+    if not usable:
+        return None
+
+    # 多個候選時，挑名稱最像頁碼的那個；都不像就挑頁碼數量最多的。
+    key = min(
+        usable,
+        key=lambda k: (
+            _PAGE_PARAM_HINTS.index(k.lower()) if k.lower() in _PAGE_PARAM_HINTS else 99,
+            -len(usable[k]),
+        ),
+    )
+
+    template_params = {**base_params, key: "{page}"}
+    template = urlunsplit(
+        (base.scheme, base.netloc, base.path, urlencode(template_params), base.fragment)
+    )
+    # urlencode 會把大括號轉成 %7B/%7D，換頁時代入才找得到佔位符。
+    return template.replace("%7Bpage%7D", "{page}"), max(usable[key])
 
 
 # ---------------------------------------------------------------- discovery
@@ -712,8 +800,22 @@ def discover_from_html(html: str, url: str) -> DiscoveryResult:
         )
 
     result.next_selector = find_next_selector(soup)
-    if result.next_selector is None:
+
+    # 數字分頁（1 2 3 4 5）——台灣的名錄網站絕大多數是這一種，而且沒有任何
+    # 連結寫著「下一頁」，光靠文字比對永遠找不到。這裡順便算出總頁數。
+    query_pagination = find_query_pagination(soup, url)
+    if query_pagination is not None:
+        result.page_url_template, result.page_count = query_pagination
+
+    if result.next_selector is None and result.page_url_template is None:
         result.notes.append("找不到「下一頁」連結，將只爬取這一頁。")
+    elif result.page_count > 1:
+        estimated = result.page_count * result.item_count
+        result.notes.append(
+            f"偵測到共 {result.page_count} 頁（每頁 {result.item_count} 筆，"
+            f"全部爬完約 {estimated} 筆）。「頁數上限」已自動填成 {result.page_count}"
+            "，要少爬一點可以自己調小。"
+        )
 
     result.preview = build_preview(items, result, url)
     _add_quality_notes(result)

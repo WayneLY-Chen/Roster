@@ -189,6 +189,116 @@ def test_no_company_name_is_better_than_a_wrong_one():
     assert any("公司名稱" in note for note in result.notes), result.notes
 
 
+# ------------------------------------------------------------------ 分頁偵測
+
+
+def _numbered_pagination_page(page_count: int = 24, current: int = 1) -> str:
+    """一排「1 2 3 4 5」的數字分頁，沒有任何連結寫著「下一頁」。
+
+    台灣的名錄網站絕大多數長這樣。實測 tpchem.net.tw 的會員名錄就是——
+    24 頁、每頁 10 筆。
+    """
+    cards = "".join(
+        f"<div class='item'><h3>公司{n}股份有限公司</h3>"
+        f"<span class='tel'>02-2345-67{n:02d}</span></div>"
+        for n in range(1, 11)
+    )
+    links = "".join(
+        f"<a href='/directory.php?page={n}'>{n}</a>"
+        for n in range(1, page_count + 1)
+        if n != current
+    )
+    return f"<html><body><div class='list'>{cards}</div><nav>{links}</nav></body></html>"
+
+
+def test_numbered_pagination_is_detected_without_any_next_text():
+    """只認「下一頁」文字的話，這種頁面會被存成「只爬第一頁」。
+
+    而且使用者不會知道——他只會看到抓回來的筆數比預期少很多。
+    """
+    from crawler.discover import find_next_selector, find_query_pagination
+    from crawler.parser import make_soup
+
+    soup = make_soup(_numbered_pagination_page())
+    url = "http://example.test/directory.php"
+
+    assert find_next_selector(soup) is None, "這個頁面本來就沒有『下一頁』文字"
+
+    template, page_count = find_query_pagination(soup, url)
+    assert template == "http://example.test/directory.php?page={page}"
+    assert page_count == 24
+
+
+def test_the_page_count_is_reported_so_the_user_can_set_the_limit():
+    """頁數上限原本固定預設 3。一個 24 頁的名錄就這樣只被爬了 3 頁，
+    看起來像是程式不會自動翻頁——而使用者沒有辦法知道該調到多少。"""
+    result = discover_from_html(
+        _numbered_pagination_page(), "http://example.test/directory.php"
+    )
+
+    assert result.page_count == 24
+    assert result.page_url_template == "http://example.test/directory.php?page={page}"
+    assert any("24 頁" in note for note in result.notes), result.notes
+
+
+def test_a_single_page_directory_still_says_so():
+    result = discover_from_html(fixture_html_single_page(), "http://example.test/one")
+    assert result.page_count in (0, 1)
+    assert any("只爬取這一頁" in note for note in result.notes), result.notes
+
+
+def fixture_html_single_page() -> str:
+    cards = "".join(
+        f"<div class='item'><h3>公司{n}有限公司</h3><span class='tel'>02-111{n}2222</span></div>"
+        for n in range(1, 6)
+    )
+    return f"<html><body><div class='list'>{cards}</div></body></html>"
+
+
+def test_a_link_that_only_changes_one_numeric_parameter_counts_as_pagination():
+    """判準是「只有一個查詢參數不同，而且是數字」——連到別的頁面不算。"""
+    from crawler.discover import find_query_pagination
+    from crawler.parser import make_soup
+
+    html = """
+    <html><body>
+      <a href="/list.php?cat=5&page=2">2</a>
+      <a href="/list.php?cat=5&page=3">3</a>
+      <a href="/other.php?page=2">別的頁面</a>
+      <a href="/list.php?cat=9&page=2">別的分類</a>
+    </body></html>
+    """
+    result = find_query_pagination(make_soup(html), "http://example.test/list.php?cat=5")
+
+    assert result is not None
+    template, count = result
+    assert "page={page}" in template
+    assert "cat=5" in template
+    assert count == 3
+
+
+def test_one_numbered_link_alone_is_not_pagination():
+    """只有一個數字連結可能只是某個帶編號的東西，不是分頁。"""
+    from crawler.discover import find_query_pagination
+    from crawler.parser import make_soup
+
+    html = "<html><body><a href='/list.php?page=2'>2</a></body></html>"
+    assert find_query_pagination(make_soup(html), "http://example.test/list.php") is None
+
+
+def test_an_icon_only_next_button_is_found_through_aria_label():
+    """只有圖示沒有文字的翻頁鈕，可讀性資訊都放在 aria-label 裡。"""
+    from crawler.discover import find_next_selector
+    from crawler.parser import make_soup
+
+    html = """
+    <html><body>
+      <a class="pager-next" href="/p2" aria-label="Next page"><i class="icon"></i></a>
+    </body></html>
+    """
+    assert find_next_selector(make_soup(html)) == "a.pager-next"
+
+
 def test_discover_to_source_config_produces_a_valid_source(fixture_html):
     result = discover_from_html(fixture_html, FIXTURE_URL)
     source = result.to_source_config("my_directory")
