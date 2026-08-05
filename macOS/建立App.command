@@ -11,6 +11,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app="$here/Roster.app"
+. "$here/macOS/_共用.sh"
 
 if [ ! -x "$here/.venv/bin/python" ]; then
     echo "[錯誤] 還沒安裝。請先雙擊同一個資料夾裡的「安裝.command」。"
@@ -79,8 +80,20 @@ if [ ! -x "$app/Contents/MacOS/Roster" ]; then
     exit 1
 fi
 
-echo "已建立 $app（版本 $version）"
+# 這裡的大括號不能省。bash 判斷「變數名到哪裡結束」是逐位元組問 isalnum()，
+# 在某些 macOS 的 bash／語系組合下，全形字（「（」＝EF BC 88）的第一個位元組
+# 會被當成合法的變數名字元——`$app（` 於是被讀成一個叫 `app<EF>` 的變數，配上
+# `set -u` 就直接中止，錯誤訊息是看不懂的 `app?: unbound variable`。實際回報過。
+# Windows 這邊的 bash 5.2 不會重現，所以只靠自己測是測不出來的：
+# 只要變數後面接的是中文字，一律寫成 ${app}。
+echo "已建立 ${app}（版本 ${version}）"
 echo
 echo "把它拖進「應用程式」資料夾或 Dock 就可以用了。"
+
+# 使用者自己雙擊這個檔案時才停下來等（被安裝.command 呼叫時輸出是接到檔案的，
+# close_this_window 會自己判斷出來、什麼都不做）。
+if [ -t 1 ]; then
+    wait_then_close
+fi
 # 這個 .app 是在這台機器上產生的，不是從網路下載的，所以不帶隔離標記，
 # 也就不會出現「Apple 無法驗證是否為惡意軟體」那個視窗。

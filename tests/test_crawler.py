@@ -900,7 +900,9 @@ def test_crawl_pipeline_lazily_builds_and_closes_a_network_fetcher(
             self.closed = True
 
     fake = FakeFetcher()
-    monkeypatch.setattr(pipeline_module, "build_fetcher", lambda cfg: fake)
+    # ``**_`` 收掉 engine=：每個來源可以指定自己要不要用瀏覽器，管線是照
+    # 來源的引擎去要 fetcher 的。
+    monkeypatch.setattr(pipeline_module, "build_fetcher", lambda cfg, **_: fake)
 
     config = tmp_config.model_copy(
         update={

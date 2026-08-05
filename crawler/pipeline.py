@@ -115,6 +115,10 @@ class CrawlPipeline:
         self.config = config or get_config()
         self._fetcher = fetcher
         self._owns_fetcher = fetcher is None
+        # 每一種引擎各一個，重複使用。以前只有一個共用的，因為引擎是全域設定；
+        # 現在來源可以自己指定「這個網站要用瀏覽器」，一次執行就可能同時用到
+        # 兩種。仍然是每種一個而不是每個來源一個——開瀏覽器很貴。
+        self._fetchers: dict[str, BaseFetcher] = {}
 
     @staticmethod
     def _fields_for(source_config: SourceConfig) -> set[str] | None:
@@ -194,6 +198,9 @@ class CrawlPipeline:
         if self._owns_fetcher and self._fetcher is not None:
             self._fetcher.close()
             self._fetcher = None
+        for fetcher in self._fetchers.values():
+            fetcher.close()
+        self._fetchers.clear()
 
     def __enter__(self) -> "CrawlPipeline":
         return self
@@ -204,12 +211,20 @@ class CrawlPipeline:
     # -------------------------------------------------------------- internal
 
     def _get_fetcher(self, source: BaseSource) -> BaseFetcher | None:
-        """Lazily build the shared fetcher; offline sources need none."""
+        """Lazily build a fetcher for this source; offline sources need none."""
         if not source.requires_network():
             return None
-        if self._fetcher is None:
-            self._fetcher = build_fetcher(self.config)
-        return self._fetcher
+        # 外面塞進來的優先。測試與命令列會這樣做，那時候「用哪一種引擎」已經
+        # 由呼叫端決定了，這裡不該再自己造一個。
+        if self._fetcher is not None:
+            return self._fetcher
+
+        engine = source.source_config.engine or self.config.crawler.engine
+        fetcher = self._fetchers.get(engine)
+        if fetcher is None:
+            fetcher = build_fetcher(self.config, engine=engine)
+            self._fetchers[engine] = fetcher
+        return fetcher
 
     def _run(
         self,

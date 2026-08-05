@@ -119,6 +119,14 @@ class DiscoveryResult:
     #: 這一頁連出去的檔案，格式 → 幾個。介面靠它決定哪些格式勾得動——
     #: 一個頁面上根本沒有 PDF，卻讓使用者勾「讀 PDF」，勾了也不會發生任何事。
     document_links: dict[str, int] = field(default_factory=dict)
+    #: 偵測到的查詢表單（要先選一個條件才有資料的那種）。
+    #: ``{"input_selector", "submit_selector", "option_count", "sample"}``。
+    #: 選項數的意義跟「總共幾頁」一樣：使用者要知道總共得跑幾趟。
+    query_form: dict[str, object] | None = None
+    #: 這一頁要用哪一種方式取才看得到資料。``"playwright"`` 代表原始 HTML 裡
+    #: 沒有名單、是開了瀏覽器跑完 JavaScript 才出現的，這個來源之後也必須這樣
+    #: 爬。None 代表用一般的方式就看得到。
+    engine: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -154,17 +162,37 @@ class DiscoveryResult:
             detail_link=detail_link,
             label=name,
             encoding=self.encoding,
+            engine=self.engine,
         )
 
 
 # --------------------------------------------------------------- selectors
 
 
-def _signature(node: Tag) -> str:
-    """Structural fingerprint of an element: tag plus its class list."""
+#: 一列一列輪流換色用的 class。它們**不代表結構不同**，一列有一列沒有純粹是
+#: 為了斑馬紋。
+#:
+#: 為什麼要特別處理：一張 20 列的表格會被切成「10 個 tr.odd」與「10 個
+#: tr.even」兩組，每一組的分數都只有原本的一半——結果是同一頁上 8 個項目的
+#: 導覽選單反而贏過真正的 20 筆廠商資料。這是實際踩到的：一個查詢型名錄查出
+#: 20 家公司，偵測回報「找到 8 筆」，內容是「加入會員、找商機、認識公會」。
+_ALTERNATING_CLASS = frozenset({
+    "odd", "even", "alt", "altrow", "alternate", "stripe", "striped",
+    "row-odd", "row-even", "first", "last", "active",
+})
+
+
+def _structural_classes(node: Tag) -> list[str]:
+    """這個元素的 class，去掉「一列一個」那種輪替用的。"""
     classes = node.get("class") or []
     if isinstance(classes, str):
         classes = classes.split()
+    return [c for c in classes if c.lower() not in _ALTERNATING_CLASS]
+
+
+def _signature(node: Tag) -> str:
+    """Structural fingerprint of an element: tag plus its class list."""
+    classes = _structural_classes(node)
     return f"{node.name}.{'.'.join(sorted(classes))}" if classes else node.name
 
 
@@ -185,9 +213,8 @@ _UTILITY_CLASS = re.compile(
 
 def _css_for(node: Tag) -> str:
     """Shortest stable CSS selector for an element (tag or tag.class)."""
-    classes = node.get("class") or []
-    if isinstance(classes, str):
-        classes = classes.split()
+    # 輪替用的 class 也不能寫進選擇器：``tr.odd`` 只會抓到一半的資料列。
+    classes = _structural_classes(node)
     # Skip utility classes that carry no meaning and change between builds.
     meaningful = [
         c for c in classes
@@ -198,6 +225,17 @@ def _css_for(node: Tag) -> str:
 
 def _text(node: Tag) -> str:
     return node.get_text(" ", strip=True)
+
+
+#: 這些標籤永遠不是「一筆資料」。
+#:
+#: ``option`` 是踩到才知道的：一個有 98 個商品分類的查詢選單，重複度完美、
+#: 每一項的長度也很平均，分數輕鬆壓過同一頁上真正的 20 列廠商資料。結果是
+#: 分析結束後告訴使用者「找到 98 筆」，而那 98 筆是下拉選單的選項。
+_NEVER_A_RECORD = frozenset({
+    "option", "optgroup", "script", "style", "template", "noscript",
+    "meta", "link", "br", "hr", "source", "track", "param",
+})
 
 
 def find_list_selector(soup: BeautifulSoup) -> tuple[str, list[Tag], list[str]]:
@@ -213,6 +251,8 @@ def find_list_selector(soup: BeautifulSoup) -> tuple[str, list[Tag], list[str]]:
     for node in soup.find_all(True):
         parent = node.parent
         if parent is None or not isinstance(parent, Tag):
+            continue
+        if node.name in _NEVER_A_RECORD:
             continue
         groups[(id(parent), _signature(node))].append(node)
 
@@ -241,6 +281,15 @@ def find_list_selector(soup: BeautifulSoup) -> tuple[str, list[Tag], list[str]]:
         if average < 12 or spread > 8:
             continue
 
+        # 內容才是唯一分得出「廠商名錄」與「同樣整齊的導覽選單」的訊號。
+        #
+        # 沒有這一項的時候，一個 8 項的下拉式導覽選單（每一項底下還有子連結）
+        # 分數會跟同一頁上真正的 20 列廠商資料打平——結構上它們一樣整齊，靠
+        # 重複度、連結數、有沒有 class 都分不出來。實際踩到的結果是分析回報
+        # 「找到 8 筆」，內容是「加入會員、找商機、認識公會」。
+        company_like = sum(1 for text in texts if _has_company_marker(text))
+        company_ratio = company_like / len(items)
+
         score = (
             len(items) * 1.0
             + emails * 4.0
@@ -248,6 +297,7 @@ def find_list_selector(soup: BeautifulSoup) -> tuple[str, list[Tag], list[str]]:
             + headings * 2.5
             + min(links, len(items) * 3) * 0.5
             + (10.0 if "." in signature else 0.0)   # a class-based block is a real component
+            + company_ratio * 30.0
         )
         if score > best_score:
             best_score, best_items = score, items
@@ -993,6 +1043,211 @@ _MIN_PAGE_LINKS = 2
 _PAGE_PARAM_HINTS = ("page", "p", "pg", "pageno", "page_no", "pageindex", "start", "offset")
 
 
+#: 送出查詢的按鈕上會寫的字。
+_SUBMIT_TEXT = (
+    "查詢", "搜尋", "查　詢", "送出", "確定", "開始查詢",
+    "search", "query", "qry", "submit", "find",
+)
+
+#: 彈出視窗裡的按鈕不是查詢鈕。「確定」「關閉」那幾顆長得跟查詢鈕一模一樣，
+#: 但按下去只會關掉一個對話框。
+_MODAL_CLASSES = ("modal", "dialog", "popup", "lightbox")
+
+#: 一個下拉選單至少要有這麼多個選項，才像是「查詢條件」而不是「每頁幾筆」。
+MIN_QUERY_OPTIONS = 4
+
+
+def find_query_form(soup: BeautifulSoup) -> dict[str, object] | None:
+    """偵測「要先選一個條件才會有資料」的查詢表單。
+
+    回傳 ``{"input_selector", "submit_selector", "option_count", "sample"}``，
+    沒有就是 ``None``。
+
+    這跟偵測頁數是同一件事的兩種長相：一個名錄有 24 頁，跟一個名錄有 98 個
+    分類要各查一次，對使用者來說都是「總共要跑幾趟」。不偵測、不顯示的話，
+    使用者存下來的來源就只會有第一個分類的資料，而畫面上寫著「完成」。
+    """
+    best = _best_select_form(soup)
+    text_form = _best_text_form(soup)
+
+    if best is None:
+        return text_form
+    if text_form:
+        # 兩種都有的時候（查詢頁常常做成好幾個分頁籤）主推選單——選項是現成的，
+        # 使用者不必自己想關鍵字。但文字查詢的位置也一起交出去，因為有些網站
+        # 選單那條路要再點好幾層才看得到廠商，關鍵字反而一步到位。
+        best["text_input_selector"] = text_form["input_selector"]
+        best["text_submit_selector"] = text_form["submit_selector"]
+    return best
+
+
+def _best_text_form(soup: BeautifulSoup) -> dict[str, object] | None:
+    """打關鍵字查詢的那一種查詢框。"""
+    for node in soup.find_all("input"):
+        node_type = (node.get("type") or "text").lower()
+        if node_type not in ("text", "search"):
+            continue
+        submit = _find_submit_near(node)
+        if submit is None:
+            continue
+        return {
+            "input_selector": _anchor_css(node) or _css_for(node),
+            "submit_selector": _submit_css(soup, submit),
+            "option_count": 0,
+            "sample": [],
+        }
+    return None
+
+
+def _best_select_form(soup: BeautifulSoup) -> dict[str, object] | None:
+    best: dict[str, object] | None = None
+    for select in soup.find_all("select"):
+        values = [
+            (option.get("value") or "").strip()
+            for option in select.find_all("option")
+        ]
+        real = [value for value in values if value]
+        if len(real) < MIN_QUERY_OPTIONS:
+            continue
+
+        submit = _find_submit_near(select)
+        if submit is None:
+            continue
+
+        candidate = {
+            "input_selector": _anchor_css(select) or _css_for(select),
+            "submit_selector": _submit_css(soup, submit),
+            "option_count": len(real),
+            "sample": [
+                option.get_text(" ", strip=True)
+                for option in select.find_all("option")
+                if (option.get("value") or "").strip()
+            ][:3],
+        }
+        # 選項最多的那一個最可能是主要的查詢條件；「每頁顯示 10／25／50 筆」
+        # 這種選單永遠只有三四個選項，自然排在後面。
+        if best is None or candidate["option_count"] > best["option_count"]:
+            best = candidate
+    return best
+
+
+def _submit_css(soup: BeautifulSoup, submit: Tag) -> str:
+    """查詢按鈕的 CSS 選擇器，而且要**只指到這一顆**。
+
+    有分頁籤的查詢頁（公司名稱／商品類別／商品名稱各一個）會有好幾顆長得一模
+    一樣的查詢鈕。挑到錯的那一顆，按下去什麼都不會發生——而且完全不會報錯，
+    只會看到「查了 97 次，一筆都沒有」。所以這裡把選擇器綁在「跟這個輸入欄位
+    同一區」的容器底下。
+    """
+    node_id = submit.get("id")
+    if isinstance(node_id, str) and node_id.strip():
+        return f"#{node_id.strip()}"
+
+    own = _distinctive_css(submit)
+    if len(soup.select(own)) == 1:
+        return own
+
+    # 往外一層一層加上容器，直到整頁只剩這一顆比得上。
+    #
+    # 「有 class 就算指得出來」是不夠的：四個分頁籤各有一個 div.input-group，
+    # 用它當範圍照樣是四顆。唯一的判準只有「整頁比對到幾個」。
+    fallback = own
+    parent = submit.parent
+    while isinstance(parent, Tag):
+        scope = _anchor_css(parent)
+        if scope:
+            candidate = f"{scope} {own}"
+            matched = soup.select(candidate)
+            if len(matched) == 1:
+                return candidate
+            if len(matched) < len(soup.select(fallback)):
+                fallback = candidate
+        parent = parent.parent
+    return fallback
+
+
+def _distinctive_css(node: Tag) -> str:
+    """節點的 ``tag.class``，class 挑最有辨識度的那一個。
+
+    ``_css_for`` 拿的是第一個 class，Bootstrap 的按鈕第一個永遠是 ``btn``
+    ——那會選中整頁所有的按鈕。真正認得出這顆按鈕的是 ``btnqry`` 那一種。
+    """
+    classes = node.get("class") or []
+    if isinstance(classes, str):
+        classes = classes.split()
+    usable = [
+        c for c in classes
+        if len(c) > 1 and not c.isdigit() and not _UTILITY_CLASS.fullmatch(c)
+    ]
+    if not usable:
+        return node.name
+
+    for name in usable:
+        if any(word in name.lower() for word in _SUBMIT_TEXT):
+            return f"{node.name}.{name}"
+    # 沒有一個帶關鍵字的話，最長的那一個通常最具體（btn-info 勝過 btn）。
+    return f"{node.name}.{max(usable, key=len)}"
+
+
+def _inside_a_modal(node: Tag) -> bool:
+    """這個元素是不是在一個彈出視窗裡。"""
+    current: Tag | None = node
+    for _ in range(8):
+        if current is None:
+            return False
+        names = " ".join(
+            [" ".join(current.get("class") or []), str(current.get("id") or "")]
+        ).lower()
+        if any(word in names for word in _MODAL_CLASSES):
+            return True
+        current = current.parent if isinstance(current.parent, Tag) else None
+    return False
+
+
+def _find_submit_near(select: Tag) -> Tag | None:
+    """找出跟這個選單成對的「查詢」按鈕。
+
+    先在同一個表單裡找，找不到再往上找兩層容器——很多頁面根本沒有 ``<form>``，
+    整組查詢條件只是擺在同一個 ``<div>`` 裡。
+    """
+    # 由近而遠。整頁包一個 <form> 是 ASP.NET 的常態，那個範圍等於「整個網站」
+    # ——先看它的話，找到的會是頁尾某個彈出視窗裡的「確定」，不是旁邊那顆查詢鈕。
+    scopes: list[Tag] = []
+    parent = select.parent
+    for _ in range(4):
+        if parent is None:
+            break
+        scopes.append(parent)
+        parent = parent.parent
+    form = select.find_parent("form")
+    if form is not None and form not in scopes:
+        scopes.append(form)
+
+    for scope in scopes:
+        for node in scope.find_all(["button", "input", "a"]):
+            if node is select or _inside_a_modal(node):
+                continue
+            node_type = (node.get("type") or "").lower()
+            if node.name == "input" and node_type not in ("submit", "button", "image"):
+                continue
+            haystack = " ".join(
+                [
+                    node.get_text(" ", strip=True),
+                    str(node.get("value") or ""),
+                    str(node.get("title") or ""),
+                    str(node.get("aria-label") or ""),
+                    " ".join(node.get("class") or []),
+                    str(node.get("id") or ""),
+                ]
+            ).lower()
+            if any(word in haystack for word in _SUBMIT_TEXT):
+                return node
+            # 只有一個放大鏡圖示、完全沒有文字的按鈕也很常見。
+            if node.name == "button" and node.find("i") is not None:
+                return node
+    return None
+
+
 def find_query_pagination(soup: BeautifulSoup, url: str) -> tuple[str, int] | None:
     """從「1 2 3 4 5」這種數字分頁推出帶 ``{page}`` 的網址樣板。
 
@@ -1067,9 +1322,20 @@ def discover_from_html(html: str, url: str) -> DiscoveryResult:
     soup = make_soup(html)
     result = DiscoveryResult(url=url)
 
+    # 查詢表單要在「有沒有清單」之前先看。這一類頁面本來就什麼都沒有——正是
+    # 因為還沒選條件——如果先因為「找不到清單」就回去，使用者只會看到
+    # 「這一頁沒有資料」，而看不到「它有 98 個分類可以查」。
+    result.query_form = find_query_form(soup)
+
     list_selector, items, notes = find_list_selector(soup)
     result.notes.extend(notes)
     if not items:
+        if result.query_form:
+            count = result.query_form["option_count"]
+            result.notes.append(
+                f"這一頁要先選一個條件才會有資料。偵測到一個有 {count} 個選項的"
+                "下拉選單，勾「逐項查詢」就會一個一個查過去。"
+            )
         return result
 
     result.list_selector = list_selector
@@ -1104,6 +1370,13 @@ def discover_from_html(html: str, url: str) -> DiscoveryResult:
     if "company_name" not in result.fields:
         result.notes.append(
             "找不到公司名稱欄位，請自行填入 CSS 選擇器（例如 h3.name）後再開始爬取。"
+        )
+
+    if result.query_form:
+        count = result.query_form["option_count"]
+        result.notes.append(
+            f"這一頁上有一個 {count} 個選項的查詢選單。勾「逐項查詢」可以把每一個"
+            "條件各查一次，抓到的會比現在這一頁多。"
         )
 
     result.detail_link_selector = find_detail_link_selector(items, page_host)
@@ -1285,8 +1558,174 @@ def discover(
             f"這個網站用的是 {declared.upper()} 編碼（不是現在通用的 UTF-8），"
             "已自動處理，中文不會變成亂碼。"
         )
+
+    # 原始 HTML 裡沒有名單時，開一次真的瀏覽器再看一遍。
+    #
+    # 現在的名錄有一大半是「網頁先送空殼，再用 JavaScript 把資料填上去」。
+    # 後端是 PHP、ASP.NET 還是回 JSON 的介面都沒有差別——差別只在於「原始
+    # HTML 裡有沒有那些字」。與其每遇到一種新寫法就補一種對應，不如在這裡
+    # 退一步：看不到就讓瀏覽器跑完再看。這一步是自動的，使用者不必知道
+    # 「這個網站是 JavaScript 做的」，也不必去改任何設定。
+    # 判斷「要不要重試」用的是 ``ok``（有清單而且抓得到公司名稱），不是「有沒有
+    # 抓到東西」。JavaScript 頁面的空殼裡通常還是有幾個排版用的 div，偵測會挑一
+    # 個出來當清單——筆數不是 0，但一個公司名稱都沒有。用筆數判斷的話，這種頁面
+    # 永遠不會走到重試，而那正是最需要重試的一種。
+    #
+    # ``owned`` 才重試：呼叫端自己塞 fetcher 進來（測試、站內探索）時，它要的
+    # 就是那一個，不該被我們偷換成瀏覽器。
+    if not result.ok and owned:
+        retried = _retry_in_a_browser(url, config, result)
+        if retried is not None:
+            return retried
+
     log.info(
         "discovery: list={!r} items={} fields={}",
         result.list_selector, result.item_count, sorted(result.fields),
+    )
+    return result
+
+
+#: 試查關鍵字查詢框時用的字。挑的是台灣公司行號名稱裡最普遍的幾個詞，
+#: 目的只有一個：讓「一筆資料長什麼樣」現出原形。只會用到其中第一個查得
+#: 出東西的，最多送出這麼多次查詢。
+#: 只留兩個。每多一個就是多一次頁面載入加一次禮貌延遲，而分析是使用者盯著
+#: 進度條在等的——第三個字幾乎不會比前兩個多查到什麼。
+#
+# 不要用「有限公司」這種太廣的字。有些網站對過於廣泛的查詢會直接回「請輸入更
+# 完整的查詢條件」——那不是我們該去繞的東西，換一個具體一點的字就好。
+_PROBE_WORDS = ("貿易", "企業")
+
+
+#: 抓到的名稱裡至少要有這麼多比例真的像公司名，才算是一份名錄。
+_MIN_COMPANY_RATIO = 0.4
+
+
+def _looks_like_a_directory(result: DiscoveryResult) -> bool:
+    """抓到的東西真的像一份廠商名錄嗎。
+
+    ``ok`` 只問「有沒有清單、有沒有公司名稱欄位」，那在查詢型頁面上會被頁首
+    的導覽選單騙過去——「加入會員」「找商機」「認識公會」重複度完美、長度平均，
+    偵測會挑中它們，然後回報「找到 8 筆」。真正分得出來的只有內容本身。
+    """
+    if not result.ok:
+        return False
+    names = [
+        (record.company_name or "").strip()
+        for record in result.preview
+        if (record.company_name or "").strip()
+    ]
+    if not names:
+        return False
+    marked = sum(1 for name in names if _has_company_marker(name))
+    return marked / len(names) >= _MIN_COMPANY_RATIO
+
+
+def _analyse_after_one_query(
+    browser: BaseFetcher, url: str, before: DiscoveryResult
+) -> DiscoveryResult:
+    """送出一次查詢，改用結果那一頁來分析。查不出東西就維持原樣。"""
+    form = before.query_form or {}
+    probe = getattr(browser, "fetch_with_first_query", None)
+    if probe is None:
+        return before
+
+    attempts: list[tuple[str, str, str | None, str]] = []
+    if form.get("input_selector"):
+        attempts.append((
+            str(form["input_selector"]),
+            str(form.get("submit_selector") or ""),
+            None,
+            f"已經自動試查了一次（{form.get('option_count')} 個條件之一）",
+        ))
+    # 選單那條路查出來未必是廠商——有些網站要再點一層（先給你商品分類，
+    # 點下去才是廠商）。同一頁上的關鍵字查詢框常常一步到位，所以也試一次。
+    if form.get("text_input_selector"):
+        for word in _PROBE_WORDS:
+            attempts.append((
+                str(form["text_input_selector"]),
+                str(form.get("text_submit_selector") or ""),
+                word,
+                f"已經自動用「{word}」試查了一次",
+            ))
+
+    for input_selector, submit_selector, value, note in attempts:
+        try:
+            page = probe(url, input_selector, submit_selector, value=value)
+        except Exception as exc:              # noqa: BLE001
+            log.info("試查失敗（{}）：{}", value or "選單第一項", exc)
+            continue
+
+        after = discover_from_html(page.html, page.url)
+        # 一樣要看內容像不像廠商名錄。選單那條路常常查出來是「商品分類」而不是
+        # 廠商，而頁首的導覽選單在任何一頁上都在——只問 ``ok`` 的話，第一次試查
+        # 就會帶著一份「加入會員、找商機、認識公會」收工。
+        if not _looks_like_a_directory(after):
+            continue
+
+        # 查詢表單本身要留著——結果頁上的那個選單可能已經被換過內容了，而使用者
+        # 要看到的是「總共有幾個條件可以查」。
+        after.query_form = before.query_form
+        after.notes.append(
+            f"這一頁要先查詢才有資料，{note}，下面的欄位是從查詢結果推出來的。"
+        )
+        if value is not None:
+            after.notes.append(
+                "這個網站是打關鍵字查詢的，勾「逐項查詢」之後要自己填要查哪些字"
+                "（一個字查一次）。"
+            )
+        return after
+
+    return before
+
+
+def _retry_in_a_browser(
+    url: str, config: AppConfig, before: DiscoveryResult
+) -> DiscoveryResult | None:
+    """用瀏覽器重新分析一次；沒有比較好就回傳 None。
+
+    「比較好」有兩種：抓到了原本沒有的清單，或是看到了原本看不到的查詢選單
+    （選單的選項本身也常常是 JavaScript 填上去的）。瀏覽器版比較慢也比較容易
+    出錯，拿它換一個同樣的結果沒有意義。
+    """
+    if config.crawler.engine == "playwright":
+        return None                       # 剛剛那一次就已經是瀏覽器了
+
+    try:
+        browser = build_fetcher(config, engine="playwright")
+    except Exception as exc:              # noqa: BLE001 - 沒裝瀏覽器是正常情況
+        log.info("no browser engine available for the retry: {}", exc)
+        return None
+
+    try:
+        page = browser.fetch(url)
+        result = discover_from_html(page.html, page.url)
+
+        # 查詢型頁面：還沒查詢之前一筆資料都沒有，只看那一頁是猜不出「一筆
+        # 資料長什麼樣」的——偵測只好把 <option> 之類的東西當成清單。先送出
+        # 一次查詢再分析結果，跟人打開網頁隨便選一個分類按下去是一樣的動作。
+        if result.query_form and not _looks_like_a_directory(result):
+            result = _analyse_after_one_query(browser, url, result)
+    except Exception as exc:              # noqa: BLE001
+        log.warning("browser retry failed: {}", exc)
+        return None
+    finally:
+        browser.close()
+
+    better_list = result.ok
+    before_options = int((before.query_form or {}).get("option_count", 0) or 0)
+    after_options = int((result.query_form or {}).get("option_count", 0) or 0)
+    better_form = after_options > before_options
+    if not (better_list or better_form):
+        return None
+
+    result.engine = "playwright"
+    result.notes.append(
+        "這一頁的內容是網頁開起來之後才由程式填上去的，直接讀原始碼看不到。"
+        "已經改用內建瀏覽器重新分析，這個來源之後也會自動用同一種方式爬取"
+        "（比較慢，但抓得到）。"
+    )
+    log.info(
+        "browser retry: {} items, {} query options on {}",
+        result.item_count, after_options, url,
     )
     return result

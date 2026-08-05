@@ -310,3 +310,64 @@ def test_no_text_in_the_whole_window_is_cut_off(qt_app, point_size, monkeypatch)
         qt_app.setFont(original_font)
         theme._measure(original_font)
         qt_app.processEvents()
+
+
+@pytest.mark.parametrize("point_size", [10, 13, 16])
+def test_no_text_in_the_wizard_dialogs_is_cut_off(qt_app, point_size, monkeypatch):
+    """精靈與「找名錄」是獨立的對話框，不在主視窗底下，上面那支掃不到。
+
+    新的控制項（逐項查詢、全選、全部取消）都住在這兩個視窗裡。
+    """
+    from gui_qt.explore_dialog import ExploreResultsDialog
+    from gui_qt.source_wizard import SourceWizardDialog
+
+    class _Candidate:
+        url = "https://example.org.tw/members"
+        item_count = 20
+        page_count = 3
+        sample_names = ["甲有限公司", "乙股份有限公司"]
+        company_name_ratio = 0.9
+        kind = ""
+
+    class _ExploreResult:
+        start_url = "https://example.org.tw/"
+        candidates = [_Candidate(), _Candidate()]
+        pages_fetched = 12
+        notes = ["已達 30 頁的讀取上限就停下來了。"]
+
+    class _Controller:
+        def crawl_delay(self) -> float:
+            return 1.0
+
+        def custom_sources(self) -> list:
+            return []
+
+    original_font = qt_app.font()
+    font = QFont(theme.ui_family())
+    font.setPointSize(point_size)
+    qt_app.setFont(font)
+    theme._measure(font)
+
+    dialogs = []
+    try:
+        explore = ExploreResultsDialog(None, _ExploreResult())
+        explore.resize(940, 640)
+        explore.show()
+        dialogs.append(explore)
+
+        wizard = SourceWizardDialog(None, controller=_Controller())
+        wizard.resize(980, 900)
+        wizard.show()
+        wizard.advanced_section.set_expanded(True)
+        dialogs.append(wizard)
+        qt_app.processEvents()
+
+        offenders = _widgets_whose_text_does_not_fit(qt_app)
+        assert not offenders, "這些元件的文字會被截斷：\n" + "\n".join(offenders)
+    finally:
+        for dialog in dialogs:
+            dialog.close()
+            dialog.deleteLater()
+        qt_app.setFont(original_font)
+        theme._measure(original_font)
+        qt_app.processEvents()

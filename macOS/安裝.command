@@ -11,12 +11,12 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
+. "$here/macOS/_共用.sh"
 
 say() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 fail() {
     printf "\n\033[31m[錯誤] %s\033[0m\n\n" "$1"
-    printf "按 Enter 關閉這個視窗。"
-    read -r _
+    wait_then_close
     exit 1
 }
 
@@ -24,10 +24,10 @@ printf "\n名單匠 Roster — 安裝程式\n"
 printf "安裝位置：%s\n" "$here"
 
 # ---------------------------------------------------------------- Python
-say "1/4  檢查 Python"
+say "1/5  檢查 Python"
 
 python_bin=""
-for candidate in python3.13 python3.12 python3; do
+for candidate in python3.14 python3.13 python3.12 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
         version="$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "0.0")"
         major="${version%%.*}"
@@ -51,7 +51,7 @@ fi
 printf "   使用 %s（%s）\n" "$python_bin" "$("$python_bin" --version)"
 
 # ------------------------------------------------------------------ venv
-say "2/4  建立虛擬環境"
+say "2/5  建立虛擬環境"
 if [ -x "$here/.venv/bin/python" ]; then
     printf "   .venv 已存在，跳過\n"
 else
@@ -60,14 +60,28 @@ else
 fi
 
 # ------------------------------------------------------------------ 套件
-say "3/4  安裝套件（第一次會下載約 150 MB，需要幾分鐘）"
+say "3/5  安裝套件（第一次會下載約 150 MB，需要幾分鐘）"
 "$here/.venv/bin/python" -m pip install --upgrade pip --quiet
 if ! "$here/.venv/bin/python" -m pip install -r requirements.txt; then
     fail "套件安裝失敗。上面的訊息會說明原因，最常見的是網路連線問題。"
 fi
 
+# ------------------------------------------------------------------ 瀏覽器
+#
+# 有一類名錄是網頁載進來之後才用 JavaScript 把資料填上去的，那種站非用真的
+# 瀏覽器不可。Chromium 不是 pip 套件，放不進 requirements.txt，要另外下載。
+#
+# 這一步失敗不是致命的：一般的網站沒有它照樣爬得到。
+say "4/5  下載內建瀏覽器（約 120 MB）"
+printf "   只有「資料是 JavaScript 產生」的網站才需要它。\n"
+if ! "$here/.venv/bin/python" -m playwright install chromium; then
+    printf "\n   [提醒] 瀏覽器沒有下載成功。其餘功能都正常，遇到需要它的網站\n"
+    printf "   程式會告訴你。之後想補裝：\n"
+    printf "   .venv/bin/python -m playwright install chromium\n"
+fi
+
 # -------------------------------------------------------------- 啟動方式
-say "4/4  建立啟動方式"
+say "5/5  建立啟動方式"
 chmod +x "$here/macOS/啟動.command" "$here/macOS/命令列.command" \
          "$here/macOS/建立App.command" 2>/dev/null || true
 
@@ -117,5 +131,4 @@ if [ "$app_made" -eq 1 ] && [ -d "$here/Roster.app" ]; then
     esac
 fi
 
-printf "\n按 Enter 關閉這個視窗。"
-read -r _
+wait_then_close

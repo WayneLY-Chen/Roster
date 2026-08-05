@@ -14,11 +14,11 @@ set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+. "$root/macOS/_共用.sh"
 
 if [ ! -x "$root/.venv/bin/python" ]; then
     echo "[錯誤] 還沒安裝。請先雙擊同一個資料夾裡的「安裝.command」。"
-    printf "按 Enter 關閉這個視窗。"
-    read -r _
+    wait_then_close
     exit 1
 fi
 
@@ -41,4 +41,6 @@ cat <<'HELP'
 
 HELP
 
-exec "${SHELL:-/bin/bash}"
+# 不用 exec：離開這個殼層之後要把終端機視窗一起收掉，exec 之後就沒有人做這件事。
+"${SHELL:-/bin/bash}" || true
+close_this_window

@@ -311,3 +311,85 @@ def test_discover_to_source_config_produces_a_valid_source(fixture_html):
     assert "company_name" in source.fields
     assert source.pagination.type == "next_link"
     assert source.pagination.next_selector == result.next_selector
+
+
+# ------------------------------------------- JavaScript 產生的頁面自動重試
+
+
+def test_a_javascript_page_is_re_analysed_in_a_browser(tmp_config, monkeypatch):
+    """後端是 PHP、ASP.NET 還是回 JSON 的介面都沒有差別——差別只在於「原始
+    HTML 裡有沒有那些字」。看不到就讓瀏覽器跑完再看，使用者不必知道也不必
+    去改任何設定。"""
+    import crawler.discover as discover_module
+    from crawler.fetcher import FetchResult
+
+    empty = "<html><body><div class='a'>x</div><div class='a'>y</div>" \
+            "<div class='a'>z</div></body></html>"
+    rendered = """<html><body><div class="list">
+      <div class="item"><h3 class="n">甲有限公司</h3><span>02-1234-5678</span></div>
+      <div class="item"><h3 class="n">乙股份有限公司</h3><span>02-2234-5678</span></div>
+      <div class="item"><h3 class="n">丙實業有限公司</h3><span>02-3234-5678</span></div>
+      <div class="item"><h3 class="n">丁企業有限公司</h3><span>02-4234-5678</span></div>
+    </div></body></html>"""
+
+    class _Fetcher:
+        def __init__(self, html):
+            self.html = html
+
+        def fetch(self, url, **_kwargs):
+            return FetchResult(url=url, status_code=200, html=self.html)
+
+        def close(self):
+            pass
+
+    def fake_build(config=None, robots=None, engine=None):
+        return _Fetcher(rendered if engine == "playwright" else empty)
+
+    monkeypatch.setattr(discover_module, "build_fetcher", fake_build)
+
+    result = discover_module.discover("https://a.test/list", tmp_config)
+
+    assert result.engine == "playwright"
+    assert result.item_count == 4
+    assert "company_name" in result.fields
+    assert any("瀏覽器" in note for note in result.notes)
+
+
+def test_a_plain_page_is_not_re_analysed_in_a_browser(tmp_config, monkeypatch):
+    """瀏覽器版慢得多，拿它換一個同樣的結果沒有意義。"""
+    import crawler.discover as discover_module
+    from crawler.fetcher import FetchResult
+
+    html = """<html><body><div class="list">
+      <div class="item"><h3 class="n">甲有限公司</h3><span>02-1234-5678</span></div>
+      <div class="item"><h3 class="n">乙股份有限公司</h3><span>02-2234-5678</span></div>
+      <div class="item"><h3 class="n">丙實業有限公司</h3><span>02-3234-5678</span></div>
+      <div class="item"><h3 class="n">丁企業有限公司</h3><span>02-4234-5678</span></div>
+    </div></body></html>"""
+    engines: list[str | None] = []
+
+    class _Fetcher:
+        def fetch(self, url, **_kwargs):
+            return FetchResult(url=url, status_code=200, html=html)
+
+        def close(self):
+            pass
+
+    def fake_build(config=None, robots=None, engine=None):
+        engines.append(engine)
+        return _Fetcher()
+
+    monkeypatch.setattr(discover_module, "build_fetcher", fake_build)
+
+    result = discover_module.discover("https://a.test/list", tmp_config)
+
+    assert result.engine is None
+    assert "playwright" not in [e for e in engines if e]
+
+
+def test_the_source_remembers_it_needs_a_browser(fixture_html):
+    """存下去也要記住，否則第一次爬取又會是空的。"""
+    result = discover_from_html(fixture_html, FIXTURE_URL)
+    result.engine = "playwright"
+
+    assert result.to_source_config("js_site").engine == "playwright"

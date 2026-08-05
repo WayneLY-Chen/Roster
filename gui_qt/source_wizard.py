@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
@@ -199,6 +200,11 @@ class SourceWizardDialog(QDialog):
 
         self.analyse_task: BackgroundTask | None = None
         self.explore_task: BackgroundTask | None = None
+        self.batch_task: BackgroundTask | None = None
+        #: 分析時判定「這個網站要開瀏覽器才看得到資料」的話會填進來。
+        self._detected_engine: str | None = None
+        #: 分析時偵測到的查詢選單（要先選條件才有資料的那種）。
+        self._query_form: dict = {}
         self.preview_task: BackgroundTask | None = None
         self.crawl_task: BackgroundTask | None = None
 
@@ -417,6 +423,123 @@ class SourceWizardDialog(QDialog):
         self.click_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         body_layout.addWidget(self.click_note)
 
+        self._build_query_loop_controls(body_layout)
+
+    def _build_query_loop_controls(self, body_layout: QVBoxLayout) -> None:
+        """要先選一個條件才有資料的名錄：逐項查詢。
+
+        跟頁數上限是同一種東西——「總共要跑幾趟」——所以放在一起，欄位也用
+        同樣的樣子：偵測到幾個會講出來，實際要查幾個由使用者決定。
+        """
+        self.query_loop_check = QCheckBox("這一頁要先查詢才有資料，幫我一項一項查")
+        self.query_loop_check.setChecked(False)
+        self.query_loop_check.setEnabled(False)
+        self.query_loop_check.toggled.connect(self._sync_query_loop_enabled)
+        body_layout.addWidget(self.query_loop_check)
+
+        # 說明放在勾選框正下方，欄位放在說明下面。反過來的話，使用者先看到的
+        # 是一個看不懂的欄位，解釋它的那段字還在更下面。
+        self.query_loop_note = QLabel(
+            "有一類名錄不給完整清單，只給一個查詢框：選一個分類、或打一個關鍵字，"
+            "按下查詢才會出現廠商。分析時偵測到這種查詢框，這一項才會啟用。"
+        )
+        self.query_loop_note.setWordWrap(True)
+        self.query_loop_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
+        body_layout.addWidget(self.query_loop_note)
+
+        # 預設 3 跟頁數上限一樣：先少量試跑，確定抓對了再放大。97 個條件一次
+        # 跑下去，錯了就是白等半小時，而且是對別人的網站送出幾百次請求。
+        self.query_count_entry = LabeledEntry("查詢幾個選單內的資料", "3")
+        body_layout.addWidget(self.query_count_entry)
+
+        # 有些網站的選單要再點好幾層才看得到廠商，打關鍵字反而一步到位。
+        # 填了這一格就改走關鍵字，上面的「先查前幾個」就不算數了。
+        self.query_values_entry = LabeledEntry(
+            "如果是打關鍵字查詢的，填要查哪些字（用、分隔）", "",
+            "例如：貿易、科技、實業",
+        )
+        body_layout.addWidget(self.query_values_entry)
+
+        # 沒勾之前整組藏起來。停用的欄位還是看得到，使用者會停下來問「這是什麼、
+        # 給誰看的」——那正是它不該在那裡的證據。
+        self._query_inputs = (self.query_count_entry, self.query_values_entry)
+        self._sync_query_loop_enabled(False)
+
+    def _sync_query_loop_enabled(self, checked: bool) -> None:
+        for widget in self._query_inputs:
+            widget.setVisible(bool(checked) and self.query_loop_check.isEnabled())
+
+    def _apply_query_form(self, form: dict | None) -> None:
+        """依照分析結果決定「逐項查詢」勾不勾得動，並講出偵測到幾個條件。"""
+        self._query_form = dict(form or {})
+        available = bool(self._query_form)
+        self.query_loop_check.setEnabled(available)
+        if not available:
+            self.query_loop_check.setChecked(False)
+            self._sync_query_loop_enabled(False)
+            self.query_loop_note.setText(
+                "這一頁沒有「要先選條件或打關鍵字才有資料」的查詢框。"
+            )
+            return
+
+        count = int(self._query_form.get("option_count", 0) or 0)
+        sample = "、".join(str(s) for s in (self._query_form.get("sample") or [])[:3])
+        if count:
+            text = (
+                f"這一頁有一個 {count} 個選項的查詢選單"
+                + (f"（例如：{sample}）" if sample else "")
+                + f"。勾起來就會一個選項查一次，總共可以查 {count} 個。"
+            )
+            if self._query_form.get("text_input_selector"):
+                text += "這一頁也可以打關鍵字查，勾起來之後填字就改走那一條。"
+        else:
+            text = "這一頁是打關鍵字查詢的。勾起來之後填要查哪些字，一個字查一次。"
+        self.query_loop_note.setText(text)
+
+    def _selected_query_loop(self) -> dict | None:
+        """使用者勾了「逐項查詢」時，要存進來源的設定。"""
+        if not (self.query_loop_check.isChecked() and self._query_form):
+            return None
+
+        values = [
+            part.strip()
+            for part in re.split(r"[、,，;；\s]+", self.query_values_entry.get())
+            if part.strip()
+        ]
+
+        if values:
+            # 自己指定了要查的字，就用打字的那一個查詢框（如果有的話）。
+            # 把關鍵字塞進下拉選單是沒有意義的——選單只吃它自己的選項。
+            input_selector = str(
+                self._query_form.get("text_input_selector")
+                or self._query_form.get("input_selector")
+                or ""
+            )
+            submit_selector = str(
+                self._query_form.get("text_submit_selector")
+                or self._query_form.get("submit_selector")
+                or ""
+            )
+            return {
+                "input_selector": input_selector,
+                "submit_selector": submit_selector,
+                "values": values,
+                "max_queries": len(values),
+            }
+
+        try:
+            max_queries = int(self.query_count_entry.get().strip() or "3")
+        except ValueError:
+            max_queries = 3
+        detected = int(self._query_form.get("option_count", 0) or 0)
+        if not detected:
+            return None            # 關鍵字查詢框但沒填字，沒有東西可以查
+        return {
+            "input_selector": str(self._query_form.get("input_selector") or ""),
+            "submit_selector": str(self._query_form.get("submit_selector") or ""),
+            "max_queries": max(1, min(max_queries, detected)),
+        }
+
     def _apply_document_links(self, found: dict) -> None:
         """依照分析結果決定哪些格式勾得動，並把找到的數量講出來。
 
@@ -619,9 +742,14 @@ class SourceWizardDialog(QDialog):
             QMessageBox.critical(self, "自訂網址精靈", "請先貼上要分析的網址。")
             return
 
+        self._set_url_locked(True)
         self.analyse_button.setEnabled(False)
         self.analyse_progress.show()
-        self.summary_label.setText("分析中，請稍候...此步驟會實際連線到目標網站。")
+        self.summary_label.setText(
+            "分析中，請稍候…此步驟會實際連線到目標網站。\n"
+            "如果這個網站的資料是網頁開起來之後才產生的，程式會自動再開一次"
+            "內建瀏覽器重看，那時候會多花半分鐘左右。"
+        )
         self.notes_label.setText("")
 
         self.analyse_task = BackgroundTask(
@@ -663,6 +791,7 @@ class SourceWizardDialog(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        self._set_url_locked(True)
         self.explore_button.setEnabled(False)
         self.analyse_button.setEnabled(False)
         self.analyse_progress.setRange(0, budget)
@@ -693,6 +822,7 @@ class SourceWizardDialog(QDialog):
     def _stop_explore_progress(self) -> None:
         self.analyse_progress.hide()
         self.analyse_progress.setRange(0, 0)   # 還原成分析用的不定進度
+        self._set_url_locked(False)
         self.explore_button.setEnabled(True)
         self.analyse_button.setEnabled(True)
 
@@ -708,23 +838,114 @@ class SourceWizardDialog(QDialog):
         from gui_qt.explore_dialog import ExploreResultsDialog
 
         dialog = ExploreResultsDialog(self, result)
-        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.chosen_url:
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.chosen_urls:
             self.summary_label.setText(
                 f"找到 {len(result.candidates)} 個名錄頁，尚未選擇。"
             )
             return
 
-        # 挑好之後直接走原本的分析流程——後面的每一步都不必知道網址是怎麼來的。
-        self.url_entry.setText(dialog.chosen_url)
+        if len(dialog.chosen_urls) > 1:
+            self._start_batch_add(dialog.chosen_urls)
+            return
+
+        # 只挑一個時走原本的分析流程——後面的每一步都不必知道網址是怎麼來的。
+        self.url_entry.setText(dialog.chosen_urls[0])
         self._start_analyse()
+
+    # ------------------------------------------------------ 一次加入好幾個
+
+    def _start_batch_add(self, urls: list[str]) -> None:
+        """把勾起來的名錄頁一次全部加成來源。
+
+        一個一個手動微調是對的做法，但十份名錄要重跑十遍精靈就不是了。
+        這裡用偵測出來的設定直接存，之後仍然可以在來源清單裡個別修改。
+        """
+        seconds = int(len(urls) * (self.controller.crawl_delay() + 1.0))
+        reply = QMessageBox.question(
+            self,
+            "一次加入這幾個名錄",
+            f"程式會分析這 {len(urls)} 個頁面，並用偵測到的設定各存成一個來源。\n\n"
+            f"預估需要 {seconds // 60} 分 {seconds % 60} 秒。\n\n"
+            "抓不到公司名稱的會跳過，不會存進來。要開始嗎？",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.summary_label.setText(f"找到 {len(urls)} 個名錄頁，尚未加入。")
+            return
+
+        self._set_url_locked(True)
+        self.explore_button.setEnabled(False)
+        self.analyse_button.setEnabled(False)
+        self.analyse_progress.setRange(0, len(urls))
+        self.analyse_progress.setValue(0)
+        self.analyse_progress.show()
+        self.summary_label.setText("正在逐一分析並加入…")
+        self.notes_label.setText("")
+
+        self.batch_task = BackgroundTask(
+            self,
+            worker=self.controller.add_many,
+            on_done=self._on_batch_done,
+            on_error=self._on_batch_error,
+            on_progress=self._on_batch_progress,
+        )
+        self.batch_task.start(urls)
+
+    def _on_batch_progress(self, payload: Any) -> None:
+        if not isinstance(payload, dict) or payload.get("stage") != "adding":
+            return
+        done = int(payload.get("done", 0))
+        total = int(payload.get("total", 0))
+        self.analyse_progress.setValue(done)
+        self.summary_label.setText(f"正在逐一分析並加入…{done}／{total}")
+
+    def _on_batch_done(self, outcome: Any) -> None:
+        self.batch_task = None
+        self._stop_explore_progress()
+
+        added = list(outcome.get("added", []))
+        skipped = list(outcome.get("skipped", []))
+
+        for name in added:
+            if self.on_saved:
+                self.on_saved(name)
+
+        lines = [f"已加入 {len(added)} 個來源。"]
+        if added:
+            lines.append("　" + "、".join(added))
+        if skipped:
+            lines.append(f"跳過 {len(skipped)} 個：")
+            lines.extend(f"　{url} －{reason}" for url, reason in skipped)
+
+        QMessageBox.information(self, "一次加入這幾個名錄", "\n".join(lines))
+        if added:
+            self.accept()
+        else:
+            self.summary_label.setText("沒有任何一個頁面加得進來。")
+            self.notes_label.setText("\n".join(lines[1:]))
+
+    def _on_batch_error(self, exc: Exception) -> None:
+        self.batch_task = None
+        self._stop_explore_progress()
+        self.summary_label.setText("加入失敗。")
+        QMessageBox.critical(self, "一次加入這幾個名錄", _friendly_error(exc))
 
     def _on_explore_error(self, exc: Exception) -> None:
         self.explore_task = None
         self._stop_explore_progress()
         self._on_analyse_error(exc)
 
+    def _set_url_locked(self, locked: bool) -> None:
+        """分析或站內尋找進行中時，網址不給改。
+
+        改了也不會影響正在跑的那一次，但畫面上顯示的是新網址、結果卻是舊網址
+        的——那種「看起來對、其實不是」比直接不給改難查得多。
+        """
+        self.url_entry.setReadOnly(locked)
+        self.url_entry.setEnabled(not locked)
+
     def _stop_analyse_progress(self) -> None:
         self.analyse_progress.hide()
+        self._set_url_locked(False)
         self.analyse_button.setEnabled(True)
         self.explore_button.setEnabled(True)
 
@@ -738,6 +959,10 @@ class SourceWizardDialog(QDialog):
         # 「不點就看不到」的按鈕：偵測到才讓使用者勾得動，沒偵測到就維持停用
         # ——給一個按了不會有任何作用的勾選框，比不給更糟。
         self._apply_document_links(dict(getattr(result, "document_links", {}) or {}))
+        # 分析時發現「要開瀏覽器才看得到」的話，這個來源存下去也要記住這件事，
+        # 否則存完第一次爬取又會是空的。
+        self._detected_engine = getattr(result, "engine", None)
+        self._apply_query_form(getattr(result, "query_form", None))
         self._suggested_actions = list(getattr(result, "suggested_actions", []))
         self.click_check.setEnabled(bool(self._suggested_actions))
         if not self._suggested_actions:
@@ -1053,6 +1278,8 @@ class SourceWizardDialog(QDialog):
                 page_actions=self._selected_page_actions(),
                 page_start=page_start,
                 page_end=page_end,
+                engine=self._detected_engine,
+                query_loop=self._selected_query_loop(),
             )
             saved_name = self.controller.save(source, name, enabled=True)
         except CRMError as exc:

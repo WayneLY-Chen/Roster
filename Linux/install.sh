@@ -18,7 +18,7 @@ printf "\nRoster setup\n"
 printf "Install location: %s\n" "$root"
 
 # ---------------------------------------------------------------- Python
-say "1/3  Checking Python"
+say "1/4  Checking Python"
 
 python_bin=""
 for candidate in python3.13 python3.12 python3; do
@@ -41,7 +41,7 @@ Then run this script again."
 printf "   Using %s (%s)\n" "$python_bin" "$("$python_bin" --version)"
 
 # ------------------------------------------------------------------ venv
-say "2/3  Creating the virtual environment"
+say "2/4  Creating the virtual environment"
 if [ -x "$root/.venv/bin/python" ]; then
     printf "   .venv already exists, skipping\n"
 else
@@ -55,10 +55,24 @@ On Debian/Ubuntu this usually means the venv module is missing:
 fi
 
 # -------------------------------------------------------------- packages
-say "3/3  Installing packages (about 150 MB on the first run)"
+say "3/4  Installing packages (about 150 MB on the first run)"
 "$root/.venv/bin/python" -m pip install --upgrade pip --quiet
 "$root/.venv/bin/python" -m pip install -r requirements.txt \
     || fail "Package installation failed. The messages above explain why."
+
+# ------------------------------------------------------------------ 瀏覽器
+# Some directories only build their listing after the page has loaded; those
+# need a real browser. Chromium is not a pip package, so it cannot live in
+# requirements.txt -- it has to be downloaded separately.
+#
+# A failure here is not fatal: every ordinary site still works without it.
+say "4/4  Downloading the built-in browser (about 120 MB)"
+printf "   Needed only for sites that build their listing with JavaScript.\n"
+if ! "$root/.venv/bin/python" -m playwright install chromium; then
+    printf "\n   [Note] The browser could not be downloaded. Everything else works;\n"
+    printf "   sites that need it will say so when you try them.\n"
+    printf "   To retry later: .venv/bin/python -m playwright install chromium\n"
+fi
 
 chmod +x "$root/Linux/start.sh" "$root/Linux/console.sh" 2>/dev/null || true
 

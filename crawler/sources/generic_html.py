@@ -76,12 +76,13 @@ class GenericHtmlSource(BaseSource):
             )
         # 設了頁面動作卻用 httpx，動作會被安靜地忽略——使用者只會看到「怎麼
         # 還是抓不到電話」。這種安靜失敗一定要講出來。
-        if self.source_config.page_actions and self.config.crawler.engine != "playwright":
+        engine = self.source_config.engine or self.config.crawler.engine
+        if self.source_config.page_actions and engine != "playwright":
             log.warning(
-                "{}: 這個來源設定了頁面動作（點按、捲動），但目前的爬取引擎是 "
-                "{}，動作不會被執行。要讓它生效，請把設定裡的爬取引擎改成 "
+                "{}: 這個來源設定了頁面動作（點按、捲動），但取頁面的方式是 "
+                "{}，動作不會被執行。要讓它生效，這個來源的引擎要設成 "
                 "playwright。",
-                self.name, self.config.crawler.engine,
+                self.name, engine,
             )
 
         self._details_fetched = 0
@@ -92,6 +93,10 @@ class GenericHtmlSource(BaseSource):
     def iter_pages(self) -> Iterator[PageBatch]:
         if self.fetcher is None:
             raise SourceConfigError(f"source {self.name!r} was given no fetcher")
+
+        if self.source_config.query_loop is not None:
+            yield from self._iter_query_loop_pages()
+            return
 
         strategy = self.source_config.pagination.type
         first_page = self.source_config.page_start
@@ -121,6 +126,7 @@ class GenericHtmlSource(BaseSource):
                 data=form_data,
                 encoding=self.source_config.encoding,
                 actions=self.source_config.page_actions,
+                **self._modal_kwargs(),
             )
             fetched += 1
             soup = make_soup(result.html)
@@ -130,8 +136,7 @@ class GenericHtmlSource(BaseSource):
             )
             if in_range:
                 items = select_items(soup, self.source_config.list_selector or "")
-                records = [self._to_record(item, result.url) for item in items]
-                records = [r for r in records if r is not None]
+                records = self._records_for(items, result)
                 records.extend(self._records_from_documents(soup, result.url))
                 log.info("{}: page {} -> {} records", self.name, page_number, len(records))
                 yield PageBatch(page_number=page_number, url=result.url, records=records)
@@ -156,6 +161,69 @@ class GenericHtmlSource(BaseSource):
             else:  # query
                 url = self._page_url(page_number + 1)
             page_number += 1
+
+    def _iter_query_loop_pages(self) -> Iterator[PageBatch]:
+        """逐項查詢：同一個查詢表單，換一組條件就查一次，每一次算一「頁」。
+
+        這一類名錄不給完整清單，只給一個查詢框。每一組條件的結果就是它能給的
+        全部——把條件逐一查過去，才是它的「翻頁」。
+        """
+        loop = self.source_config.query_loop
+        assert loop is not None
+        fetcher = self.fetcher
+        assert fetcher is not None
+
+        iterate = getattr(fetcher, "iter_query_pages", None)
+        if iterate is None:
+            raise SourceConfigError(
+                f"來源 {self.name!r} 設了逐項查詢，但取頁面的方式不會操作網頁。"
+                "這個來源的引擎要設成 playwright。"
+            )
+
+        for page_number, result in enumerate(
+            iterate(
+                self.source_config.start_url or "",
+                loop,
+                actions=self.source_config.page_actions,
+                **self._modal_kwargs(),
+            ),
+            start=1,
+        ):
+            soup = make_soup(result.html)
+            items = select_items(soup, self.source_config.list_selector or "")
+            records = self._records_for(items, result)
+            log.info(
+                "{}: 第 {} 組查詢條件 -> {} 筆", self.name, page_number, len(records)
+            )
+            yield PageBatch(page_number=page_number, url=result.url, records=records)
+            if page_number >= self.page_limit:
+                return
+
+    def _modal_kwargs(self) -> dict:
+        """設了「點開小視窗」才多傳這兩個參數。
+
+        沒設就一個字都不多傳——取頁面的東西五花八門（測試裡的假物件、
+        以後可能有的其他引擎），不該為了一個少見的設定要求全部都跟著改。
+        """
+        modal = self.source_config.detail_modal
+        if modal is None:
+            return {}
+        return {"modal": modal, "list_selector": self.source_config.list_selector}
+
+    def _records_for(self, items, result) -> list[RawCompany]:
+        """把這一頁的每一列變成一筆資料，需要的話配上它自己的小視窗內容。
+
+        ``details`` 是照列的順序來的，所以用位置對回去；長度不足時補空字串，
+        絕不讓某一筆去撿到別人家的電話。
+        """
+        details = list(getattr(result, "details", []) or [])
+        records = []
+        for index, item in enumerate(items):
+            modal_html = details[index] if index < len(details) else ""
+            record = self._to_record(item, result.url, modal_html)
+            if record is not None:
+                records.append(record)
+        return records
 
     def _page_url(self, page_number: int) -> str:
         template = self.source_config.start_url or ""
@@ -300,7 +368,34 @@ class GenericHtmlSource(BaseSource):
         for label, value in parsed.extra.items():
             extra_fields.setdefault(label, value)
 
-    def _to_record(self, item, page_url: str) -> RawCompany | None:
+    def _merge_modal(self, record_values: dict, html: str, extra_fields: dict) -> None:
+        """把點開的小視窗裡的內容補進這一筆。
+
+        列表頁的值優先——它已經在幾十筆上驗證過，小視窗只有一個樣本。
+        彈出視窗幾乎都是「負責人：…／連絡電話：…」這種排版，所以主力是
+        標籤解析，跟明細頁走的是同一條路。
+        """
+        soup = make_soup(html)
+        rules = self.source_config.detail_fields
+        if rules:
+            for key, value in extract_record(soup, rules, "").items():
+                if value and not record_values.get(key):
+                    record_values[key] = value
+
+        self._harvest_labels(soup, record_values, extra_fields)
+
+        if not record_values.get("email"):
+            emails = harvest_emails(soup)
+            if emails:
+                record_values["email"] = emails[0]
+        if not record_values.get("phone"):
+            phones = harvest_phones(soup)
+            if phones:
+                record_values["phone"] = phones[0]
+
+    def _to_record(
+        self, item, page_url: str, modal_html: str = ""
+    ) -> RawCompany | None:
         """Turn one list item into a record, or ``None`` when it has no name."""
         extracted = extract_record(item, self.source_config.fields, page_url)
 
@@ -312,6 +407,8 @@ class GenericHtmlSource(BaseSource):
         detail_url = self._detail_url(item, page_url)
         if detail_url:
             self._merge_detail(extracted, detail_url, extra_fields)
+        if modal_html:
+            self._merge_modal(extracted, modal_html, extra_fields)
 
         self._harvest_labels(item, extracted, extra_fields)
 

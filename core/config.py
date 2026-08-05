@@ -217,6 +217,69 @@ class PageAction(_Base):
         return self
 
 
+class QueryLoop(_Base):
+    """同一個查詢表單，換一組條件就查一次。
+
+    有一整類名錄不給你「全部列出來」，只給一個查詢框：選一個分類、或打一個
+    關鍵字，按下查詢才會出現結果。那種頁面沒有第 2 頁可以翻，也沒有任何連結
+    指向完整清單——把每一組條件各查一次，就是它唯一的「分頁」方式。
+
+    要用瀏覽器（``engine: playwright``）：填欄位、按按鈕這些事，只有真的把網頁
+    跑起來才做得到。
+    """
+
+    #: 要填的輸入框，或要選的下拉選單。
+    input_selector: str
+    #: 按下去送出查詢的按鈕。
+    submit_selector: str
+    #: 要逐一查的值。留空而且 ``input_selector`` 指到 ``<select>`` 時，
+    #: 自動用選單裡的每一個選項。
+    values: list[str] = Field(default_factory=list)
+    #: 每一次查詢之後等多久（毫秒）讓結果出現。
+    wait_ms: int = Field(default=1200, ge=0, le=30_000)
+    #: 最多查幾次。避免一個有兩千個選項的選單把一整天用掉，也是對別人網站的
+    #: 基本禮貌。
+    max_queries: int = Field(default=200, ge=1, le=2000)
+
+    @model_validator(mode="after")
+    def _selectors_are_not_blank(self) -> "QueryLoop":
+        if not self.input_selector.strip():
+            raise ValueError("query_loop 需要 input_selector")
+        if not self.submit_selector.strip():
+            raise ValueError("query_loop 需要 submit_selector")
+        return self
+
+
+class DetailModal(_Base):
+    """詳細資料是「點一下跳出來的小視窗」時，怎麼把它打開、讀完、關掉。
+
+    ``detail_link`` 處理的是「每一筆連到自己的明細頁」；這個處理的是另一半：
+    明細根本沒有網址，是點下去在同一頁彈出來的。清單上通常只有公司名稱、
+    負責人、地址，電話與信箱全在那個小視窗裡——不打開就是抓不到。
+
+    要用瀏覽器（``engine: playwright``）。
+    """
+
+    #: 每一列裡要點的元素（相對於那一列，例如 ``a``）。
+    click_selector: str
+    #: 跳出來的小視窗容器（例如 ``#detlModal``）。內容從這裡讀。
+    panel_selector: str
+    #: 關掉它的按鈕。留空就按 Esc——多數彈出視窗都吃這一招。
+    close_selector: str | None = None
+    #: 點開之後等多久（毫秒）讓內容出現。
+    wait_ms: int = Field(default=700, ge=0, le=30_000)
+    #: 一頁最多點開幾筆。每一筆都是一次往返，這是禮貌也是時間的上限。
+    max_rows: int = Field(default=200, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def _selectors_are_not_blank(self) -> "DetailModal":
+        if not self.click_selector.strip():
+            raise ValueError("detail_modal 需要 click_selector")
+        if not self.panel_selector.strip():
+            raise ValueError("detail_modal 需要 panel_selector")
+        return self
+
+
 class FieldRule(_Base):
     """How to pull one field out of a list item's markup."""
 
@@ -243,6 +306,20 @@ class SourceConfig(_Base):
     type: Literal["sample", "generic_html"]
     enabled: bool = True
     start_url: str | None = None
+
+    #: 這個來源要用哪一種方式取頁面。留空＝跟著 ``crawler.engine`` 的全域設定。
+    #:
+    #: 為什麼要能單獨指定：現在越來越多名錄是網頁載進來之後才用 JavaScript
+    #: 把資料填上去的（PHP、ASP.NET、JSON 介面……後端是什麼都一樣）。那種站
+    #: 非用瀏覽器不可。但把全域設定改成 playwright，等於連那些單純的靜態名錄
+    #: 也要開一次瀏覽器，慢好幾倍。這是**每一個網站各自的性質**，本來就該記在
+    #: 來源上，而不是要使用者為了一個網站去改一個影響全部的開關。
+    engine: Literal["httpx", "playwright"] | None = None
+
+    #: 這個名錄只有查詢框、沒有完整清單時，要逐一查哪些條件。
+    query_loop: "QueryLoop | None" = None
+    #: 詳細資料是「點一下跳出小視窗」而不是「連到另一個網址」時用這個。
+    detail_modal: "DetailModal | None" = None
     #: 起始頁碼（含）。query 分頁時會代入 {page}；next_link 分頁時代表
     #: 要先略過幾頁才開始收錄。
     page_start: int = Field(default=1, ge=0)

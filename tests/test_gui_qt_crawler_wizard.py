@@ -147,6 +147,8 @@ class _FakeSourceController:
         page_actions=None,
         page_start=1,
         page_end=None,
+        engine=None,
+        query_loop=None,
     ):
         built = {
             "url": url,
@@ -391,3 +393,17 @@ def test_save_without_a_url_shows_error(qt_app, _no_blocking_dialogs):
     dialog = SourceWizardDialog(None, _FakeSourceController())
     dialog._save(also_crawl=False)
     assert _no_blocking_dialogs["critical"]
+
+
+def test_the_url_cannot_be_edited_while_analysing(qt_app):
+    """改了也不會影響正在跑的那一次，但畫面上顯示的是新網址、結果卻是舊網址
+    的——那種「看起來對、其實不是」比直接不給改難查得多。"""
+    controller = _FakeSourceController(_FakeDiscoveryResult())
+    dialog = SourceWizardDialog(None, controller)
+    dialog.url_entry.setText("https://example.test/list")
+
+    dialog._start_analyse()
+    assert not dialog.url_entry.isEnabled()
+
+    _wait_for_task(qt_app, dialog.analyse_task)
+    assert dialog.url_entry.isEnabled()

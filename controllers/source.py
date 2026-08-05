@@ -98,6 +98,76 @@ class SourceWizardController:
         report({"stage": "done"})
         return result
 
+    # ------------------------------------------------------- 一次加入好幾個
+
+    def suggest_name(self, url: str, taken: set[str] | None = None) -> str:
+        """由網址想一個來源名稱，並且不跟既有的撞名。
+
+        同一個網站的五份名錄如果都叫 ``example.org.tw``，後面存的會把前面
+        存的蓋掉——使用者只會看到「加了五個，結果只有一個」。
+        """
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+        host = parts.netloc.lower().removeprefix("www.") or "custom_source"
+        # 路徑最後一段通常就是這份名錄自己的名字（member、supplier、qry…）。
+        segments = [s for s in parts.path.split("/") if s and "." not in s[:1]]
+        tail = segments[-1] if segments else ""
+        tail = tail.rsplit(".", 1)[0]
+        base = f"{host}-{tail}" if tail else host
+
+        taken = set(taken or ())
+        if base not in taken:
+            return base
+        for suffix in range(2, 1000):
+            candidate = f"{base}-{suffix}"
+            if candidate not in taken:
+                return candidate
+        return base
+
+    def add_many(
+        self,
+        urls: list[str],
+        *,
+        report: Callable[[Any], None],
+        cancel_event,
+    ) -> dict[str, Any]:
+        """分析每一個網址並存成來源。Suitable as a task worker。
+
+        一個失敗不會拖垮其他的——名錄頁彼此無關，其中一頁改版了不該讓另外
+        四頁也加不進來。跳過的原因會一起回報，使用者才知道要不要自己處理。
+        """
+        from crawler.discover import discover
+
+        added: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        taken = {str(source.get("name") or "") for source in self.custom_sources()}
+        total = len(urls)
+
+        for index, url in enumerate(urls):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            report({"stage": "adding", "done": index, "total": total, "url": url})
+            try:
+                result = discover(url)
+            except Exception as exc:            # noqa: BLE001 - 逐一回報，不中斷
+                skipped.append((url, str(exc)))
+                continue
+
+            if "company_name" not in result.fields:
+                skipped.append((url, "這一頁抓不到公司名稱"))
+                continue
+
+            name = self.suggest_name(url, taken)
+            taken.add(name)
+            try:
+                added.append(self.save(result, name))
+            except Exception as exc:            # noqa: BLE001
+                skipped.append((url, str(exc)))
+
+        report({"stage": "adding", "done": total, "total": total, "url": ""})
+        return {"added": added, "skipped": skipped}
+
     def build_source(
         self,
         url: str,
@@ -114,6 +184,8 @@ class SourceWizardController:
         page_actions: list[dict] | None = None,
         page_start: int = 1,
         page_end: int | None = None,
+        engine: str | None = None,
+        query_loop: dict | None = None,
     ) -> SourceConfig:
         """Turn user-edited selectors into a validated :class:`SourceConfig`.
 
@@ -121,7 +193,7 @@ class SourceWizardController:
         before this can be saved -- an empty name, no list selector, no
         company-name rule, or a selector pydantic itself rejects.
         """
-        from core.config import FieldRule, PageAction, PaginationRule
+        from core.config import FieldRule, PageAction, PaginationRule, QueryLoop
 
         clean_name = name.strip()
         if not clean_name:
@@ -154,6 +226,10 @@ class SourceWizardController:
             else PaginationRule(type="none")
         )
 
+        # 逐項查詢一定要用瀏覽器：填欄位、按按鈕這些事 httpx 做不到。使用者勾了
+        # 卻沒生效的話，他看到的只會是「怎麼還是只有一頁」，而且沒有任何線索。
+        chosen_engine = engine or ("playwright" if query_loop else None)
+
         # Detail-page following has to survive an edit. Directories that list
         # only names keep the e-mail one click away, so dropping this silently
         # when the user tweaks a selector would quietly halve what a crawl finds.
@@ -182,6 +258,8 @@ class SourceWizardController:
                 page_actions=[PageAction(**a) for a in (page_actions or [])],
                 page_start=page_start,
                 page_end=page_end,
+                engine=chosen_engine,
+                query_loop=QueryLoop(**query_loop) if query_loop else None,
             )
         except ValidationError as exc:
             raise SourceConfigError(f"來源設定無效：{exc}") from exc

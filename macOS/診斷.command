@@ -9,6 +9,7 @@ set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+. "$root/macOS/_共用.sh"
 
 line() { printf "\n\033[1m--- %s ---\033[0m\n" "$1"; }
 
@@ -66,5 +67,5 @@ else
 fi
 
 printf "\n\033[1m以上整段複製給我。\033[0m\n"
-printf "\n按 Enter 關閉這個視窗。"
-read -r _
+# 這一句刻意寫「複製完再按」：按下去視窗就關了，內容也就沒了。
+wait_then_close "複製完之後，按 Enter 關閉這個視窗。"

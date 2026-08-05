@@ -175,6 +175,11 @@ class LogsPage(BasePage):
         cursor.movePosition(cursor.MoveOperation.End)
         self.log_box.setTextCursor(cursor)
 
+        # 捲到最後一行是對的（新的在下面），但游標同時也被帶到那一行的**行尾**，
+        # 於是橫向捲軸跟著跑到中間——畫面一打開，每一行的開頭都在左邊界外，看到
+        # 的是半截字。時間與分類在行首，那才是要先看到的東西。
+        self.log_box.horizontalScrollBar().setValue(0)
+
     def _handle_refresh_error(self, exc: Exception) -> None:
         self.report_error(exc)
 

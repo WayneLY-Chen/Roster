@@ -14,8 +14,9 @@ from __future__ import annotations
 import random
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlencode
 
@@ -142,6 +143,106 @@ def _run_one_action(page: Any, action: Any) -> None:
     log.warning("不認得的頁面動作：{}", action.type)
 
 
+# ---------------------------------------------------------------- 逐項查詢
+
+
+def _is_a_select(page: Any, selector: str) -> bool:
+    try:
+        tag = page.eval_on_selector(selector, "el => el.tagName.toLowerCase()")
+    except Exception:                       # noqa: BLE001 - 找不到元素
+        return False
+    return str(tag).lower() == "select"
+
+
+def _option_values(page: Any, selector: str) -> list[str]:
+    """下拉選單裡每一個真正可以查的選項值。
+
+    第一個通常是「--請選擇--」，值是空的；那不是一個查詢條件，是提示文字。
+    """
+    if not _is_a_select(page, selector):
+        return []
+    try:
+        values = page.eval_on_selector_all(
+            f"{selector} option", "els => els.map(e => e.value)"
+        )
+    except Exception as exc:                # noqa: BLE001
+        log.warning("讀不到 {} 的選項：{}", selector, exc)
+        return []
+    return [str(v) for v in (values or []) if str(v).strip()]
+
+
+def _close_modal(page: Any, modal: Any) -> None:
+    close_selector = (getattr(modal, "close_selector", None) or "").strip()
+    if close_selector:
+        button = page.query_selector(close_selector)
+        if button is not None:
+            button.click()
+            page.wait_for_timeout(200)
+            return
+    # 沒指定關閉鈕就按 Esc。多數彈出視窗都吃這一招，而且不會誤按到別的東西。
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(200)
+
+
+def _collect_modal_details(page: Any, modal: Any, list_selector: str) -> list[str]:
+    """把每一列點開，讀出小視窗裡的內容。
+
+    回傳的順序與清單上的每一列**一一對應**，點不開的那一筆留一個空字串。
+    這件事非做不可：資料是靠位置對回去的，失敗時如果直接跳過不放，後面每一
+    筆的聯絡資訊都會錯位到別人家去——而且看起來完全正常。
+    """
+    rows = page.query_selector_all(list_selector)[: modal.max_rows]
+    details: list[str] = []
+    for index, row in enumerate(rows):
+        try:
+            target = row.query_selector(modal.click_selector)
+            if target is None:
+                details.append("")
+                continue
+            target.click()
+            page.wait_for_timeout(modal.wait_ms)
+            panel = page.query_selector(modal.panel_selector)
+            details.append(panel.inner_html() if panel is not None else "")
+            _close_modal(page, modal)
+        except Exception as exc:              # noqa: BLE001 - 一筆點不開
+            log.debug("第 {} 列的詳細視窗打不開：{}", index + 1, exc)
+            details.append("")
+    return details
+
+
+def _submit_one_query(page: Any, loop: Any, value: str) -> None:
+    """填一個條件並按下查詢。"""
+    selector = loop.input_selector
+    if _is_a_select(page, selector):
+        # force=True 是必要的。很多網站把原生的 <select> 藏起來，畫面上那個好看
+        # 的下拉是自己用 div 做的——原生的那個永遠「看不見」，不加這個參數會一直
+        # 等到逾時。我們要改的本來就是原生元素的值，選好之後照樣會送出 change
+        # 事件，網站的程式收得到。
+        page.select_option(selector, value, force=True)
+    else:
+        page.fill(selector, value, force=True)
+
+    button = page.query_selector(loop.submit_selector)
+    if button is None:
+        raise CrawlError(f"找不到查詢按鈕：{loop.submit_selector}")
+    _click_even_if_hidden(button)
+    page.wait_for_timeout(loop.wait_ms)
+
+
+def _click_even_if_hidden(element: Any) -> None:
+    """按下去，元素被藏起來也要按到。
+
+    查詢頁常常做成分頁籤，沒被選到的那一頁是 ``display:none``——裡面的按鈕在
+    畫面上不存在，一般的點擊會一直等到逾時。改用送出 click 事件的方式，網站
+    自己的程式收到的東西是一樣的。
+    """
+    try:
+        element.click()
+    except Exception as exc:                  # noqa: BLE001
+        log.debug("一般點擊失敗，改用送出事件的方式：{}", exc)
+        element.dispatch_event("click")
+
+
 @dataclass(slots=True)
 class FetchResult:
     """One retrieved page."""
@@ -156,6 +257,9 @@ class FetchResult:
     #: 位元組就能直接換編碼重解一次，不必為了同一頁再送一次請求。
     #: Playwright 引擎沒有這個東西——它交出來的是瀏覽器解碼後的 DOM。
     raw: bytes = b""
+    #: 逐列點開的小視窗內容，順序與清單上的每一列一一對應。
+    #: 只有來源設了 ``detail_modal`` 時才會有東西。
+    details: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -217,6 +321,8 @@ class BaseFetcher(ABC):
         data: dict[str, str] | None = None,
         encoding: str | None = None,
         actions: Sequence[Any] = (),
+        modal: Any = None,
+        list_selector: str | None = None,
     ) -> FetchResult:
         """Fetch one URL, honouring robots.txt, the delay, and the retry budget.
 
@@ -251,6 +357,7 @@ class BaseFetcher(ABC):
         result = retryer(
             self._fetch_once, url, method=method, data=data,
             encoding=encoding, actions=actions,
+            modal=modal, list_selector=list_selector,
         )
         result.elapsed = time.monotonic() - started
         log.debug("fetched {} [{}] in {:.2f}s", url, result.status_code, result.elapsed)
@@ -265,6 +372,8 @@ class BaseFetcher(ABC):
         data: dict[str, str] | None = None,
         encoding: str | None = None,
         actions: Sequence[Any] = (),
+        modal: Any = None,
+        list_selector: str | None = None,
     ) -> FetchResult:
         """Single attempt. Raise :class:`TransientFetchError` to trigger retry."""
 
@@ -307,7 +416,15 @@ class HttpxFetcher(BaseFetcher):
         data: dict[str, str] | None = None,
         encoding: str | None = None,
         actions: Sequence[Any] = (),
+        modal: Any = None,
+        list_selector: str | None = None,
     ) -> FetchResult:
+        if modal is not None:
+            # 安靜地忽略等於使用者永遠看不到「怎麼還是沒有電話」的原因。
+            log.warning(
+                "這個來源要點開小視窗才看得到詳細資料，但取頁面的方式是 httpx，"
+                "點不了。這個來源的引擎要設成 playwright。"
+            )
         try:
             if method == "POST":
                 # 表單以 application/x-www-form-urlencoded 送出，這是傳統
@@ -410,6 +527,8 @@ class PlaywrightFetcher(BaseFetcher):
         data: dict[str, str] | None = None,
         encoding: str | None = None,
         actions: Sequence[Any] = (),
+        modal: Any = None,
+        list_selector: str | None = None,
     ) -> FetchResult:
         from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -432,11 +551,122 @@ class PlaywrightFetcher(BaseFetcher):
                 raise CrawlError(f"{url} returned {status}")
             if actions:
                 _run_page_actions(page, actions)
-            return FetchResult(url=page.url, status_code=status or 200, html=page.content())
+            details = (
+                _collect_modal_details(page, modal, list_selector or "")
+                if modal is not None and list_selector
+                else []
+            )
+            return FetchResult(
+                url=page.url,
+                status_code=status or 200,
+                html=page.content(),
+                details=details,
+            )
         except PlaywrightTimeout as exc:
             raise TransientFetchError(f"timeout loading {url}") from exc
         except PlaywrightError as exc:
             raise TransientFetchError(f"browser error loading {url}: {exc}") from exc
+        finally:
+            page.close()
+
+    # --------------------------------------------------------- 逐項查詢
+
+    def fetch_with_first_query(
+        self,
+        url: str,
+        input_selector: str,
+        submit_selector: str,
+        *,
+        value: str | None = None,
+    ) -> FetchResult:
+        """開頁面、送出**一次**查詢，回傳結果的 HTML。
+
+        分析查詢型名錄時用得到：還沒查詢的頁面上一筆資料都沒有，只看那一頁是
+        猜不出「一筆資料長什麼樣」的。送一次查詢再看，跟人打開網頁隨便選一個
+        分類按下去是完全一樣的動作。
+        """
+        if not self.robots.can_fetch(url):
+            raise RobotsDisallowedError(url, self.user_agent)
+
+        page = self._context.new_page()
+        try:
+            self.limiter.wait(minimum=self.robots.crawl_delay(url))
+            page.goto(url, wait_until=self._settings.wait_until)
+
+            chosen = value
+            if chosen is None:
+                options = _option_values(page, input_selector)
+                if not options:
+                    raise CrawlError(f"{input_selector} 沒有可以選的選項")
+                chosen = options[0]
+
+            loop = SimpleNamespace(
+                input_selector=input_selector,
+                submit_selector=submit_selector,
+                wait_ms=1500,
+            )
+            self.limiter.wait(minimum=self.robots.crawl_delay(url))
+            _submit_one_query(page, loop, chosen)
+            return FetchResult(url=page.url, status_code=200, html=page.content())
+        finally:
+            page.close()
+
+    def iter_query_pages(
+        self,
+        url: str,
+        loop: Any,
+        *,
+        actions: Sequence[Any] = (),
+        cancel_event: Any = None,
+        modal: Any = None,
+        list_selector: str | None = None,
+    ) -> Iterator[FetchResult]:
+        """開一次頁面，把每一組查詢條件各查一次，每查一次交出一份結果 HTML。
+
+        為什麼是一個產生器而不是「查完全部再回傳」：一輪就是幾百家公司，全部
+        累積在記憶體裡等到最後才處理，中途取消或出錯就整批損失。
+
+        整段只導覽一次網址——查詢是在同一個頁面裡進行的，這也是它比「一頁一次
+        請求」對別人的伺服器更客氣的地方。每一輪之間仍然照設定的間隔等待。
+        """
+        if not self.robots.can_fetch(url):
+            raise RobotsDisallowedError(url, self.user_agent)
+
+        page = self._context.new_page()
+        try:
+            self.limiter.wait(minimum=self.robots.crawl_delay(url))
+            page.goto(url, wait_until=self._settings.wait_until)
+            if actions:
+                _run_page_actions(page, actions)
+
+            values = list(loop.values) or _option_values(page, loop.input_selector)
+            if not values:
+                raise CrawlError(
+                    f"逐項查詢找不到任何可以查的值：{loop.input_selector} "
+                    "既不是下拉選單，來源也沒有指定要查哪些值。"
+                )
+
+            for value in values[: loop.max_queries]:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                self.limiter.wait(minimum=self.robots.crawl_delay(url))
+                try:
+                    _submit_one_query(page, loop, value)
+                except Exception as exc:      # noqa: BLE001 - 一個條件查壞了
+                    # 不要讓 98 個分類裡的第 7 個失敗，害其餘 91 個都收不到。
+                    log.warning("逐項查詢「{}」失敗：{}", value, exc)
+                    continue
+                details = (
+                    _collect_modal_details(page, modal, list_selector or "")
+                    if modal is not None and list_selector
+                    else []
+                )
+                yield FetchResult(
+                    url=page.url,
+                    status_code=200,
+                    html=page.content(),
+                    details=details,
+                )
         finally:
             page.close()
 
@@ -459,10 +689,18 @@ class PlaywrightFetcher(BaseFetcher):
 
 
 def build_fetcher(
-    config: AppConfig | None = None, robots: RobotsPolicy | None = None
+    config: AppConfig | None = None,
+    robots: RobotsPolicy | None = None,
+    engine: str | None = None,
 ) -> BaseFetcher:
-    """Instantiate the engine named in ``crawler.engine``."""
+    """Instantiate a fetcher.
+
+    ``engine`` 是這一個來源自己指定的引擎；留空才回頭看全域的
+    ``crawler.engine``。「這個網站要不要用瀏覽器」是網站的性質，不是使用者的
+    偏好設定——把它綁在來源上，一個需要瀏覽器的網站就不會拖慢其他所有來源。
+    """
     config = config or get_config()
-    if config.crawler.engine == "playwright":
+    chosen = engine or config.crawler.engine
+    if chosen == "playwright":
         return PlaywrightFetcher(config, robots)
     return HttpxFetcher(config, robots)
