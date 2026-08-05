@@ -341,16 +341,31 @@ class WideComboBox(QComboBox):
     兩邊都設上限，免得一個特別長的產業名把整列版面撐爆。
     """
 
-    #: 收合狀態的寬度上限。超過的選項仍會以「…」截斷，但展開後看得到全文。
-    MAX_WIDTH = 240
-    #: 彈出清單的寬度上限。
-    MAX_POPUP_WIDTH = 420
+    #: 收合狀態的寬度上限，以「0」的字寬為單位。
+    #:
+    #: 不能寫死像素。macOS 的系統介面字比 Windows 大一號，同樣的 240px 在
+    #: Windows 上綽綽有餘，到了 Mac 就會少掉最後一兩個字。
+    MAX_WIDTH_DIGITS = 24
+    #: 彈出清單的寬度上限，同樣以字寬為單位。
+    MAX_POPUP_WIDTH_DIGITS = 42
+
+    #: 下拉箭頭、外框與左右內距要預留的空間，一樣以字寬為單位。
+    #:
+    #: Qt 自己算的 sizeHint 在 macOS 上會少幾個 px——原生樣式的箭頭區比它
+    #: 預期的寬，而全形括號「（）」又比 Qt 的字寬估計值再寬一些。少個兩三 px
+    #: 的結果，就是「（全部啟用）」顯示成「（全部啟用」。
+    _CHROME_DIGITS = 5
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         # 內容變了就重新量寬度，不是只量第一次。
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.setMaximumWidth(self.MAX_WIDTH)
+
+    def _digit(self) -> int:
+        return max(QFontMetrics(self.font()).horizontalAdvance("0"), 1)
+
+    def max_width(self) -> int:
+        return self._digit() * self.MAX_WIDTH_DIGITS
 
     def _widest_item(self) -> int:
         metrics = QFontMetrics(self.font())
@@ -359,9 +374,26 @@ class WideComboBox(QComboBox):
             default=0,
         )
 
+    def _needed_width(self) -> int:
+        chrome = self._digit() * self._CHROME_DIGITS
+        return min(self._widest_item() + chrome, self.max_width())
+
+    def sizeHint(self):  # noqa: N802 - Qt 的覆寫方法命名
+        hint = super().sizeHint()
+        hint.setWidth(max(hint.width(), self._needed_width()))
+        return hint
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt 的覆寫方法命名
+        # 版面在空間不足時會縮到 minimumSizeHint。預設值只夠顯示幾個字，
+        # 於是文字被切掉——而使用者看不出自己選的是什麼。寧可讓這一列擠一點。
+        hint = super().minimumSizeHint()
+        hint.setWidth(max(hint.width(), self._needed_width()))
+        return hint
+
     def showPopup(self) -> None:  # noqa: N802 - Qt 的覆寫方法命名
         # 加上捲軸與左右內距的餘裕；不足下拉框本身寬度時就沿用下拉框的寬度。
-        needed = min(self._widest_item() + 40, self.MAX_POPUP_WIDTH)
+        limit = self._digit() * self.MAX_POPUP_WIDTH_DIGITS
+        needed = min(self._widest_item() + self._digit() * 6, limit)
         self.view().setMinimumWidth(max(needed, self.width()))
         super().showPopup()
 

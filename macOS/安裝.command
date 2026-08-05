@@ -71,13 +71,19 @@ say "4/4  建立啟動方式"
 chmod +x "$here/macOS/啟動.command" "$here/macOS/命令列.command" \
          "$here/macOS/建立App.command" 2>/dev/null || true
 
-if "$here/macOS/建立App.command" >/dev/null 2>&1; then
+# 失敗訊息一定要露出來。原本這裡是 `>/dev/null 2>&1`，結果是：Roster.app
+# 沒建成的時候，畫面只寫「建立失敗」，為什麼失敗連我們自己都看不到。
+app_log="$(mktemp)"
+if "$here/macOS/建立App.command" >"$app_log" 2>&1; then
     printf "   已建立 Roster.app\n"
     app_made=1
 else
-    printf "   Roster.app 建立失敗，用 啟動.command 也可以\n"
+    printf "\n\033[31m   Roster.app 建立失敗，原因如下：\033[0m\n"
+    sed 's/^/     /' "$app_log"
+    printf "\n   （這不影響使用，雙擊 macOS 資料夾裡的 啟動.command 一樣能開）\n"
     app_made=0
 fi
+rm -f "$app_log"
 
 # ------------------------------------------------------- 解除下載隔離標記
 #

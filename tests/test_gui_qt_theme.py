@@ -19,7 +19,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtGui import QFont  # noqa: E402
+from PySide6.QtGui import QFont, QFontMetrics  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QComboBox,
@@ -153,7 +153,34 @@ def test_dropdown_popup_is_wide_enough_to_read_the_options(qt_app, at_point_size
         qt_app.processEvents()
 
     assert popup_width > combo.width(), "彈出清單沒有比下拉框寬，選項還是會被截斷"
-    assert popup_width <= WideComboBox.MAX_POPUP_WIDTH, "不能寬到蓋掉整個畫面"
+    limit = QFontMetrics(combo.font()).horizontalAdvance("0") * (
+        WideComboBox.MAX_POPUP_WIDTH_DIGITS
+    )
+    assert popup_width <= limit, "不能寬到蓋掉整個畫面"
+
+
+def test_a_combo_never_reports_a_width_that_would_cut_its_text(qt_app, at_point_size):
+    """收合狀態要放得下最長的選項。
+
+    實測在 macOS 上「（全部啟用）」被顯示成「（全部啟用」——原生樣式的箭頭區
+    比 Qt 的 sizeHint 預期的寬，全形括號又比字寬估計值再寬一些，加起來差的那
+    幾個 px 就吃掉了最後一個字。版面把寬度壓到 minimumSizeHint 時同樣要夠。
+    """
+    from gui_qt.widgets import WideComboBox
+
+    at_point_size(13)                # macOS 的字級
+    combo = WideComboBox()
+    combo.addItems(["（全部啟用）", "台北市進出口商業同業公會"])
+    try:
+        metrics = QFontMetrics(combo.font())
+        widest = max(metrics.horizontalAdvance(combo.itemText(i)) for i in range(2))
+        for hint in (combo.sizeHint(), combo.minimumSizeHint()):
+            assert hint.width() >= min(widest, combo.max_width()), (
+                "寬度不足以顯示最長的選項，文字會被切掉"
+            )
+    finally:
+        combo.deleteLater()
+        qt_app.processEvents()
 
 
 def test_inline_caption_matches_the_control_height(qt_app, at_point_size):

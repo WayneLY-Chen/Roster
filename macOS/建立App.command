@@ -21,7 +21,11 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 # 版本號從程式本身讀，不要在這裡寫死——寫死的那一份永遠會忘記跟著改。
-version="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$here/core/constants.py" | head -1)"
+#
+# 這裡不接 `| head -1`：`set -o pipefail` 之下，head 讀完就結束會讓 sed 收到
+# SIGPIPE，整條管線的結束碼變成失敗，`set -e` 就把整個腳本中止了——而且是
+# 靜悄悄地中止。改用 sed 自己的 `q` 讀到第一筆就收工，不需要第二個行程。
+version="$(sed -n 's/^VERSION = "\(.*\)"/\1/p;/^VERSION = /q' "$here/core/constants.py")"
 version="${version:-1.0.0}"
 
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -66,6 +70,13 @@ elif [ -f "$here/assets/icon.png" ] && command -v sips >/dev/null 2>&1; then
             --out "$iconset/icon_${size}x${size}.png" >/dev/null 2>&1 || true
     done
     iconutil -c icns "$iconset" -o "$app/Contents/Resources/icon.icns" 2>/dev/null || true
+fi
+
+# 產生完要自己確認一次。少了這一關，只要中間任何一步默默失敗，使用者拿到的
+# 就是一個點不開的空殼，而畫面上卻寫著「已建立」。
+if [ ! -x "$app/Contents/MacOS/Roster" ]; then
+    echo "[錯誤] Roster.app 沒有建立成功（找不到 $app/Contents/MacOS/Roster）。"
+    exit 1
 fi
 
 echo "已建立 $app（版本 $version）"
