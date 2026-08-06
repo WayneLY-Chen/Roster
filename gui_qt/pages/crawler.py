@@ -672,6 +672,14 @@ class CustomSourcesDialog(QDialog):
         buttons = QHBoxLayout()
         buttons.addStretch(1)
 
+        # 存好的來源本來只能看跟刪。改一個選擇器、或改「要爬哪一段」，唯一的
+        # 辦法是整個刪掉重貼網址重分析一次——而分析要一兩分鐘，而且會把使用者
+        # 自己調過的每一格都覆寫回偵測結果。
+        edit_button = QPushButton("編輯選取的來源")
+        edit_button.setObjectName("PrimaryButton")
+        edit_button.clicked.connect(self._edit_selected)
+        buttons.addWidget(edit_button)
+
         delete_button = QPushButton("刪除選取的來源")
         delete_button.setStyleSheet(
             f"background-color: {theme.pick(theme.DANGER)}; color: white;"
@@ -700,9 +708,40 @@ class CustomSourcesDialog(QDialog):
             ]
         )
 
+    def _edit_selected(self) -> None:
+        """把選到的來源打開到網址精靈裡，每一格都是當初存下來的設定。
+
+        不重新分析。使用者要改的是自己的決定（選擇器指到哪、要爬哪一段），
+        那些東西設定檔裡都有——沒有理由為了看它們再去打擾別人的網站一次，
+        更沒有理由把他調過的每一格覆寫回偵測結果。
+        """
+        row = self.table.selected_row()
+        if row is None:
+            QMessageBox.information(self, "編輯自訂來源", "請先在上面選一個來源。")
+            return
+
+        entry = self.controller.load(row["name"])
+        if entry is None:
+            QMessageBox.critical(
+                self, "編輯自訂來源", f"找不到「{row['name']}」的設定，它可能剛被刪掉了。"
+            )
+            self._refresh()
+            return
+
+        dialog = SourceWizardDialog(self, self.controller, on_saved=self._on_edited)
+        dialog.load_source(entry)
+        dialog.exec()
+        self._refresh()
+
+    def _on_edited(self, name: str) -> None:
+        self._refresh()
+        if self.on_changed:
+            self.on_changed(name)
+
     def _delete_selected(self) -> None:
         row = self.table.selected_row()
         if row is None:
+            QMessageBox.information(self, "刪除自訂來源", "請先在上面選一個來源。")
             return
         name = row["name"]
         reply = QMessageBox.question(self, "刪除自訂來源", f"確定要刪除「{name}」嗎？")

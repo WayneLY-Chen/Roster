@@ -375,6 +375,21 @@ class SourceWizardController:
 
         return read_custom_sources()
 
+    def load(self, name: str) -> dict[str, Any] | None:
+        """一個已存來源的原始設定，用來回填精靈。找不到回 ``None``。
+
+        回傳的是 ``custom_sources.yaml`` 裡那一份原樣的字典，不是
+        :class:`SourceConfig`。精靈要填的是一格一格的文字，而字典本來就是
+        「有寫的才有那個鍵」——轉成物件之後每個欄位都會有預設值，就分不出
+        「使用者當初留空」跟「預設值剛好是這個」。
+        """
+        from core.config import read_custom_sources
+
+        for entry in read_custom_sources():
+            if entry.get("name") == name:
+                return dict(entry)
+        return None
+
     def delete(self, name: str) -> bool:
         from core.config import delete_custom_source
 

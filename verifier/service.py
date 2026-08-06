@@ -144,17 +144,29 @@ class CleaningService:
             email_checked_at=checked_at,
         )
 
-    def clean_many(self, records: Iterable[RawCompany]) -> tuple[list[CleanCompany], int]:
-        """Clean a batch. Returns ``(clean_records, rejected_count)``."""
+    def clean_batch(
+        self, records: Iterable[RawCompany]
+    ) -> tuple[list[CleanCompany], list[RawCompany]]:
+        """Clean a batch. Returns ``(clean_records, the ones that were dropped)``.
+
+        丟掉的**那幾筆本身**要交出去，不只是數量。使用者看到「拒絕 3」的時候，
+        下一個問題一定是「哪三筆」——那三筆的公司名稱欄長什麼樣，就是「選擇器
+        指到了什麼位置」最直接的證據。只回一個數字等於要他自己去猜。
+        """
         cleaned: list[CleanCompany] = []
-        rejected = 0
+        dropped: list[RawCompany] = []
         for record in records:
             result = self.clean(record)
             if result is None:
-                rejected += 1
+                dropped.append(record)
             else:
                 cleaned.append(result)
-        return cleaned, rejected
+        return cleaned, dropped
+
+    def clean_many(self, records: Iterable[RawCompany]) -> tuple[list[CleanCompany], int]:
+        """Clean a batch. Returns ``(clean_records, rejected_count)``."""
+        cleaned, dropped = self.clean_batch(records)
+        return cleaned, len(dropped)
 
     def verify_email(self, email: str | None) -> tuple[EmailVerdict, datetime | None]:
         """Grade an address from cheapest check to most expensive."""

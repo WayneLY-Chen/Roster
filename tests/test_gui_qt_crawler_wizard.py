@@ -407,3 +407,118 @@ def test_the_url_cannot_be_edited_while_analysing(qt_app):
 
     _wait_for_task(qt_app, dialog.analyse_task)
     assert dialog.url_entry.isEnabled()
+
+
+# --------------------------------------------------------- 編輯已存的來源
+
+#: 一份存在 custom_sources.yaml 裡的來源，形狀跟真的一樣。
+SAVED_SOURCE = {
+    "name": "某公會",
+    "type": "generic_html",
+    "start_url": "https://a.test/list",
+    "engine": "playwright",
+    "list_selector": "tr",
+    "fields": {"company_name": {"selector": "a", "attr": "text"}},
+    "pagination": {"type": "none", "next_selector": "a.next"},
+    "page_start": 2,
+    "page_end": 9,
+    "max_pages": 7,
+    "default_industry": "紡織",
+    "detail_link": {"selector": "a.more"},
+    "max_details": 50,
+    "collect_fields": ["email", "phone"],
+    "document_kinds": ["pdf"],
+    "query_loop": {
+        "input_selector": "#ddl",
+        "submit_selector": "#go",
+        "start_at": 7,
+        "max_queries": 3,
+        "drill": {"row_selector": "table tbody tr", "click_selector": "a"},
+    },
+}
+
+
+def test_editing_a_saved_source_fills_every_box_back_in(qt_app):
+    """存好的來源本來只能看跟刪。改一個選擇器的唯一辦法是整個重來，
+    而重新分析要一兩分鐘、還會把使用者調過的每一格覆寫回偵測結果。"""
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog.load_source(SAVED_SOURCE)
+
+    assert dialog.url_entry.text() == "https://a.test/list"
+    assert dialog.name_entry.get() == "某公會"
+    assert dialog.list_selector_entry.get() == "tr"
+    assert dialog.next_selector_entry.get() == "a.next"
+    assert dialog.page_start_entry.get() == "2"
+    assert dialog.page_end_entry.get() == "9"
+    assert dialog.default_industry_entry.get() == "紡織"
+    assert dialog.detail_link_entry.get() == "a.more"
+    assert dialog.field_rules["company_name"]["selector"] == "a"
+    # 引擎也要跟著回來，否則存回去之後那個要瀏覽器才爬得到的網站會改用 httpx。
+    assert dialog._detected_engine == "playwright"
+
+
+def test_editing_restores_which_fields_were_being_collected(qt_app):
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog.load_source(SAVED_SOURCE)
+
+    assert dialog.collect_checks["email"].isChecked()
+    assert dialog.collect_checks["phone"].isChecked()
+    assert not dialog.collect_checks["address"].isChecked()
+
+
+def test_an_empty_collect_list_means_everything_not_nothing(qt_app):
+    """空的 collect_fields 代表「全部收集」。當成「一個都不收」的話，編輯一次
+    就會把來源改成只存公司名稱，而且看不出是什麼時候變的。"""
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog.load_source({**SAVED_SOURCE, "collect_fields": []})
+
+    assert all(check.isChecked() for check in dialog.collect_checks.values())
+
+
+def test_editing_restores_the_query_range(qt_app):
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog.load_source(SAVED_SOURCE)
+
+    assert dialog.query_loop_check.isChecked()
+    assert dialog.query_by_number.isChecked()
+    assert dialog.query_start_entry.get() == "7"
+    assert dialog.query_count_entry.get() == "3"
+    # 中間還要再點一層的設定不能掉——掉了就會抓回一堆分類代號。
+    assert dialog._query_form["drill"]["row_selector"] == "table tbody tr"
+
+
+def test_editing_restores_a_range_given_as_text(qt_app):
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog.load_source({
+        **SAVED_SOURCE,
+        "query_loop": {
+            "input_selector": "#ddl", "submit_selector": "#go",
+            "start_value": "03 魚類", "end_value": "10", "max_queries": 8,
+        },
+    })
+
+    assert dialog.query_by_text.isChecked()
+    assert dialog.query_start_text_entry.get() == "03 魚類"
+    assert dialog.query_end_text_entry.get() == "10"
+
+
+def test_a_source_without_a_query_loop_leaves_that_section_alone(qt_app):
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog.load_source({k: v for k, v in SAVED_SOURCE.items() if k != "query_loop"})
+
+    assert not dialog.query_loop_check.isChecked()
+
+
+def test_editing_can_be_saved_without_analysing_again(qt_app):
+    """回填完就該可以直接存。要求使用者再按一次「分析網頁」等於這個功能沒做。"""
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog.load_source(SAVED_SOURCE)
+
+    assert dialog.save_button.isEnabled()

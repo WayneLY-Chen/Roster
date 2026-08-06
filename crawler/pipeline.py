@@ -421,22 +421,33 @@ class CrawlPipeline:
         unique, dropped_in_page = deduplicate_batch(records)
         summary.records_duplicate += dropped_in_page
 
-        cleaned, rejected = cleaner.clean_many(unique)
-        summary.records_invalid += rejected
+        cleaned, dropped = cleaner.clean_batch(unique)
+        summary.records_invalid += len(dropped)
 
-        if rejected and not cleaned and unique:
-            # 這一頁抓到東西、卻一筆都沒留下來，幾乎一定是「公司名稱」那一欄
-            # 抓到了別的位置——中間那層子分類的代號、表頭、導覽列。
+        if dropped:
+            # 被丟掉的**那幾筆的公司名稱欄長什麼樣**，就是「選擇器指到了什麼
+            # 位置」最直接的證據。以前這裡只把數字加一加，使用者看到的是
+            # 「拒絕 21」，完全不知道被丟掉的是什麼、為什麼。
             #
-            # 以前這裡只把數字加一加，使用者看到的是「21 rejected」，完全不知道
-            # 被丟掉的是什麼、為什麼。把實際的文字印出來，一眼就看得出抓錯位置。
-            samples = ", ".join(
-                repr((record.company_name or "").strip()[:24]) for record in unique[:3]
+            # 一筆都沒留下來跟只丟掉幾筆是兩件事：前者代表整個抓錯位置（要
+            # 重新分析），後者常常是正常的（同一頁上混著表頭、分類代號）。
+            # 所以講法不一樣，嚴重度也不一樣。
+            names = ", ".join(
+                repr((record.company_name or "").strip()[:24]) for record in dropped[:5]
             )
-            log.warning(
-                "這一頁的 {} 筆全部不是公司資料，被丟掉了。「公司名稱」抓到的是：{}",
-                len(unique), samples,
-            )
+            more = f"…等 {len(dropped)} 筆" if len(dropped) > 5 else ""
+            if not cleaned:
+                log.warning(
+                    "這一頁的 {} 筆全部不是公司資料，被丟掉了。"
+                    "「公司名稱」抓到的是：{}{}",
+                    len(dropped), names, more,
+                )
+            else:
+                log.info(
+                    "這一頁有 {} 筆不是公司資料，被丟掉了（另外 {} 筆有存進去）。"
+                    "被丟掉的「公司名稱」是：{}{}",
+                    len(dropped), len(cleaned), names, more,
+                )
 
         for record in cleaned:
             _, merged = repo.upsert(record)

@@ -219,6 +219,9 @@ class SourceWizardDialog(QDialog):
         self._detected_engine: str | None = None
         #: 分析時偵測到的查詢選單（要先選條件才有資料的那種）。
         self._query_form: dict = {}
+        #: 正在編輯的是哪一個已存來源；``None`` 代表這是新增。
+        #: 改了名字的話，儲存時要順手把舊的那一份收掉，否則會多出一個孤兒。
+        self._editing_source: str | None = None
         self.preview_task: BackgroundTask | None = None
         self.crawl_task: BackgroundTask | None = None
 
@@ -1231,6 +1234,113 @@ class SourceWizardDialog(QDialog):
 
     # --------------------------------------------------------- field table
 
+    # ------------------------------------------------------ 編輯已存的來源
+
+    def load_source(self, entry: dict[str, Any]) -> None:
+        """把一個已存來源填回每一格，讓使用者直接改。
+
+        不重新分析。分析是「去問那個網站長什麼樣」，而使用者要改的是自己當初
+        的決定（要爬哪一段、要收集哪些欄位、選擇器指到哪）——那些東西存在
+        ``custom_sources.yaml`` 裡，不必為了看它們再去打擾別人的網站一次。
+        改完想重驗的話，「分析網頁」那顆按鈕仍然在。
+        """
+        self._editing_source = str(entry.get("name") or "") or None
+        self.setWindowTitle(f"編輯來源：{self._editing_source or ''}")
+
+        url = str(entry.get("start_url") or "")
+        self.url_entry.setText(url)
+        self.last_url = url
+        self.name_entry.set(str(entry.get("name") or ""))
+        self._detected_engine = entry.get("engine") or None
+
+        self.list_selector_entry.set(str(entry.get("list_selector") or ""))
+        pagination = entry.get("pagination") or {}
+        self.next_selector_entry.set(str(pagination.get("next_selector") or ""))
+
+        self.page_start_entry.set(str(entry.get("page_start") or 1))
+        self.page_end_entry.set(
+            "" if entry.get("page_end") is None else str(entry.get("page_end"))
+        )
+        self.max_pages_entry.set(
+            "" if entry.get("max_pages") is None else str(entry.get("max_pages"))
+        )
+        self.default_industry_entry.set(str(entry.get("default_industry") or ""))
+
+        detail_link = entry.get("detail_link") or {}
+        self.detail_link_entry.set(str(detail_link.get("selector") or ""))
+        self.max_details_entry.set(str(entry.get("max_details") or ""))
+
+        # 空的 collect_fields 代表「全部收集」，不是「一個都不收集」。
+        collect = entry.get("collect_fields") or []
+        for field, check in self.collect_checks.items():
+            check.setChecked(not collect or field in collect)
+        self._set_collect_enabled(True)
+
+        kinds = entry.get("document_kinds") or []
+        for kind, check in self.document_checks.items():
+            check.setEnabled(True)
+            check.setChecked(kind in kinds)
+
+        actions = entry.get("page_actions") or []
+        self._suggested_actions = list(actions)
+        self.click_check.setEnabled(bool(actions))
+        self.click_check.setChecked(bool(actions))
+
+        self._load_query_loop(entry.get("query_loop") or None)
+
+        self.field_rules = {
+            code: dict(rule) for code, rule in (entry.get("fields") or {}).items()
+        }
+        self._refresh_fields_table()
+        self._refresh_preview_table()
+        self._update_save_state()
+
+        self.summary_label.setText(
+            f"正在編輯已儲存的來源「{self._editing_source}」。"
+            "下面每一格都是當初存下來的設定，改完按「儲存來源」就會覆蓋它。"
+        )
+        self.notes_label.setText(
+            "沒有重新連線到那個網站——要重新偵測的話按上面的「分析網頁」，"
+            "但那會把下面所有的欄位覆寫成新的偵測結果。"
+        )
+        # 選擇器是使用者最可能來改的東西，直接打開，不要讓他去找。
+        self.advanced_section.set_expanded(True)
+
+    def _load_query_loop(self, loop: dict[str, Any] | None) -> None:
+        """回填「逐項查詢」那一區。
+
+        ``_query_form`` 平常是分析填的，這裡沒有分析可用，所以從存下來的設定
+        反推一份出來——不然勾選框會是停用的，使用者看得到自己存的設定卻改不動。
+        ``option_count`` 用 max_queries 當下限，真正有幾個選項要開頁面才知道。
+        """
+        if not loop:
+            self._apply_query_form(None)
+            return
+
+        self._query_form = {
+            "input_selector": loop.get("input_selector") or "",
+            "submit_selector": loop.get("submit_selector") or "",
+            "option_count": max(1, int(loop.get("max_queries") or 1)),
+            "drill": loop.get("drill") or None,
+            "verified_route": "select" if not loop.get("values") else "text",
+        }
+        self.query_loop_check.setEnabled(True)
+        self.query_loop_check.setChecked(True)
+        self._sync_query_loop_enabled(True)
+
+        self.query_values_entry.set("、".join(loop.get("values") or []))
+        start_value = str(loop.get("start_value") or "")
+        end_value = str(loop.get("end_value") or "")
+        if start_value or end_value:
+            self.query_by_text.setChecked(True)
+            self.query_start_text_entry.set(start_value)
+            self.query_end_text_entry.set(end_value)
+        else:
+            self.query_by_number.setChecked(True)
+            self.query_start_entry.set(str(loop.get("start_at") or 1))
+            self.query_count_entry.set(str(loop.get("max_queries") or 3))
+        self._sync_query_range_mode()
+
     def _refresh_fields_table(self) -> None:
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -1484,6 +1594,12 @@ class SourceWizardDialog(QDialog):
                 query_loop=query_loop,
             )
             saved_name = self.controller.save(source, name, enabled=True)
+            # 編輯時把名字改掉的話，舊的那一份還躺在設定檔裡（儲存是照名字
+            # 覆蓋的）。不收掉的話畫面上會多出一個沒有人想要的孤兒來源，
+            # 而且排程還會照樣去爬它。
+            if self._editing_source and self._editing_source != saved_name:
+                self.controller.delete(self._editing_source)
+            self._editing_source = saved_name
         except CRMError as exc:
             QMessageBox.critical(self, "儲存失敗", _friendly_error(exc))
             return
