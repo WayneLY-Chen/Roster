@@ -522,3 +522,43 @@ def test_editing_can_be_saved_without_analysing_again(qt_app):
     dialog.load_source(SAVED_SOURCE)
 
     assert dialog.save_button.isEnabled()
+
+
+def test_the_explore_button_is_locked_while_analysing(qt_app):
+    """分析跑到一半還按得下「找名錄…」的話，會在同一個對話框上再開一趟站內
+    走訪。兩份結果搶著往同一批欄位裡寫，先回來的被後回來的蓋掉——使用者看到
+    的是「我明明分析的是這個網址」。"""
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    dialog._set_url_locked(True)
+
+    assert not dialog.analyse_button.isEnabled()
+    assert not dialog.explore_button.isEnabled()
+    assert not dialog.url_entry.isEnabled()
+
+    dialog._set_url_locked(False)
+
+    assert dialog.analyse_button.isEnabled()
+    assert dialog.explore_button.isEnabled()
+
+
+def test_the_wizard_does_not_block_the_rest_of_the_program(qt_app):
+    """分析要跑一兩分鐘。那段時間使用者應該可以去別的頁看東西。
+
+    ``setModal(False)`` 只有搭配 ``show()`` 才算數——``exec()`` 不管 modal
+    設定，一律擋住整個程式。上一版只改了 setModal，所以完全沒有效果。
+    """
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    assert not dialog.isModal()
+
+
+def test_the_wizard_is_its_own_window_so_minimising_it_leaves_the_app_alone(qt_app):
+    """Windows 上有 parent 的視窗會跟著母視窗一起縮到工作列。使用者按縮小
+    想去看公司頁，結果整個程式一起不見了。"""
+    from PySide6.QtCore import Qt
+
+    dialog = SourceWizardDialog(None, _FakeSourceController())
+
+    assert dialog.parent() is None
+    assert dialog.windowFlags() & Qt.WindowType.WindowMinimizeButtonHint

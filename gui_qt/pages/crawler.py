@@ -112,6 +112,9 @@ class CrawlerPage(BasePage):
         self.verify_task: BackgroundTask | None = None
         self.enrich_task: BackgroundTask | None = None
         self.registry_task: BackgroundTask | None = None
+        #: 網址精靈是一個不擋人、沒有 parent 的視窗，所以要自己抓著一份參考
+        #: ——不然 Python 一回收，視窗當場消失。
+        self._wizard: Any = None
 
     # ------------------------------------------------------------- 建立元件
 
@@ -601,13 +604,34 @@ class CrawlerPage(BasePage):
 
     # ------------------------------------------------------------ custom sources
 
-    def _open_source_wizard(self) -> None:
-        dialog = SourceWizardDialog(self, self.source_controller, on_saved=self._on_source_saved)
-        dialog.exec()
+    def _open_source_wizard(self, entry: dict[str, Any] | None = None) -> None:
+        """開啟網址精靈。給了 ``entry`` 就是編輯一個已存的來源。
+
+        用 ``show()`` 不是 ``exec()``，而且 parent 是 None——兩件事缺一不可：
+
+        * ``exec()`` 不管 ``setModal(False)``，一律把整個程式擋住。分析一個站
+          要一兩分鐘，那段時間使用者應該可以去別的頁看東西。
+        * Windows 上有 parent 的視窗會跟著母視窗一起縮到工作列。使用者按縮小
+          想去看公司頁，結果整個程式一起不見了。
+
+        代價是要自己抓著它一份參考，不然 Python 一回收，視窗當場消失。
+        """
+        dialog = SourceWizardDialog(None, self.source_controller, on_saved=self._on_source_saved)
+        if entry is not None:
+            dialog.load_source(entry)
+        # 只留最後開的那一個。連開兩次的話前一個會被回收關掉，那也是對的
+        # ——兩個精靈同時對著同一份 custom_sources.yaml 寫是更糟的事。
+        self._wizard = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _open_source_manager(self) -> None:
         dialog = CustomSourcesDialog(
-            self, self.source_controller, on_changed=self._on_source_saved
+            self,
+            self.source_controller,
+            on_changed=self._on_source_saved,
+            on_edit=self._open_source_wizard,
         )
         dialog.exec()
 
@@ -655,10 +679,14 @@ class CustomSourcesDialog(QDialog):
         parent: QWidget | None,
         controller: SourceWizardController,
         on_changed: Callable[[str], None] | None = None,
+        on_edit: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.controller = controller
         self.on_changed = on_changed
+        #: 按下「編輯」時，由開啟這個視窗的頁面去開精靈——精靈是不擋人的
+        #: 視窗，從一個強制回應的對話框裡開一個不擋人的視窗只會打架。
+        self.on_edit = on_edit
 
         self.setWindowTitle("管理自訂來源")
         self.resize(640, 420)
@@ -728,15 +756,13 @@ class CustomSourcesDialog(QDialog):
             self._refresh()
             return
 
-        dialog = SourceWizardDialog(self, self.controller, on_saved=self._on_edited)
-        dialog.load_source(entry)
-        dialog.exec()
-        self._refresh()
-
-    def _on_edited(self, name: str) -> None:
-        self._refresh()
-        if self.on_changed:
-            self.on_changed(name)
+        # 這個管理視窗自己是強制回應的，先收掉再讓頁面去開精靈——精靈是一個
+        # 不擋人的視窗（分析要跑一兩分鐘），從強制回應的對話框裡開它只會打架：
+        # 精靈在上面，底下這個卻還擋著整個程式。
+        if self.on_edit is None:            # pragma: no cover - 呼叫端一定會給
+            return
+        self.accept()
+        self.on_edit(entry)
 
     def _delete_selected(self) -> None:
         row = self.table.selected_row()

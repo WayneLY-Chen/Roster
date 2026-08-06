@@ -189,17 +189,27 @@ class SourceWizardDialog(QDialog):
         self.resize(1000, 760)
         self.setMinimumSize(920, 640)
 
-        # 不擋住主程式，而且可以縮到旁邊去。
+        # 不擋住主程式，而且可以自己縮到旁邊去。
         #
         # 分析一個站要一兩分鐘（開瀏覽器、試查、往下點一層），期間整張表單是
-        # 反灰的。原本它是強制回應視窗，等於那一兩分鐘裡整個程式都不能動——
-        # 使用者連去「公司」頁看一眼上一批爬到什麼都不行，只能盯著它。
-        # 現在只有這個視窗自己在等，主視窗照常可以看。
+        # 反灰的。那一兩分鐘裡使用者應該可以去「公司」頁看一眼上一批爬到什麼，
+        # 而不是只能盯著它。
+        #
+        # 兩件事都要做，少一件就沒有用：
+        #
+        # 1. ``setModal(False)`` 只有搭配 ``show()`` 才算數。``exec()`` 不管
+        #    modal 設定，一律把整個程式擋住——上一版只改了這一行，所以完全
+        #    沒有效果。開啟這個對話框的地方用的是 show()。
+        # 2. 這個視窗不能有 parent。Windows 上，有 parent 的視窗會跟著母視窗
+        #    一起縮到工作列——使用者按「縮小」想去看公司頁，結果整個程式一起
+        #    不見了。實際回報過。所以縮小鍵是 setWindowFlags 給的，parent 是
+        #    None（見 gui_qt/pages/crawler.py 開啟它的地方）。
         self.setModal(False)
         self.setWindowFlags(
-            self.windowFlags()
+            Qt.WindowType.Window
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
         )
 
         # 分析成功後才會有值；``field_rules`` 把欄位代碼對應到
@@ -1100,6 +1110,12 @@ class SourceWizardDialog(QDialog):
         """
         self.url_entry.setReadOnly(locked)
         self.url_entry.setEnabled(not locked)
+        # 「找名錄…」也要停掉。以前只停「分析網頁」，結果分析跑到一半還按得下
+        # 去——那會在同一個對話框上再開一趟站內走訪，兩份結果搶著往同一批欄位
+        # 裡寫，先回來的那份會被後回來的蓋掉。使用者看到的是「我明明分析的是
+        # 這個網址」。
+        self.analyse_button.setEnabled(not locked)
+        self.explore_button.setEnabled(not locked)
         for section in (
             getattr(self, "summary_section", None),
             getattr(self, "preview_section", None),
