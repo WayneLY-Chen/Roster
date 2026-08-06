@@ -50,14 +50,76 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# 啟動器不能用 `exec`，也不能讓錯誤靜靜地掉在地上。
+#
+# Finder 啟動 .app 的時候沒有終端機可以印東西：程式一失敗，圖示在 Dock 上跳
+# 一下就消失，使用者看到的是「點了沒反應」，而真正的原因（venv 被砍了、資料夾
+# 搬走了、少裝一個套件）只出現在沒有人會去看的系統紀錄裡。實際回報過。
+#
+# 所以這裡把輸出接進檔案，失敗時用 osascript 把最後幾行直接貼在螢幕上。
+cat > "$app/Contents/MacOS/Roster" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -uo pipefail
+
+project="__PROJECT__"
+log="$project/logs/啟動失敗.log"
+
+fail() {
+    mkdir -p "$project/logs" 2>/dev/null || true
+    {
+        echo "=== $(date '+%Y-%m-%d %H:%M:%S') ==="
+        echo "$1"
+    } >> "$log" 2>/dev/null || true
+
+    # AppleScript 的字串裡，反斜線與雙引號要跳脫，否則對話框根本開不起來
+    # ——那會變成「連錯誤訊息都看不到」，比原本的問題更糟。
+    local message
+    message="$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tail -c 900)"
+    osascript -e "display dialog \"名單匠啟動失敗：
+
+$message
+
+完整訊息：logs/啟動失敗.log\" buttons {\"好\"} default button 1 with title \"名單匠\" with icon stop" \
+        >/dev/null 2>&1
+    exit 1
+}
+
+[ -d "$project" ] || fail "找不到專案資料夾：
+$project
+
+這個 App 只是一層外殼，它要用專案資料夾裡的環境。
+資料夾搬過位置的話，請重新執行一次 macOS/建立App.command。"
+
+[ -x "$project/.venv/bin/python" ] || fail "找不到 Python 環境：
+$project/.venv/bin/python
+
+請先雙擊 macOS/安裝.command。"
+
+cd "$project" || fail "無法進入專案資料夾：$project"
+
+mkdir -p "$project/logs" 2>/dev/null || true
+output="$("$project/.venv/bin/python" main.py gui 2>&1)"
+status=$?
+[ $status -eq 0 ] || fail "程式結束時回報了錯誤（代碼 $status）：
+
+$(printf '%s' "$output" | tail -n 12)"
+LAUNCHER
+
 # 專案位置寫進啟動器裡。.app 通常會被搬到「應用程式」資料夾，那時候就沒辦法
 # 再用「自己所在的位置」推算專案在哪了。
-cat > "$app/Contents/MacOS/Roster" <<LAUNCHER
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$here"
-exec "$here/.venv/bin/python" main.py gui
-LAUNCHER
+#
+# 用 sed 換掉佔位字串，而不是把 heredoc 開成可展開的：上面那段 shell 腳本裡
+# 有一堆 `$1`、`$status`、`$(...)`，可展開的 heredoc 會在**產生檔案的當下**
+# 就把它們全部吃掉，寫出來的啟動器會是一堆空字串。
+python3 - "$app/Contents/MacOS/Roster" "$here" <<'PYEOF' 2>/dev/null || \
+    sed -i '' "s|__PROJECT__|$here|" "$app/Contents/MacOS/Roster"
+import sys
+path, project = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text.replace("__PROJECT__", project))
+PYEOF
 chmod +x "$app/Contents/MacOS/Roster"
 
 # 圖示：有 .icns 就用，沒有的話讓 macOS 用預設的。

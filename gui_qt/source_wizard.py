@@ -186,7 +186,19 @@ class SourceWizardDialog(QDialog):
         self.setWindowTitle("自訂網址精靈")
         self.resize(1000, 760)
         self.setMinimumSize(920, 640)
-        self.setModal(True)
+
+        # 不擋住主程式，而且可以縮到旁邊去。
+        #
+        # 分析一個站要一兩分鐘（開瀏覽器、試查、往下點一層），期間整張表單是
+        # 反灰的。原本它是強制回應視窗，等於那一兩分鐘裡整個程式都不能動——
+        # 使用者連去「公司」頁看一眼上一批爬到什麼都不行，只能盯著它。
+        # 現在只有這個視窗自己在等，主視窗照常可以看。
+        self.setModal(False)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
 
         # 分析成功後才會有值；``field_rules`` 把欄位代碼對應到
         # {"selector", "attr", "regex", "hit_rate", "samples"}——多出來的
@@ -292,6 +304,7 @@ class SourceWizardDialog(QDialog):
         section.body_layout.addWidget(self.notes_label)
 
         self._build_collect_controls(section.body_layout)
+        self.summary_section = section
         parent_layout.addWidget(section)
 
     def _build_collect_controls(self, body_layout: QVBoxLayout) -> None:
@@ -466,8 +479,16 @@ class SourceWizardDialog(QDialog):
         self._sync_query_loop_enabled(False)
 
     def _sync_query_loop_enabled(self, checked: bool) -> None:
+        on = bool(checked) and self.query_loop_check.isEnabled()
         for widget in self._query_inputs:
-            widget.setVisible(bool(checked) and self.query_loop_check.isEnabled())
+            widget.setVisible(on)
+
+        # 逐項查詢的來源沒有「頁」可以翻——它的一趟就是查一次，而要查幾次是
+        # 上面那一格說了算。兩個都在講「總共跑幾趟」的欄位同時擺在畫面上，
+        # 使用者只會填其中一個，另一個維持預設值然後默默地贏——實際發生過：
+        # 選單那格填了 97，「最多爬幾頁」還停在 3，結果查 3 個就結束。
+        for widget in (self.page_start_entry, self.page_end_entry, self.max_pages_entry):
+            widget.setVisible(not on)
 
     def _apply_query_form(self, form: dict | None) -> None:
         """依照分析結果決定「逐項查詢」勾不勾得動，並講出偵測到幾個條件。"""
@@ -484,14 +505,29 @@ class SourceWizardDialog(QDialog):
 
         count = int(self._query_form.get("option_count", 0) or 0)
         sample = "、".join(str(s) for s in (self._query_form.get("sample") or [])[:3])
-        if count:
+        # 分析實際驗證過走得通的是哪一條路。這一頁上有下拉選單，不代表那條路
+        # 查得出廠商——ieatpe 的選單查出來是商品分類，要再點一層才是廠商，而
+        # 那一層點不通的時候只剩關鍵字這條路。
+        route = str(self._query_form.get("verified_route") or "")
+        drilled = bool(self._query_form.get("drill"))
+
+        if count and route != "text":
             text = (
                 f"這一頁有一個 {count} 個選項的查詢選單"
                 + (f"（例如：{sample}）" if sample else "")
                 + f"。勾起來就會一個選項查一次，總共可以查 {count} 個。"
             )
+            if drilled:
+                text += "這個網站查出來還要再點一層才是廠商，爬取時會自動做，會慢很多。"
             if self._query_form.get("text_input_selector"):
                 text += "這一頁也可以打關鍵字查，勾起來之後填字就改走那一條。"
+        elif count and route == "text":
+            # 選單在，但驗證過查不出廠商。照實說，不要給一個按了會白跑的選項。
+            text = (
+                f"這一頁雖然有一個 {count} 個選項的選單，但實際試查的結果不是廠商"
+                "（中間那一層也點不出廠商），所以那條路不能用。"
+                "只有打關鍵字這條走得通——勾起來之後填要查哪些字，一個字查一次。"
+            )
         else:
             text = "這一頁是打關鍵字查詢的。勾起來之後填要查哪些字，一個字查一次。"
         self.query_loop_note.setText(text)
@@ -539,6 +575,10 @@ class SourceWizardDialog(QDialog):
         detected = int(self._query_form.get("option_count", 0) or 0)
         if not detected:
             return None            # 關鍵字查詢框但沒填字，沒有東西可以查
+        if str(self._query_form.get("verified_route") or "") == "text":
+            # 選單在，但分析實際試過查不出廠商。沒填關鍵字就寧可什麼都不存，
+            # 也不要存一條已知會抓回一堆分類代號的設定。
+            return None
         return {
             "input_selector": str(self._query_form.get("input_selector") or ""),
             "submit_selector": str(self._query_form.get("submit_selector") or ""),
@@ -595,6 +635,7 @@ class SourceWizardDialog(QDialog):
         self.preview_table = DataTable(columns=PREVIEW_COLUMNS)
         section.body_layout.addWidget(self.preview_table)
 
+        self.preview_section = section
         parent_layout.addWidget(section)
 
     def _build_bottom_section(self, parent_layout: QVBoxLayout) -> None:
@@ -941,13 +982,32 @@ class SourceWizardDialog(QDialog):
         self._on_analyse_error(exc)
 
     def _set_url_locked(self, locked: bool) -> None:
-        """分析或站內尋找進行中時，網址不給改。
+        """分析或站內尋找進行中時，整張表單都不給動。
 
-        改了也不會影響正在跑的那一次，但畫面上顯示的是新網址、結果卻是舊網址
-        的——那種「看起來對、其實不是」比直接不給改難查得多。
+        不只是網址。下面每一格的內容都是「上一次分析的結果」——分析跑完會把
+        它們整批覆寫掉，所以在跑的時候改任何一格，改的東西幾秒後就消失了，
+        而使用者不會知道自己剛剛做的事被丟掉。反灰是唯一講得清楚的方式。
+
+        「儲存」在這段時間也一定要停用：那一份設定是新舊混在一起的，存下去
+        會得到一個看起來正常、實際上爬不到東西的來源。
         """
         self.url_entry.setReadOnly(locked)
         self.url_entry.setEnabled(not locked)
+        for section in (
+            getattr(self, "summary_section", None),
+            getattr(self, "preview_section", None),
+            getattr(self, "advanced_section", None),
+        ):
+            if section is not None:
+                section.setEnabled(not locked)
+        if locked:
+            for name in ("save_button", "save_crawl_button"):
+                button = getattr(self, name, None)
+                if button is not None:
+                    button.setEnabled(False)
+        else:
+            # 解鎖時由「有沒有抓到公司名稱」決定儲存能不能按，不是無條件開啟。
+            self._update_save_state()
 
     def _stop_analyse_progress(self) -> None:
         self.analyse_progress.hide()
@@ -1220,10 +1280,20 @@ class SourceWizardDialog(QDialog):
         self.save_crawl_button.setEnabled(ok)
 
         if ok:
-            self.save_hint_label.setText("")
+            # 分析與勾選的先後關係要講清楚。使用者會停在這裡問「我勾完之後
+            # 是不是要再按一次分析網頁？」——不用，而且再按一次會把勾選連同
+            # 分析結果一起重來。這句話就是為了不讓人白跑一次分析。
+            self.save_hint_label.setText(
+                "上面的勾選（要收集哪些欄位、要不要逐項查詢、要不要讀檔案）"
+                "會在按「儲存」的當下一起存進去，不用再按一次「分析網頁」。"
+            )
+            self.save_hint_label.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         elif not has_list:
+            # 這兩句是「還不能存」的原因，要用警示色，跟上面那句說明不同。
+            self.save_hint_label.setStyleSheet(f"color: {theme.pick(theme.DANGER)};")
             self.save_hint_label.setText("請先貼上網址並按「分析網頁」。")
         else:
+            self.save_hint_label.setStyleSheet(f"color: {theme.pick(theme.DANGER)};")
             self.save_hint_label.setText(
                 "沒有抓到「公司名稱」，這樣的資料存了也用不了。"
                 "請打開下方「進階設定」手動指定它的位置。"
@@ -1239,8 +1309,13 @@ class SourceWizardDialog(QDialog):
         list_selector = self.list_selector_entry.get()
         next_selector = self.next_selector_entry.get().strip() or None
 
-        max_pages_text = self.max_pages_entry.get()
+        query_loop = self._selected_query_loop()
+
+        # 逐項查詢的來源不存頁數上限。存了的話設定檔裡會躺著一個看起來像在
+        # 管事、實際上不管事的數字（跑幾趟是 query_loop.max_queries 說了算），
+        # 打開 custom_sources.yaml 的人只會被它誤導。
         max_pages: int | None = None
+        max_pages_text = "" if query_loop else self.max_pages_entry.get()
         if max_pages_text:
             try:
                 max_pages = int(max_pages_text)
@@ -1285,7 +1360,7 @@ class SourceWizardDialog(QDialog):
                 page_start=page_start,
                 page_end=page_end,
                 engine=self._detected_engine,
-                query_loop=self._selected_query_loop(),
+                query_loop=query_loop,
             )
             saved_name = self.controller.save(source, name, enabled=True)
         except CRMError as exc:

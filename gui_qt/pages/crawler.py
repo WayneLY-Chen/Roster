@@ -105,6 +105,10 @@ class CrawlerPage(BasePage):
         self.registry_controller = RegistryController()
         self.source_controller = SourceWizardController()
         self.crawl_task: BackgroundTask | None = None
+        #: 這一次爬的是哪個來源，以及停下來之後要不要把進度丟掉（按「取消」
+        #: 是要丟的，按「暫停」不是）。
+        self._crawl_source: str | None = None
+        self._discard_progress_on_stop = False
         self.verify_task: BackgroundTask | None = None
         self.enrich_task: BackgroundTask | None = None
         self.registry_task: BackgroundTask | None = None
@@ -157,12 +161,26 @@ class CrawlerPage(BasePage):
         self.start_button.clicked.connect(self._start_crawl)
         buttons_row.addWidget(self.start_button)
 
+        # 暫停與取消是兩件事，所以是兩顆按鈕。
+        #
+        # 以前只有「取消」，但它實際上會把進度記下來、下一次自動接著跑——一顆
+        # 寫著「取消」的按鈕做的是「暫停」，那是標籤在說謊。使用者按下去之後
+        # 得不到他以為他要的東西，而且完全看不出來。
+        self.pause_button = QPushButton("暫停")
+        self.pause_button.setToolTip(
+            "停在這裡，記住做到哪。下一次按「開始爬取」會從這裡接著跑。"
+        )
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(lambda: self._stop_crawl(keep_progress=True))
+        buttons_row.addWidget(self.pause_button)
+
         self.cancel_button = QPushButton("取消")
+        self.cancel_button.setToolTip("停下來，並且丟掉進度。下一次會從頭開始。")
         self.cancel_button.setEnabled(False)
         self.cancel_button.setStyleSheet(
             f"background-color: {theme.pick(theme.DANGER)}; color: white;"
         )
-        self.cancel_button.clicked.connect(self._cancel_crawl)
+        self.cancel_button.clicked.connect(lambda: self._stop_crawl(keep_progress=False))
         buttons_row.addWidget(self.cancel_button)
 
         self.verify_button = QPushButton("驗證所有紀錄")
@@ -241,7 +259,11 @@ class CrawlerPage(BasePage):
         self._clear_log()
         self._append_log(f"開始爬取（{source or '全部啟用來源'}）...")
         self.start_button.setEnabled(False)
+        self.pause_button.setEnabled(True)
         self.cancel_button.setEnabled(True)
+        self._crawl_source = source
+        self._discard_progress_on_stop = False
+        # 總共幾趟要等第一批回報才知道（來源自己算的），先開不定進度。
         self.app.status_bar.start_progress()
         self.status("爬取中...", "normal")
 
@@ -268,30 +290,61 @@ class CrawlerPage(BasePage):
             raise ValueError(f"{label}必須大於 0")
         return value
 
-    def _cancel_crawl(self) -> None:
-        # 同一顆按鈕停爬取、補抓信箱與補公司登記資料——同時間只會有一件在跑，
-        # 因為每一件開始時都會把自己的按鈕停用。
+    def _stop_crawl(self, keep_progress: bool) -> None:
+        """停下正在跑的工作。``keep_progress`` 決定這是暫停還是取消。
+
+        補抓信箱與補公司登記資料沒有「進度」這種東西（它們每做完一家就存一家，
+        本來就接得回去），所以那兩個只會被停下來，兩顆按鈕對它們是一樣的。
+        """
+        word = "暫停" if keep_progress else "取消"
+
         if self.registry_task is not None and self.registry_task.running:
             self.registry_task.cancel()
-            self._append_log("取消中...")
+            self._append_log("停止中...")
             return
         if self.enrich_task is not None and self.enrich_task.running:
             self.enrich_task.cancel()
-            self._append_log("取消中...")
+            self._append_log("停止中...")
             return
         if self.crawl_task is not None and self.crawl_task.running:
+            # 進度要在爬取真的停下來之後才清，不然管線還會把它寫回去。
+            self._discard_progress_on_stop = not keep_progress
             self.crawl_task.cancel()
-            self._append_log("取消中...")
+            self._append_log(f"{word}中...")
+            self.pause_button.setEnabled(False)
             self.cancel_button.setEnabled(False)
 
     def _on_crawl_progress(self, payload: dict[str, Any]) -> None:
+        page = int(payload.get("page") or 0)
+        total = int(payload.get("total") or 0)
         self._append_log(
-            f"[{payload.get('source')}] 第 {payload.get('page')} 頁 -- "
-            f"目前已儲存 {payload.get('stored')} 筆"
+            f"[{payload.get('source')}] 第 {page}"
+            + (f" / {total}" if total else "")
+            + f" 趟 -- 目前已儲存 {payload.get('stored')} 筆"
         )
+        self.app.status_bar.advance_progress(page, total or None)
+
+        # 這一批已經寫進資料庫了，公司頁停在畫面上的話要跟著長出來。爬一趟
+        # 可能一個多小時，要等到最後才看得到東西是說不過去的。
+        bump_data_version()
 
     def _on_crawl_done(self, summaries: list[CrawlSummary]) -> None:
         self._finish_crawl()
+
+        # 按的是「取消」而不是「暫停」的話，把進度丟掉。要在爬取真的結束之後
+        # 才做——管線在停下來的路上還會把最後一批的進度寫回去。
+        if self._discard_progress_on_stop:
+            self._discard_progress_on_stop = False
+            try:
+                cleared = self.crawl_controller.clear_progress(self._crawl_source)
+            except CRMError as exc:
+                self._append_log(f"清除進度失敗：{exc}")
+            else:
+                if cleared:
+                    self._append_log("已取消，進度也清掉了；下一次會從頭開始。")
+        elif any(getattr(s, "status", "") == "Cancelled" for s in summaries):
+            self._append_log("已暫停。下一次按「開始爬取」會從這裡接著跑。")
+
         self.results_table.set_rows(
             [
                 {
@@ -335,6 +388,7 @@ class CrawlerPage(BasePage):
 
     def _finish_crawl(self) -> None:
         self.start_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
         self.app.status_bar.stop_progress()
 

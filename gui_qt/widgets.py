@@ -496,8 +496,33 @@ class StatusBar(QWidget):
         self.message.setText(text)
         self.message.setStyleSheet(f"color: {theme.pick(colour)};" if colour else "")
 
-    def start_progress(self) -> None:
+    def start_progress(self, total: int | None = None) -> None:
+        """顯示進度條。給了 ``total`` 就是真的進度，沒給就是「還在跑」。
+
+        不定進度條只能回答「有沒有當掉」。使用者盯著一趟要跑一個多小時的爬取
+        時，真正想知道的是「還要多久」——來回跑的那條橫槓每一秒看起來都一樣，
+        跑了 5 分鐘跟跑了 50 分鐘沒有任何差別。知道總共幾趟的時候就要講出來。
+        """
+        if total and total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(0)
+            self.progress.setFormat("%v / %m")
+            self.progress.setTextVisible(True)
+        else:
+            self.progress.setRange(0, 0)
+            self.progress.setTextVisible(False)
         self.progress.show()
+
+    def advance_progress(self, done: int, total: int | None = None) -> None:
+        """把進度條推到第 ``done`` 格。總數變了（分析途中才數得出來）就一起換。"""
+        if total and total > 0 and self.progress.maximum() != total:
+            self.progress.setRange(0, total)
+            self.progress.setFormat("%v / %m")
+            self.progress.setTextVisible(True)
+        if self.progress.maximum() > 0:
+            self.progress.setValue(min(done, self.progress.maximum()))
 
     def stop_progress(self) -> None:
         self.progress.hide()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)

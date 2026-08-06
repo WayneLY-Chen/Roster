@@ -280,6 +280,15 @@ class CrawlController:
     def enabled_source_names(self) -> list[str]:
         return [s.name for s in self.config.crawler.enabled_sources()]
 
+    def clear_progress(self, source: str | None = None) -> int:
+        """丟掉「做到哪裡」的紀錄，下一次從頭開始。
+
+        「暫停」與「取消」的差別就只有這個。不做這件事的話兩顆按鈕的行為
+        完全一樣，而畫面上會多一顆騙人的按鈕。
+        """
+        with session_scope() as session:
+            return CrawlJobRepository(session).clear_resume(source)
+
     def run(
         self,
         source: str | None,
@@ -292,8 +301,9 @@ class CrawlController:
     ) -> list[CrawlSummary]:
         from crawler.pipeline import crawl
 
-        def progress(name: str, page: int, stored: int) -> None:
-            report({"source": name, "page": page, "stored": stored})
+        def progress(name: str, page: int, stored: int, total: int) -> None:
+            report({"source": name, "page": page, "stored": stored, "total": total})
+
 
         return crawl(
             source=source,

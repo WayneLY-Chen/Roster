@@ -67,7 +67,7 @@ from core.i18n import (
     to_value,
 )
 from gui_qt.company_detail import CompanyDetailDialog
-from gui_qt.pages.base import BasePage, bump_data_version
+from gui_qt.pages.base import BasePage, bump_data_version, current_data_version
 from gui_qt.tasks import BackgroundTask
 from gui_qt.widgets import DataTable, WideComboBox, caption
 
@@ -118,6 +118,14 @@ EMPTY_CELL = "—"
 #: 搜尋框 debounce 的間隔。
 SEARCH_DEBOUNCE_MS = 300
 
+#: 停在這一頁時，多久看一次「資料庫被別人動過了沒」。
+#:
+#: 爬取是在另一頁按下去的，但它可能跑一個多小時。沒有這個的話，使用者站在
+#: 公司頁看到的是一張不會動的表——背景明明一批一批在存，畫面上完全看不出來。
+#: 比的是記憶體裡的一個整數（見 core/data_version.py），沒有人寫入時這個
+#: 計時器的成本就是一次整數比較，不會去碰資料庫。
+LIVE_REFRESH_MS = 1500
+
 
 class CompaniesPage(BasePage):
     title = "公司"
@@ -135,6 +143,10 @@ class CompaniesPage(BasePage):
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._run_search)
+
+        # 停在這一頁時盯著背景的寫入（爬取、補信箱、補登記資料）。
+        self._live_timer = QTimer(self)
+        self._live_timer.timeout.connect(self._pick_up_new_data)
 
         self._fetch_task = BackgroundTask(
             self, self._fetch, on_done=self._apply_result, on_error=self._handle_error
@@ -268,10 +280,30 @@ class CompaniesPage(BasePage):
     # ------------------------------------------------------------- 生命週期
 
     def refresh(self) -> None:
+        self._live_timer.start(LIVE_REFRESH_MS)
         self._run_search()
+
+    def on_reveal(self) -> None:
+        # 資料沒變所以不重查（見 gui_qt/pages/base.py），但還是要開始盯著——
+        # 背景可能正在爬，資料隨時會變。
+        self._live_timer.start(LIVE_REFRESH_MS)
 
     def on_hide(self) -> None:
         self._search_timer.stop()
+        self._live_timer.stop()
+
+    def _pick_up_new_data(self) -> None:
+        """背景寫進資料庫的東西，不用切頁就會長出來。
+
+        爬取是在另一頁按下去的，但它可能跑一個多小時。以前只有「換頁回來」
+        才會重查，所以使用者站在公司頁看到的是一張不會動的表，完全看不出
+        背景正在把公司一批一批存進來。
+
+        比的是那個跨頁面的版本號（記憶體裡的一個整數），不是去問資料庫——
+        沒有人寫入的時候，這個計時器的成本是一次整數比較。
+        """
+        if current_data_version() != self._seen_version:
+            self.on_show()
 
     # --------------------------------------------------------- 篩選下拉選單
 

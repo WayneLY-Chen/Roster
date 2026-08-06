@@ -33,8 +33,12 @@ from verifier.service import CleaningService
 
 log = get_logger(LogCategory.CRAWL)
 
-ProgressCallback = Callable[[str, int, int], None]
-"""``(source_name, page_number, records_stored_so_far)``."""
+ProgressCallback = Callable[[str, int, int, int], None]
+"""``(source_name, page_number, records_stored_so_far, total_pages)``。
+
+``total_pages`` 是這一次的頁數預算。有它畫面上才做得出真的進度條——不定進度
+那條來回跑的橫槓只回答「有沒有當掉」，而逐項查詢一趟可能一個多小時。
+"""
 
 
 #: 使用者可以勾選要不要收集的欄位。``company_name`` 不在裡面——它是必填的，
@@ -87,6 +91,22 @@ def _health_warning(job_repo, source: str, job, summary: CrawlSummary) -> str | 
     # 失敗與取消本來就有自己的訊息，再加一句「抓得比上次少」只是雜訊。
     if summary.status not in (CrawlStatus.SUCCESS.value, CrawlStatus.PARTIAL.value):
         return None
+
+    # 抓到了東西、卻一筆都沒存進去。這跟「抓不到」是完全不同的毛病：頁面讀到
+    # 了、重複區塊也找對了，是「公司名稱」那一欄指到了別的位置（子分類代號、
+    # 表頭、導覽列）。以前這種情形畫面上只寫「找到 21、新增 0、拒絕 21」，
+    # 三個數字擺在一起沒有人看得出那是壞的——這一句要直接講出來。
+    #
+    # 放在「跟上一次比」的前面：第一次跑就抓錯的話根本沒有上一次可以比，而
+    # 那正是最需要被提醒的時候。
+    if summary.records_found and summary.records_new == 0 and summary.records_updated == 0:
+        if summary.records_invalid >= summary.records_found:
+            return (
+                f"抓到 {summary.records_found} 筆，但全部都不是公司資料，一筆都沒有存進去。"
+                "通常是「公司名稱」抓到了別的位置——到日誌頁看它實際抓到什麼文字，"
+                "再重新分析一次這個來源。"
+            )
+
     # 接續上一次的執行本來就只做剩下的部分，筆數少是正常的。
     if summary.resumed:
         return None
@@ -329,7 +349,12 @@ class CrawlPipeline:
                     session.commit()
 
                     if progress is not None:
-                        progress(source_config.name, batch.page_number, summary.records_new)
+                        progress(
+                            source_config.name,
+                            batch.page_number,
+                            summary.records_new,
+                            page_budget,
+                        )
 
                     if batch.is_empty and self.config.crawler.stop_on_empty_page:
                         log.info("{}: empty page, stopping early", source_config.name)
@@ -398,6 +423,20 @@ class CrawlPipeline:
 
         cleaned, rejected = cleaner.clean_many(unique)
         summary.records_invalid += rejected
+
+        if rejected and not cleaned and unique:
+            # 這一頁抓到東西、卻一筆都沒留下來，幾乎一定是「公司名稱」那一欄
+            # 抓到了別的位置——中間那層子分類的代號、表頭、導覽列。
+            #
+            # 以前這裡只把數字加一加，使用者看到的是「21 rejected」，完全不知道
+            # 被丟掉的是什麼、為什麼。把實際的文字印出來，一眼就看得出抓錯位置。
+            samples = ", ".join(
+                repr((record.company_name or "").strip()[:24]) for record in unique[:3]
+            )
+            log.warning(
+                "這一頁的 {} 筆全部不是公司資料，被丟掉了。「公司名稱」抓到的是：{}",
+                len(unique), samples,
+            )
 
         for record in cleaned:
             _, merged = repo.upsert(record)

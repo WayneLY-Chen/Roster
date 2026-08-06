@@ -876,7 +876,9 @@ def test_crawl_pipeline_invokes_progress_callback(db_session, tmp_config, monkey
     seen = []
     pipeline = pipeline_module.CrawlPipeline(tmp_config)
     pipeline.run_source("sample", progress=lambda *args: seen.append(args))
-    assert seen == [("sample", 1, 1)]
+    # 第四個是頁數預算。畫面上要靠它畫出真的進度條——逐項查詢一趟可能一個
+    # 多小時，來回跑的不定進度條只回答得了「有沒有當掉」。
+    assert seen == [("sample", 1, 1, 10)]
 
 
 def test_crawl_pipeline_lazily_builds_and_closes_a_network_fetcher(

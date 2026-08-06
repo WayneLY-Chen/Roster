@@ -206,8 +206,8 @@ def crawl(
 
     from crawler.pipeline import crawl as run_crawl
 
-    def progress(name: str, page: int, stored: int) -> None:
-        console.print(f"  [dim]{name}[/dim] page {page} -- {stored} new so far")
+    def progress(name: str, page: int, stored: int, total: int) -> None:
+        console.print(f"  [dim]{name}[/dim] page {page}/{total} -- {stored} new so far")
 
     try:
         with console.status("[bold green]Crawling..."):

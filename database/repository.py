@@ -1012,6 +1012,21 @@ class CrawlJobRepository:
         stmt = stmt.order_by(CrawlJob.started_at.desc(), CrawlJob.id.desc()).limit(1)
         return self.session.execute(stmt).scalars().first()
 
+    def clear_resume(self, source: str | None = None) -> int:
+        """把「做到哪裡」的紀錄清掉，下一次從頭開始。回傳清了幾筆。
+
+        使用者按「取消」而不是「暫停」時用的。兩顆按鈕的差別就只有這一件事，
+        而它必須真的做得到——否則「取消」跟「暫停」在行為上完全一樣，那就是
+        畫面上多了一顆騙人的按鈕。
+        """
+        stmt = select(CrawlJob).where(CrawlJob.resume_state.is_not(None))
+        if source:
+            stmt = stmt.where(CrawlJob.source == source)
+        jobs = list(self.session.execute(stmt).scalars())
+        for job in jobs:
+            job.resume_state = None
+        return len(jobs)
+
     def last(self) -> CrawlJob | None:
         jobs = self.recent(limit=1)
         return jobs[0] if jobs else None

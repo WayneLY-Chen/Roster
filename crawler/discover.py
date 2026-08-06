@@ -1658,14 +1658,44 @@ def _looks_like_a_directory(result: DiscoveryResult) -> bool:
 _DRILL_ROW_CANDIDATES = ("table tbody tr", "table tr")
 
 
+def _drilled_page_has_companies(html: str, shape: DiscoveryResult) -> bool:
+    """拿已經學會的欄位規則，去看往下點一層之後的頁面上有沒有廠商。
+
+    為什麼不能再叫一次 :func:`discover_from_html`：往下點一層之後那一頁上
+    常常只有一兩家公司（實測 ieatpe 的第一個 HS 分類就只有一家），而「找出
+    重複最多的區塊」在那種頁面上會挑中頁首的導覽選單——八個項目、完美重複，
+    分數比一家公司的表格高。結論是「這條路走不通」，然後把已經點到的那家
+    公司連同整條路線一起丟掉。實際發生過，使用者爬回來 21 筆全是分類代號。
+
+    這裡問的是另一個問題：**已經知道欄位長什麼樣了**（從同一個網站的另一條
+    路線學到的），拿它去套這一頁，套得出公司名稱嗎？套得出來就代表這條路
+    通了，一家也算——往下點一層本來就是一次點一個分類，分類底下有幾家公司
+    是那個分類的事，不是選擇器的事。
+    """
+    selector = shape.list_selector
+    rule = (shape.fields or {}).get("company_name")
+    if not selector or rule is None:
+        return False
+    soup = make_soup(html)
+    for item in soup.select(selector)[:200]:
+        found = item.select_one(rule.selector) if rule.selector else None
+        text = found.get_text(" ", strip=True) if found is not None else ""
+        if text and _has_company_marker(text):
+            return True
+    return False
+
+
 def _try_drilling_one_level(
     probe, url: str, input_selector: str, submit_selector: str,
-    value: str | None, html: str,
+    value: str | None, html: str, shape: DiscoveryResult | None = None,
 ) -> tuple[DiscoveryResult, dict[str, str]] | None:
     """查出來的不是名單時，往下再點一層看看。
 
     有些網站是三層的：選一個大分類 → 出來一張子分類清單 → 點其中一項才看得到
     廠商。中間那一層看起來很像資料，裡面卻一家公司都沒有。
+
+    ``shape`` 是同一個網站另一條路線已經學會的欄位規則。有它的時候用它來判斷
+    （見 :func:`_drilled_page_has_companies`），沒有的話才自己從頭分析一次。
 
     回傳 ``(分析結果, 往下點的設定)``，點了還是沒有名單就回 ``None``。
     """
@@ -1688,10 +1718,15 @@ def _try_drilling_one_level(
             log.info("往下點一層失敗（{}）：{}", row_selector, exc)
             continue
 
+        drill = {"row_selector": row_selector, "click_selector": "a"}
+        if shape is not None and _drilled_page_has_companies(page.html, shape):
+            log.info("往下點一層之後找到廠商（沿用已知欄位）：{}", row_selector)
+            return shape, drill
+
         after = discover_from_html(page.html, page.url)
         if _looks_like_a_directory(after):
             log.info("往下點一層之後找到名單：{}", row_selector)
-            return after, {"row_selector": row_selector, "click_selector": "a"}
+            return after, drill
     return None
 
 
@@ -1704,12 +1739,13 @@ def _analyse_after_one_query(
     if probe is None:
         return before
 
+    select_input = str(form.get("input_selector") or "")
+    select_submit = str(form.get("submit_selector") or "")
+
     attempts: list[tuple[str, str, str | None, str]] = []
-    if form.get("input_selector"):
+    if select_input:
         attempts.append((
-            str(form["input_selector"]),
-            str(form.get("submit_selector") or ""),
-            None,
+            select_input, select_submit, None,
             f"已經自動試查了一次（{form.get('option_count')} 個條件之一）",
         ))
     # 選單那條路查出來未必是廠商——有些網站要再點一層（先給你商品分類，
@@ -1722,6 +1758,10 @@ def _analyse_after_one_query(
                 word,
                 f"已經自動用「{word}」試查了一次",
             ))
+
+    #: 選單那條路查出來的那一頁。它自己走不通的時候先留著——關鍵字那條走通
+    #: 之後，會拿學到的欄位規則回頭再確認一次選單＋往下點一層。
+    select_html: str | None = None
 
     for input_selector, submit_selector, value, note in attempts:
         try:
@@ -1736,23 +1776,42 @@ def _analyse_after_one_query(
         # 廠商，而頁首的導覽選單在任何一頁上都在——只問 ``ok`` 的話，第一次試查
         # 就會帶著一份「加入會員、找商機、認識公會」收工。
         if not _looks_like_a_directory(after):
-            # 只有選單那條路才往下鑽。關鍵字查詢的結果本來就直接是廠商，不是的
-            # 話再點一層多半也沒有用——而每一次試點都是一趟請求，分析是使用者
-            # 盯著進度條在等的。
-            drilled = (
-                _try_drilling_one_level(
-                    probe, url, input_selector, submit_selector, value, page.html
-                )
-                if value is None
-                else None
+            if value is not None:
+                # 關鍵字查詢的結果本來就直接是廠商，不是的話再點一層多半也沒
+                # 有用——而每一次試點都是一趟請求，分析是使用者盯著在等的。
+                continue
+            select_html = page.html
+            drilled = _try_drilling_one_level(
+                probe, url, input_selector, submit_selector, value, page.html
             )
             if drilled is None:
                 continue
             after, drill = drilled
 
+        route = "select" if value is None else "text"
+
+        # 關鍵字那條走通、而選單那條剛剛沒走通的話，回頭再確認一次。
+        #
+        # 這一步是必要的，不是附加價值：欄位長什麼樣是「結果表」的性質，不是
+        # 「走哪一條路」的性質，兩條路最後渲染的是同一張表。少了這一步，分析
+        # 會交出一份自相矛盾的設定——欄位是關鍵字那條學來的，查詢表單卻是選單
+        # 那條的，而讓選單那條能用的 drill 被丟掉了。使用者照著跑，抓回來的
+        # 全是分類代號，一筆都存不進去。實際發生過。
+        if route == "text" and select_html is not None and select_input:
+            drilled = _try_drilling_one_level(
+                probe, url, select_input, select_submit, None, select_html, shape=after
+            )
+            if drilled is not None:
+                _, drill = drilled
+                route = "select"
+                note = f"已經自動試查了一次（{form.get('option_count')} 個條件之一）"
+
         # 查詢表單本身要留著——結果頁上的那個選單可能已經被換過內容了，而使用者
         # 要看到的是「總共有幾個條件可以查」。
         after.query_form = dict(before.query_form or {})
+        # 哪一條路是真的驗證過走得通的。沒有這一項，畫面上會理直氣壯地寫著
+        # 「有 97 個選項，勾起來一個查一次」，而那條路其實是壞的。
+        after.query_form["verified_route"] = route
         if drill:
             after.query_form["drill"] = drill
             after.notes.append(
@@ -1762,10 +1821,10 @@ def _analyse_after_one_query(
         after.notes.append(
             f"這一頁要先查詢才有資料，{note}，下面的欄位是從查詢結果推出來的。"
         )
-        if value is not None:
+        if route == "text":
             after.notes.append(
-                "這個網站是打關鍵字查詢的，勾「逐項查詢」之後要自己填要查哪些字"
-                "（一個字查一次）。"
+                "這個網站的選單查出來不是廠商，只有打關鍵字這條路走得通——"
+                "勾「逐項查詢」之後要自己填要查哪些字（一個字查一次）。"
             )
         return after
 

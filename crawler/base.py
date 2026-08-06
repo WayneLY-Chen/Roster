@@ -78,6 +78,21 @@ class BaseSource(ABC):
         頁碼範圍（``page_start``/``page_end``）不一樣，那是使用者對「這一次
         要爬哪幾頁」的直接指定，仍然要生效。
         """
+        loop = self.source_config.query_loop
+        if loop is not None:
+            # 逐項查詢沒有「頁」這種東西——它的一趟就是「換一組條件查一次」，
+            # 而要查幾組是使用者在 query_loop.max_queries 直接講的。
+            #
+            # 這裡不能退回 max_pages。實際發生過：使用者在選單那一格填了 97，
+            # 但「最多爬幾頁」還停在預設的 3（他從頭到尾沒去動過那一格，那一格
+            # 對這種來源也沒有意義）。兩個數字都在講「總共跑幾趟」，取最小的
+            # 結果是使用者沒填的那個贏了——查到第 3 個就停，畫面上寫著完成。
+            #
+            # 中間還要再點一層的話，一組條件底下的每一列各自算一趟，所以要
+            # 乘上去；真正的煞車是 max_queries 與 drill.max_rows 自己。
+            rows = loop.drill.max_rows if loop.drill is not None else 1
+            return max(1, loop.max_queries * rows)
+
         limits: list[int] = [
             self.source_config.max_pages or self.config.crawler.max_pages
         ]
