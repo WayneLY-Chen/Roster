@@ -153,33 +153,39 @@ class SourceWizardController:
         一個失敗不會拖垮其他的——名錄頁彼此無關，其中一頁改版了不該讓另外
         四頁也加不進來。跳過的原因會一起回報，使用者才知道要不要自己處理。
         """
-        from crawler.discover import discover
+        from crawler.discover import SharedBrowser, discover
 
         added: list[str] = []
         skipped: list[tuple[str, str]] = []
         taken = {str(source.get("name") or "") for source in self.custom_sources()}
         total = len(urls)
 
-        for index, url in enumerate(urls):
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            report({"stage": "adding", "done": index, "total": total, "url": url})
-            try:
-                result = discover(url)
-            except Exception as exc:            # noqa: BLE001 - 逐一回報，不中斷
-                skipped.append((url, str(exc)))
-                continue
+        # 整批共用同一個瀏覽器。每一個網址各開一次 Chromium，光是啟動就 2～4 秒，
+        # 十個就是半分多鐘純粹在等——而且開十次跟開一次拿到的結果一模一樣。
+        browser = SharedBrowser(get_config())
+        try:
+            for index, url in enumerate(urls):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                report({"stage": "adding", "done": index, "total": total, "url": url})
+                try:
+                    result = discover(url, browser=browser)
+                except Exception as exc:        # noqa: BLE001 - 逐一回報，不中斷
+                    skipped.append((url, str(exc)))
+                    continue
 
-            if "company_name" not in result.fields:
-                skipped.append((url, "這一頁抓不到公司名稱"))
-                continue
+                if "company_name" not in result.fields:
+                    skipped.append((url, "這一頁抓不到公司名稱"))
+                    continue
 
-            name = self.suggest_name(url, taken)
-            taken.add(name)
-            try:
-                added.append(self.save(result, name))
-            except Exception as exc:            # noqa: BLE001
-                skipped.append((url, str(exc)))
+                name = self.suggest_name(url, taken)
+                taken.add(name)
+                try:
+                    added.append(self.save(result, name))
+                except Exception as exc:        # noqa: BLE001
+                    skipped.append((url, str(exc)))
+        finally:
+            browser.close()
 
         report({"stage": "adding", "done": total, "total": total, "url": ""})
         return {"added": added, "skipped": skipped}

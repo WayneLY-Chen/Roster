@@ -289,6 +289,9 @@ MUTED = ("#5b6270", "#9aa1ae")
 DANGER = ("#b3261e", "#f2b8b5")
 DANGER_PRESSED = ("#8f1e18", "#c99490")
 SUCCESS = ("#1f7a3f", "#6ddc95")
+#: 「做完了，但有事情要看一下」。跟 DANGER 分開：爬取本身成功了，用紅色會
+#: 讓人以為壞掉。
+WARNING = ("#8a5300", "#f0b76b")
 WINDOW_BG = ("#eef1f6", "#1d1e22")
 TEXT_FG = ("#1a1c20", "#e6e8ec")
 BORDER = ("#d7dce3", "#3a3d44")

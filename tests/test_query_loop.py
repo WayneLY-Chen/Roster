@@ -429,3 +429,83 @@ class _Context:
 
     def new_page(self):
         return self._page
+
+
+# ------------------------------------------------------------ 續跑
+
+
+def _fetcher_with(page):
+    from crawler.fetcher import PlaywrightFetcher
+
+    fetcher = PlaywrightFetcher.__new__(PlaywrightFetcher)   # 不啟動真的瀏覽器
+    fetcher.limiter = _NoWait()
+    fetcher.robots = _AllowAll()
+    fetcher.user_agent = "test"
+    fetcher._settings = _Settings()
+    fetcher._context = _Context(page)
+    return fetcher
+
+
+class _CountingPage(_FakePage):
+    def content(self) -> str:
+        return "<html></html>"
+
+    @property
+    def url(self) -> str:
+        return "https://a.test/q"
+
+
+def test_resuming_skips_the_conditions_already_done():
+    page = _CountingPage()
+    loop = QueryLoop(
+        input_selector="#q",
+        submit_selector="#go",
+        values=["甲", "乙", "丙", "丁"],
+    )
+
+    list(_fetcher_with(page).iter_query_pages("https://a.test/q", loop, skip_values=2))
+
+    # 假的頁面把輸入欄位回報成下拉選單，所以走的是 select_option 那一條。
+    assert page.selected == ["丙", "丁"]
+
+
+def test_the_progress_marker_only_moves_when_a_condition_is_finished():
+    """一個條件底下還有好幾列要往下點的時候，中途那幾批回報的必須是前一個
+    條件——不然接續時會把還沒點完的那一個整個跳過。"""
+    from core.config import ResultDrill
+
+    class _Page(_CountingPage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sub_rows = [_FakeElement(self, f"列{i}") for i in range(2)]
+
+        def query_selector_all(self, selector: str):
+            return list(self.sub_rows) if selector == "tr" else []
+
+    loop = QueryLoop(
+        input_selector="#q",
+        submit_selector="#go",
+        values=["甲", "乙"],
+        drill=ResultDrill(row_selector="tr", max_rows=5),
+    )
+
+    pages = list(_fetcher_with(_Page()).iter_query_pages("https://a.test/q", loop))
+
+    # 甲的兩批都還在 0（甲自己還沒做完），乙的兩批才是 1。
+    assert [p.completed_values for p in pages] == [0, 0, 1, 1]
+
+
+def test_a_condition_that_fails_is_not_retried_forever():
+    """查壞的那一個也算走過了，續跑不要每次都卡在它身上。"""
+
+    class _BrokenPage(_CountingPage):
+        def select_option(self, _selector: str, value: str, force: bool = False) -> None:
+            raise RuntimeError("這一個查不動")
+
+    loop = QueryLoop(
+        input_selector="#q", submit_selector="#go", values=["甲", "乙"]
+    )
+
+    pages = list(_fetcher_with(_BrokenPage()).iter_query_pages("https://a.test/q", loop))
+
+    assert pages == []

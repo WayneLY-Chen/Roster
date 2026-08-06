@@ -70,6 +70,49 @@ def _keep_only(records: list[RawCompany], keep: set[str] | None) -> None:
                 setattr(record, field, None)
 
 
+#: 抓到的筆數掉到上一次的這個比例以下，就當成「這個網站可能改版了」。
+#:
+#: 0.4 是刻意寬鬆的。名錄本來就會增減，有些站每個月換一批廠商；抓到六成
+#: 還在正常範圍。真正要攔的是 0 筆、以及「240 筆變 12 筆」那種斷崖。
+HEALTH_DROP_RATIO = 0.4
+
+
+def _health_warning(job_repo, source: str, job, summary: CrawlSummary) -> str | None:
+    """跟上一次比，這次是不是掉得不合理。
+
+    這是整套爬取最難發現的一種壞掉：網站改版之後選擇器失效，爬取會「成功」
+    地抓到 0 筆，畫面上寫著完成，而排程是半夜自己跑的，沒有人在看。跟上一次
+    比對是唯一能自動看出來的方式，而每一次的筆數本來就都存著了。
+    """
+    # 失敗與取消本來就有自己的訊息，再加一句「抓得比上次少」只是雜訊。
+    if summary.status not in (CrawlStatus.SUCCESS.value, CrawlStatus.PARTIAL.value):
+        return None
+    # 接續上一次的執行本來就只做剩下的部分，筆數少是正常的。
+    if summary.resumed:
+        return None
+
+    try:
+        before = job_repo.last_harvest_for(source, before_id=job.id)
+    except Exception as exc:                  # noqa: BLE001 - 提醒不該弄壞爬取
+        log.debug("讀不到上一次的筆數：{}", exc)
+        return None
+    if not before:
+        return None                            # 第一次跑，沒有東西可以比
+
+    now_found = summary.records_found
+    if now_found == 0:
+        return (
+            f"這次一筆都沒抓到，上一次有 {before} 筆。"
+            "這個網站很可能改版了，請重新分析一次這個來源。"
+        )
+    if now_found < before * HEALTH_DROP_RATIO:
+        return (
+            f"這次只抓到 {now_found} 筆，上一次有 {before} 筆。"
+            "掉這麼多通常代表網站的版面變了，建議重新分析確認一次。"
+        )
+    return None
+
+
 def _apply_default_industry(records: list[RawCompany], default: str) -> int:
     """把來源宣告的產業補到沒有產業的紀錄上，回傳補了幾筆。
 
@@ -251,6 +294,17 @@ class CrawlPipeline:
             job = job_repo.start(source_config.name)
             session.commit()
 
+            # 上一次沒跑完的話從那裡接下去。逐項查詢一趟可能好幾個小時，第 80
+            # 個條件時網路斷一下就整批重來，那是白做工。
+            previous = job_repo.previous_for(source_config.name, before_id=job.id)
+            if previous is not None and previous.resume_state:
+                source.resume_from = previous.resume_state
+                summary.resumed = True
+                log.info(
+                    "{}: 接續上一次未完成的執行（進度 {}）",
+                    source_config.name, previous.resume_state,
+                )
+
             repo = CompanyRepository(session)
             mx = MXChecker(self.config, session) if self.config.verifier.check_mx else None
             cleaner = CleaningService(self.config, mx)
@@ -268,6 +322,10 @@ class CrawlPipeline:
                     _apply_default_industry(batch.records, source_config.default_industry)
                     _keep_only(batch.records, self._fields_for(source_config))
                     self._store_page(batch.records, repo, cleaner, summary)
+                    # 進度跟資料同一個交易寫入。分開寫的話，兩者之間斷電就會
+                    # 出現「進度說做完了、資料卻沒存進去」的空洞。
+                    if batch.resume_key is not None:
+                        job.resume_state = batch.resume_key
                     session.commit()
 
                     if progress is not None:
@@ -300,8 +358,16 @@ class CrawlPipeline:
                 summary.error = f"{type(exc).__name__}: {exc}"
                 log.exception("unexpected error crawling {}", source_config.name)
 
+            summary.warning = _health_warning(job_repo, source_config.name, job, summary)
+            if summary.warning:
+                log.warning("{}: {}", source_config.name, summary.warning)
+
             summary.finished_at = now()
             job_repo.finish(job, summary)
+            # 跑完了就沒有東西可以接續。留著的話下一次會從中間開始，永遠抓不到
+            # 前面那幾頁。
+            if summary.status in (CrawlStatus.SUCCESS.value, CrawlStatus.PARTIAL.value):
+                job.resume_state = None
 
         log.info(
             "crawl finished: {} [{}] {} pages, {} found, {} new, {} merged, "

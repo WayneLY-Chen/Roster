@@ -203,6 +203,9 @@ class CrawlerPage(BasePage):
                 ("merged", "合併", 70),
                 ("dupes", "重複", 70),
                 ("rejected", "拒絕", 80),
+                # 網站改版之後選擇器會失效，爬取「成功」地抓到 0 筆而畫面寫著
+                # 完成。這一欄就是為了讓那件事看得見。
+                ("warning", "提醒", 260),
             ]
         )
         results_section.body_layout.addWidget(self.results_table)
@@ -281,12 +284,29 @@ class CrawlerPage(BasePage):
                     "merged": summary.records_updated,
                     "dupes": summary.records_duplicate,
                     "rejected": summary.records_invalid,
+                    "warning": getattr(summary, "warning", None) or "",
                 }
                 for summary in summaries
             ]
         )
         self._append_log(f"完成 -- 已處理 {len(summaries)} 個來源。")
-        self.status("爬取完成", "success")
+
+        # 表格只有一欄的寬度，訊息一定會被截掉；活動紀錄裡放完整的一句，
+        # 而且要看得出來是哪一個來源。
+        warned = [s for s in summaries if getattr(s, "warning", None)]
+        for summary in warned:
+            self._append_log(f"⚠ [{summary.source}] {summary.warning}")
+        for summary in summaries:
+            if getattr(summary, "resumed", False):
+                self._append_log(
+                    f"[{summary.source}] 這一次是接續上次沒跑完的地方，"
+                    "已經抓過的部分沒有重跑。"
+                )
+
+        if warned:
+            self.status(f"爬取完成，但有 {len(warned)} 個來源需要注意", "warning")
+        else:
+            self.status("爬取完成", "success")
         bump_data_version()
 
     def _on_crawl_error(self, exc: Exception) -> None:

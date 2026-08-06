@@ -326,6 +326,12 @@ class CrawlJob(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    #: 「已經完成到哪裡」，由來源自己定義意義（第幾頁、第幾個查詢條件）。
+    #:
+    #: 沒跑完的執行才有值，跑完就清掉。逐項查詢一趟可能好幾個小時，第 80 個
+    #: 條件時網路斷一下就整批重來，那是白做工——這一欄就是為了不要重來。
+    resume_state: Mapped[str | None] = mapped_column(Text)
+
     def __repr__(self) -> str:
         return f"<CrawlJob id={self.id} source={self.source!r} status={self.status!r}>"
 

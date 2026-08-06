@@ -485,8 +485,13 @@ class StatusBar(QWidget):
         layout.addWidget(self.progress)
 
     def set_message(self, text: str, tone: str = "normal") -> None:
-        """``tone``："normal" | "error" | "success" | "muted"。"""
-        colours = {"error": theme.DANGER, "success": theme.SUCCESS, "muted": theme.MUTED}
+        """``tone``："normal" | "error" | "warning" | "success" | "muted"。"""
+        colours = {
+            "error": theme.DANGER,
+            "warning": theme.WARNING,
+            "success": theme.SUCCESS,
+            "muted": theme.MUTED,
+        }
         colour = colours.get(tone)
         self.message.setText(text)
         self.message.setStyleSheet(f"color: {theme.pick(colour)};" if colour else "")

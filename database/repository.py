@@ -950,6 +950,35 @@ class CrawlJobRepository:
         stmt = select(CrawlJob).order_by(CrawlJob.started_at.desc()).limit(limit)
         return list(self.session.execute(stmt).scalars())
 
+    def previous_for(self, source: str, before_id: int | None = None) -> CrawlJob | None:
+        """這個來源上一次的執行紀錄（不含正在跑的這一次）。
+
+        健康度比對與續跑都要它。``before_id`` 是現在這一次的 id——不排除掉的話
+        比到的是自己。
+        """
+        stmt = select(CrawlJob).where(CrawlJob.source == source)
+        if before_id is not None:
+            stmt = stmt.where(CrawlJob.id != before_id)
+        stmt = stmt.order_by(CrawlJob.started_at.desc(), CrawlJob.id.desc()).limit(1)
+        return self.session.execute(stmt).scalars().first()
+
+    def last_harvest_for(self, source: str, before_id: int | None = None) -> int | None:
+        """這個來源上一次**真的抓到東西**的筆數，沒有就是 None。
+
+        比較的基準要跳過中途取消、失敗、以及本來就抓 0 筆的那些執行——拿一次
+        失敗的執行當基準，等於永遠不會再警告。
+        """
+        stmt = (
+            select(CrawlJob.records_found)
+            .where(CrawlJob.source == source)
+            .where(CrawlJob.records_found > 0)
+            .where(CrawlJob.status.in_([CrawlStatus.SUCCESS.value, CrawlStatus.PARTIAL.value]))
+        )
+        if before_id is not None:
+            stmt = stmt.where(CrawlJob.id != before_id)
+        stmt = stmt.order_by(CrawlJob.started_at.desc(), CrawlJob.id.desc()).limit(1)
+        return self.session.execute(stmt).scalars().first()
+
     def last(self) -> CrawlJob | None:
         jobs = self.recent(limit=1)
         return jobs[0] if jobs else None

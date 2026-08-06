@@ -102,6 +102,14 @@ class GenericHtmlSource(BaseSource):
         first_page = self.source_config.page_start
         last_page = self.source_config.page_end
 
+        # 接續上一次。只有網址帶頁碼的分頁（``query``）跳得過去；``next_link``
+        # 沒有可定址的頁碼，第 5 頁的意思是「跟著下一頁連結走四次」，跳不了。
+        if strategy == "query":
+            resume_page = self._resume_index()
+            if resume_page >= first_page:
+                log.info("{}: 接續上一次，從第 {} 頁開始", self.name, resume_page + 1)
+                first_page = resume_page + 1
+
         # Link-based pagination has no addressable page numbers: reaching page
         # 5 means following four "next" links. So a range starting above 1 has
         # to walk the earlier pages, it just does not collect from them.
@@ -139,7 +147,12 @@ class GenericHtmlSource(BaseSource):
                 records = self._records_for(items, result)
                 records.extend(self._records_from_documents(soup, result.url))
                 log.info("{}: page {} -> {} records", self.name, page_number, len(records))
-                yield PageBatch(page_number=page_number, url=result.url, records=records)
+                yield PageBatch(
+                    page_number=page_number,
+                    url=result.url,
+                    records=records,
+                    resume_key=str(page_number) if strategy == "query" else None,
+                )
                 yielded += 1
             else:
                 log.debug("{}: 略過第 {} 頁（不在指定範圍內）", self.name, page_number)
@@ -180,24 +193,45 @@ class GenericHtmlSource(BaseSource):
                 "這個來源的引擎要設成 playwright。"
             )
 
-        for page_number, result in enumerate(
-            iterate(
-                self.source_config.start_url or "",
-                loop,
-                actions=self.source_config.page_actions,
-                **self._modal_kwargs(),
-            ),
-            start=1,
+        skip = self._resume_index()
+        if skip:
+            log.info("{}: 接續上一次，跳過前 {} 個查詢條件", self.name, skip)
+
+        page_number = 0
+        for result in iterate(
+            self.source_config.start_url or "",
+            loop,
+            actions=self.source_config.page_actions,
+            skip_values=skip,
+            **self._modal_kwargs(),
         ):
+            page_number += 1
             soup = make_soup(result.html)
             items = select_items(soup, self.source_config.list_selector or "")
             records = self._records_for(items, result)
             log.info(
-                "{}: 第 {} 組查詢條件 -> {} 筆", self.name, page_number, len(records)
+                "{}: 第 {} 個查詢狀態 -> {} 筆", self.name, page_number, len(records)
             )
-            yield PageBatch(page_number=page_number, url=result.url, records=records)
+            # ``done`` 是「已經整個做完的查詢條件數」。一個條件底下還有好幾列要
+            # 往下點的時候，中途這幾批回報的仍然是前一個條件——不然接續時會把
+            # 還沒點完的那一個整個跳過。
+            done = getattr(result, "completed_values", None)
+            yield PageBatch(
+                page_number=page_number,
+                url=result.url,
+                records=records,
+                resume_key=None if done is None else str(skip + done),
+            )
             if page_number >= self.page_limit:
                 return
+
+    def _resume_index(self) -> int:
+        """上一次做完的查詢條件數；沒有就是 0。"""
+        try:
+            return max(0, int(self.resume_from or 0))
+        except (TypeError, ValueError):
+            log.warning("{}: 看不懂的續跑進度 {!r}，從頭開始", self.name, self.resume_from)
+            return 0
 
     def _modal_kwargs(self) -> dict:
         """設了「點開小視窗」才多傳這兩個參數。

@@ -260,6 +260,9 @@ class FetchResult:
     #: 逐列點開的小視窗內容，順序與清單上的每一列一一對應。
     #: 只有來源設了 ``detail_modal`` 時才會有東西。
     details: list[str] = field(default_factory=list)
+    #: 逐項查詢用：到這一份結果為止，**已經整個做完**幾個查詢條件。
+    #: 中斷續跑靠它，所以它只在一個條件底下的東西全部處理完才前進。
+    completed_values: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -639,6 +642,7 @@ class PlaywrightFetcher(BaseFetcher):
         cancel_event: Any = None,
         modal: Any = None,
         list_selector: str | None = None,
+        skip_values: int = 0,
     ) -> Iterator[FetchResult]:
         """開一次頁面，把每一組查詢條件各查一次，每查一次交出一份結果 HTML。
 
@@ -665,6 +669,14 @@ class PlaywrightFetcher(BaseFetcher):
                     "既不是下拉選單，來源也沒有指定要查哪些值。"
                 )
 
+            # 接續上一次：前面那些條件已經整個做完了，不必再查一遍。
+            if skip_values:
+                log.info("逐項查詢接續上一次，跳過前 {} 個條件", skip_values)
+                values = values[skip_values:]
+
+            # 已經**整個做完**幾個條件。中斷續跑靠它，所以它只在一個條件底下的
+            # 東西全部處理完之後才前進——不然接續時會跳過還沒點完的那一個。
+            completed = 0
             for value in values[: loop.max_queries]:
                 if cancel_event is not None and cancel_event.is_set():
                     return
@@ -674,10 +686,12 @@ class PlaywrightFetcher(BaseFetcher):
                 except Exception as exc:      # noqa: BLE001 - 一個條件查壞了
                     # 不要讓 98 個分類裡的第 7 個失敗，害其餘 91 個都收不到。
                     log.warning("逐項查詢「{}」失敗：{}", value, exc)
+                    completed += 1   # 查壞的也算走過了，續跑不要卡在它身上
                     continue
                 drill = getattr(loop, "drill", None)
                 if drill is None:
-                    yield self._snapshot(page, modal, list_selector)
+                    yield self._snapshot(page, modal, list_selector, completed)
+                    completed += 1
                     continue
 
                 # 查詢結果還不是名單，中間要再點一層。
@@ -699,11 +713,18 @@ class PlaywrightFetcher(BaseFetcher):
                     except Exception as exc:  # noqa: BLE001 - 一列點不開
                         log.debug("往下點第 {} 列失敗：{}", index + 1, exc)
                         continue
-                    yield self._snapshot(page, modal, list_selector)
+                    yield self._snapshot(page, modal, list_selector, completed)
+                completed += 1
         finally:
             page.close()
 
-    def _snapshot(self, page: Any, modal: Any, list_selector: str | None) -> FetchResult:
+    def _snapshot(
+        self,
+        page: Any,
+        modal: Any,
+        list_selector: str | None,
+        completed: int | None = None,
+    ) -> FetchResult:
         """把頁面目前的狀態交出去（需要的話連同每一列點開的小視窗）。"""
         details = (
             _collect_modal_details(page, modal, list_selector or "")
@@ -711,7 +732,11 @@ class PlaywrightFetcher(BaseFetcher):
             else []
         )
         return FetchResult(
-            url=page.url, status_code=200, html=page.content(), details=details
+            url=page.url,
+            status_code=200,
+            html=page.content(),
+            details=details,
+            completed_values=completed,
         )
 
     def close(self) -> None:

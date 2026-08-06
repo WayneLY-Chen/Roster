@@ -198,6 +198,16 @@ class CrawlSummary(BaseModel):
     finished_at: datetime | None = None
     error: str | None = None
 
+    #: 「這次抓到的比上次少很多」的提醒。
+    #:
+    #: 整套爬取建立在 CSS 選擇器上，網站一改版就會「成功」地抓到 0 筆，而畫面
+    #: 上寫著完成——這是最難發現的一種壞掉，尤其排程是半夜自己跑的。跟上一次
+    #: 比對是唯一能自動看出來的方式。
+    warning: str | None = None
+    #: 這一次是接續上一次沒跑完的地方。爬得久的來源（逐項查詢動輒幾小時）
+    #: 中途斷掉不該整批重來。
+    resumed: bool = False
+
     @property
     def duration_seconds(self) -> float:
         if not (self.started_at and self.finished_at):

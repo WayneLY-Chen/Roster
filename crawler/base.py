@@ -24,6 +24,12 @@ class PageBatch:
     page_number: int
     url: str
     records: list[RawCompany] = field(default_factory=list)
+    #: 「到這一批為止，已經完成到哪裡」，意義由來源自己定義（第幾頁、第幾個
+    #: 查詢條件）。``None`` 代表這個來源沒辦法從中間接續。
+    #:
+    #: 只在**完全做完**的進度上前進：一個查詢條件底下還有好幾層要點的時候，
+    #: 中途那幾批要回報的是「前一個條件」，否則接續時會跳過還沒做完的部分。
+    resume_key: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -47,6 +53,9 @@ class BaseSource(ABC):
         self.source_config = source_config
         self.config = config or get_config()
         self.fetcher = fetcher
+        #: 上一次沒跑完時留下的進度。管線在 :meth:`iter_pages` 之前設好，
+        #: 來源自己決定要怎麼跳過已經做完的部分。
+        self.resume_from: str | None = None
 
     @property
     def name(self) -> str:

@@ -1515,10 +1515,43 @@ def _add_quality_notes(result: DiscoveryResult) -> None:
         result.notes.append("統一編號欄位沒有抓到任何值。")
 
 
+class SharedBrowser:
+    """一個共用的瀏覽器，用到才開，用完由呼叫端關掉。
+
+    一次加入十個名錄時，每一個 :func:`discover` 各自開一次 Chromium——光是啟動
+    就 2～4 秒，十個就是半分多鐘純粹在等。這個類別讓那一整批共用同一個。
+    """
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+        self._fetcher: BaseFetcher | None = None
+        #: 開失敗過就不再試。沒裝瀏覽器是正常情況，不必每一個網址都重試一次
+        #: 並且各自印一行警告。
+        self._unavailable = False
+
+    def get(self) -> BaseFetcher | None:
+        if self._unavailable:
+            return None
+        if self._fetcher is None:
+            try:
+                self._fetcher = build_fetcher(self._config, engine="playwright")
+            except Exception as exc:          # noqa: BLE001 - 沒裝是正常情況
+                log.info("no browser engine available: {}", exc)
+                self._unavailable = True
+                return None
+        return self._fetcher
+
+    def close(self) -> None:
+        if self._fetcher is not None:
+            self._fetcher.close()
+            self._fetcher = None
+
+
 def discover(
     url: str,
     config: AppConfig | None = None,
     fetcher: BaseFetcher | None = None,
+    browser: "SharedBrowser | None" = None,
 ) -> DiscoveryResult:
     """Fetch ``url`` and work out how to scrape it.
 
@@ -1574,7 +1607,7 @@ def discover(
     # ``owned`` 才重試：呼叫端自己塞 fetcher 進來（測試、站內探索）時，它要的
     # 就是那一個，不該被我們偷換成瀏覽器。
     if not result.ok and owned:
-        retried = _retry_in_a_browser(url, config, result)
+        retried = _retry_in_a_browser(url, config, result, browser)
         if retried is not None:
             return retried
 
@@ -1740,22 +1773,33 @@ def _analyse_after_one_query(
 
 
 def _retry_in_a_browser(
-    url: str, config: AppConfig, before: DiscoveryResult
+    url: str,
+    config: AppConfig,
+    before: DiscoveryResult,
+    shared: "SharedBrowser | None" = None,
 ) -> DiscoveryResult | None:
     """用瀏覽器重新分析一次；沒有比較好就回傳 None。
 
     「比較好」有兩種：抓到了原本沒有的清單，或是看到了原本看不到的查詢選單
     （選單的選項本身也常常是 JavaScript 填上去的）。瀏覽器版比較慢也比較容易
     出錯，拿它換一個同樣的結果沒有意義。
+
+    ``shared`` 是一批網址共用的瀏覽器。一次加入十個名錄時，各開一次 Chromium
+    光啟動就要多花半分鐘。給了就借來用，關掉是呼叫端的事。
     """
     if config.crawler.engine == "playwright":
         return None                       # 剛剛那一次就已經是瀏覽器了
 
-    try:
-        browser = build_fetcher(config, engine="playwright")
-    except Exception as exc:              # noqa: BLE001 - 沒裝瀏覽器是正常情況
-        log.info("no browser engine available for the retry: {}", exc)
-        return None
+    if shared is not None:
+        browser = shared.get()
+        if browser is None:
+            return None
+    else:
+        try:
+            browser = build_fetcher(config, engine="playwright")
+        except Exception as exc:          # noqa: BLE001 - 沒裝瀏覽器是正常情況
+            log.info("no browser engine available for the retry: {}", exc)
+            return None
 
     try:
         page = browser.fetch(url)
@@ -1770,7 +1814,8 @@ def _retry_in_a_browser(
         log.warning("browser retry failed: {}", exc)
         return None
     finally:
-        browser.close()
+        if shared is None:
+            browser.close()
 
     better_list = result.ok
     before_options = int((before.query_form or {}).get("option_count", 0) or 0)
