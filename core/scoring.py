@@ -122,6 +122,28 @@ def _is_defunct(company: Any) -> bool:
     return any(word in status for word in _DEAD_STATUS_WORDS)
 
 
+#: 每一項最多能拿幾分。畫面上要講「還缺什麼、補了會加幾分」時用它。
+#:
+#: 只寫一份。分數旁邊列出「還缺：電子信箱 +40」而配分表其實是 35 的話，
+#: 使用者照著補完會發現數字對不起來，那比不寫還糟。
+MAX_POINTS: dict[str, int] = {
+    "信箱": 40,
+    "電話": 20,
+    "資本額": 15,
+    "資料新舊": 10,
+    "網站": 5,
+    "聯絡人": 5,
+    "地址": 3,
+    "統一編號": 2,
+}
+
+#: 缺這一項的時候，要跟使用者說「去哪裡補」。
+HOW_TO_FILL: dict[str, str] = {
+    "信箱": "爬取頁的「補抓信箱」會去公司自己的網站找",
+    "資本額": "爬取頁的「補公司登記資料」會用統一編號查回來",
+}
+
+
 def explain(company: Any, now: datetime | None = None) -> list[tuple[str, int]]:
     """分數的組成，照配分由大到小。給詳細資料視窗顯示用。
 

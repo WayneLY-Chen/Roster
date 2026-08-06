@@ -60,7 +60,7 @@ from core.i18n import (
     to_value,
 )
 from core.legal import OPEN_DATA_ATTRIBUTION
-from core.scoring import explain, lead_score
+from core.scoring import HOW_TO_FILL, MAX_POINTS, explain, lead_score
 from gui_qt import theme
 from gui_qt.pages.base import bump_data_version
 from gui_qt.widgets import CaptionedControl, DataTable, LabeledEntry, WideComboBox, caption
@@ -307,15 +307,46 @@ class CompanyDetailDialog(QDialog):
         寫，使用者才知道「要提高它，下一步該補什麼」。
         """
         grid.addWidget(caption("名單品質"), row, 0, 1, 2)
+
+        # 這一區要先回答「這個數字是幹嘛的」。只丟一個 10/100 出來，使用者
+        # 看到的是一個沒有用途的分數——實際被問過。
+        purpose = QLabel(
+            "這是排序用的。「公司」頁右邊的「排序」選「名單品質」，"
+            "分數高的排前面，先聯絡真的聯絡得上的那些。"
+        )
+        purpose.setObjectName("MutedLabel")
+        purpose.setWordWrap(True)
+        grid.addWidget(purpose, row + 1, 0, 1, 2)
+
         self.quality_label = QLabel(NO_DATA)
-        self.quality_label.setObjectName("MutedLabel")
         self.quality_label.setWordWrap(True)
-        grid.addWidget(self.quality_label, row + 1, 0, 1, 2)
+        grid.addWidget(self.quality_label, row + 2, 0, 1, 2)
 
     def _refresh_quality(self, company) -> None:
         score = lead_score(company)
-        parts = [f"{name} {points}" for name, points in explain(company) if points]
-        lines = [f"{score} / 100" + (f"（{'、'.join(parts)}）" if parts else "")]
+        items = explain(company)
+        earned = [(name, points) for name, points in items if points > 0]
+        # 一票否決（已解散、標記不再聯絡）是負分，要單獨講，不能混進「還缺」。
+        vetoed = [name for name, points in items if points < 0]
+
+        lines = [f"<b>{score} / 100</b>"]
+        if earned:
+            lines.append("目前得分：" + "、".join(f"{n} {p}" for n, p in earned))
+
+        if vetoed:
+            lines.append(f"⚠ {vetoed[0]}——這一筆被壓到最低，不會排在前面。")
+        else:
+            # 缺什麼、補了會加幾分。只列已得分的話，使用者看得到分數卻不知道
+            # 怎麼往上拉；列出缺口才是可以動手的資訊。
+            got = {name for name, _ in earned}
+            missing = [
+                f"{name} +{MAX_POINTS[name]}"
+                + (f"（{HOW_TO_FILL[name]}）" if name in HOW_TO_FILL else "")
+                for name in MAX_POINTS
+                if name not in got
+            ]
+            if missing:
+                lines.append("還缺：" + "、".join(missing))
 
         if company.registration_status:
             detail = f"登記狀態：{company.registration_status}"
@@ -330,7 +361,7 @@ class CompanyDetailDialog(QDialog):
         elif company.tax_id:
             lines.append("還沒查過公司登記資料。到「爬取」頁按「補公司登記資料」。")
 
-        self.quality_label.setText("\n".join(lines))
+        self.quality_label.setText("<br>".join(lines))
 
     # -- 其他欄位 ---------------------------------------------------------
 
