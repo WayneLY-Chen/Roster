@@ -149,6 +149,7 @@ class _FakeSourceController:
         page_end=None,
         engine=None,
         query_loop=None,
+        detail_modal=None,
     ):
         built = {
             "url": url,

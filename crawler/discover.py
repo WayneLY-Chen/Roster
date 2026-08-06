@@ -26,10 +26,18 @@ from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
-from core.config import AppConfig, FieldRule, PaginationRule, SourceConfig, get_config
+from core.config import (
+    AppConfig,
+    DetailModal,
+    FieldRule,
+    PaginationRule,
+    SourceConfig,
+    get_config,
+)
 from core.constants import LogCategory
 from core.errors import CrawlError
 from core.logging_setup import get_logger
+from core.i18n import FIELD_LABELS
 from core.schemas import RawCompany
 from crawler.documents import KIND_BY_KEY
 from crawler.fetcher import BaseFetcher, build_fetcher, decode_bytes
@@ -128,6 +136,12 @@ class DiscoveryResult:
     #: 沒有名單、是開了瀏覽器跑完 JavaScript 才出現的，這個來源之後也必須這樣
     #: 爬。None 代表用一般的方式就看得到。
     engine: str | None = None
+    #: 明細是「點一下跳出來的小視窗」時的設定，
+    #: ``{"click_selector", "panel_selector", "close_selector", "sample_fields"}``。
+    #:
+    #: 這一類名錄的清單上只有公司名稱，電話、信箱、負責人全在那一塊裡面。
+    #: 偵測不到就是 ``None``——那代表這個網站沒有這種東西，不是失敗。
+    detail_modal: dict[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -152,6 +166,19 @@ class DiscoveryResult:
             if self.detail_link_selector
             else None
         )
+        modal = None
+        if self.detail_modal:
+            # sample_fields 只是分析時拿來確認「裡面真的是聯絡資料」的證據，
+            # 給使用者看的，不是設定的一部分——不要送進 SourceConfig。
+            modal = DetailModal(
+                click_selector=str(self.detail_modal.get("click_selector") or "a"),
+                panel_selector=str(self.detail_modal.get("panel_selector") or ""),
+                close_selector=(
+                    str(self.detail_modal.get("close_selector"))
+                    if self.detail_modal.get("close_selector")
+                    else None
+                ),
+            )
         return SourceConfig(
             name=name,
             type="generic_html",
@@ -161,6 +188,7 @@ class DiscoveryResult:
             pagination=pagination,
             fields={key: guess.to_rule() for key, guess in self.fields.items()},
             detail_link=detail_link,
+            detail_modal=modal,
             label=name,
             encoding=self.encoding,
             engine=self.engine,
@@ -1560,6 +1588,7 @@ DISCOVERY_STEPS: tuple[str, ...] = (
     "用瀏覽器再看一次（這一頁的資料是載入後才填上去的）",
     "試查一次，看查詢結果長什麼樣",
     "往下點一層，確認裡面是不是廠商",
+    "點開第一筆，看詳細資料是不是小視窗",
     "整理欄位與預覽",
 )
 
@@ -1645,10 +1674,10 @@ def discover(
     if not result.ok and owned:
         retried = _retry_in_a_browser(url, config, result, browser, progress)
         if retried is not None:
-            _step(progress, DISCOVERY_STEPS[5])
+            _step(progress, DISCOVERY_STEPS[6])
             return retried
 
-    _step(progress, DISCOVERY_STEPS[5])
+    _step(progress, DISCOVERY_STEPS[6])
     log.info(
         "discovery: list={!r} items={} fields={}",
         result.list_selector, result.item_count, sorted(result.fields),
@@ -1877,6 +1906,48 @@ def _analyse_after_one_query(
     return before
 
 
+def _probe_detail_modal(
+    browser: BaseFetcher, url: str, result: DiscoveryResult
+) -> dict[str, object] | None:
+    """點開第一筆，看詳細資料是不是一個跳出來的小視窗。
+
+    要在「清單真的出現了」的那一頁上點。查詢型的名錄還沒查詢之前一筆都沒有，
+    所以要重走一次查詢（必要時連往下點一層一起），到得了廠商清單才點得下去。
+
+    偵測不到就回 ``None``，而那多半代表這個網站沒有這種東西——明細在另一個
+    網址上，或者清單頁本來就寫齊了。那不是失敗，不要在畫面上報錯。
+    """
+    selector = result.list_selector
+    if not selector:
+        return None
+
+    form = result.query_form or {}
+    try:
+        if form.get("input_selector"):
+            probe = getattr(browser, "fetch_with_first_query", None)
+            if probe is None:
+                return None
+            drill = form.get("drill") or {}
+            page = probe(
+                url,
+                str(form.get("input_selector") or ""),
+                str(form.get("submit_selector") or ""),
+                value=None,
+                drill_row_selector=str(drill.get("row_selector") or "") or None,
+                drill_click_selector=str(drill.get("click_selector") or "a"),
+                probe_modal_for=selector,
+            )
+            return page.modal_probe
+
+        simple = getattr(browser, "probe_detail_modal", None)
+        if simple is None:
+            return None
+        return simple(url, selector)
+    except Exception as exc:                  # noqa: BLE001 - 這一步是加分的
+        log.info("試點第一筆看有沒有小視窗時失敗：{}", exc)
+        return None
+
+
 def _retry_in_a_browser(
     url: str,
     config: AppConfig,
@@ -1917,6 +1988,15 @@ def _retry_in_a_browser(
         # 一次查詢再分析結果，跟人打開網頁隨便選一個分類按下去是一樣的動作。
         if result.query_form and not _looks_like_a_directory(result):
             result = _analyse_after_one_query(browser, url, result, progress)
+
+        # 明細是不是「點一下跳出來的小視窗」。
+        #
+        # 這一步非做不可：有一整類名錄的清單上只有公司名稱，電話、信箱、
+        # 負責人全在那一塊裡面。少了它，抓回來的每一筆都只有名字——資料看
+        # 起來有進來，實際上全是空的。實際遇到過。
+        if result.ok:
+            _step(progress, DISCOVERY_STEPS[6])
+            result.detail_modal = _probe_detail_modal(browser, url, result)
     except Exception as exc:              # noqa: BLE001
         log.warning("browser retry failed: {}", exc)
         return None
@@ -1930,6 +2010,17 @@ def _retry_in_a_browser(
     better_form = after_options > before_options
     if not (better_list or better_form):
         return None
+
+    if result.detail_modal:
+        found = "、".join(
+            FIELD_LABELS.get(str(f), str(f))
+            for f in (result.detail_modal.get("sample_fields") or [])
+        )
+        result.notes.append(
+            "這個名錄的詳細資料是「點一下跳出來的小視窗」，清單上只有公司名稱。"
+            + (f"已經點開確認過，裡面有：{found}。" if found else "")
+            + "爬取時會逐筆點開讀完再關掉（每一筆都是一次往返，會慢很多）。"
+        )
 
     result.engine = "playwright"
     result.notes.append(

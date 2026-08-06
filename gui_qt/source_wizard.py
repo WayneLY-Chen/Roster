@@ -229,6 +229,8 @@ class SourceWizardDialog(QDialog):
         self._detected_engine: str | None = None
         #: 分析時偵測到的查詢選單（要先選條件才有資料的那種）。
         self._query_form: dict = {}
+        #: 分析時偵測到的明細小視窗（點一下跳出來、電話信箱都在裡面的那種）。
+        self._detail_modal: dict | None = None
         #: 正在編輯的是哪一個已存來源；``None`` 代表這是新增。
         #: 改了名字的話，儲存時要順手把舊的那一份收掉，否則會多出一個孤兒。
         self._editing_source: str | None = None
@@ -1168,6 +1170,7 @@ class SourceWizardDialog(QDialog):
         # 分析時發現「要開瀏覽器才看得到」的話，這個來源存下去也要記住這件事，
         # 否則存完第一次爬取又會是空的。
         self._detected_engine = getattr(result, "engine", None)
+        self._detail_modal = getattr(result, "detail_modal", None)
         self._apply_query_form(getattr(result, "query_form", None))
         self._suggested_actions = list(getattr(result, "suggested_actions", []))
         self.click_check.setEnabled(bool(self._suggested_actions))
@@ -1268,6 +1271,7 @@ class SourceWizardDialog(QDialog):
         self.last_url = url
         self.name_entry.set(str(entry.get("name") or ""))
         self._detected_engine = entry.get("engine") or None
+        self._detail_modal = entry.get("detail_modal") or None
 
         self.list_selector_entry.set(str(entry.get("list_selector") or ""))
         pagination = entry.get("pagination") or {}
@@ -1608,6 +1612,7 @@ class SourceWizardDialog(QDialog):
                 page_end=page_end,
                 engine=self._detected_engine,
                 query_loop=query_loop,
+                detail_modal=self._detail_modal,
             )
             saved_name = self.controller.save(source, name, enabled=True)
             # 編輯時把名字改掉的話，舊的那一份還躺在設定檔裡（儲存是照名字

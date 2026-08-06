@@ -58,6 +58,26 @@ def _build_query_loop(query_loop_cls, drill_cls, raw: dict | None):
     return loop
 
 
+def _build_detail_modal(modal_cls, raw: dict | None):
+    """把介面交來的字典變成 :class:`~core.config.DetailModal`。
+
+    ``sample_fields`` 要濾掉：那是分析時「裡面真的是聯絡資料」的證據，給使用者
+    看的，不是設定的一部分。連同它一起丟進去會被 ``extra="forbid"`` 擋下來，
+    而錯誤訊息看起來會像是選擇器有問題。
+    """
+    if not raw:
+        return None
+    panel = str(raw.get("panel_selector") or "").strip()
+    if not panel:
+        return None
+    close = raw.get("close_selector")
+    return modal_cls(
+        click_selector=str(raw.get("click_selector") or "a").strip() or "a",
+        panel_selector=panel,
+        close_selector=str(close).strip() if close else None,
+    )
+
+
 class SourceWizardController:
     """Discovery, editing, and persistence for one custom crawl source."""
 
@@ -213,6 +233,7 @@ class SourceWizardController:
         page_end: int | None = None,
         engine: str | None = None,
         query_loop: dict | None = None,
+        detail_modal: dict | None = None,
     ) -> SourceConfig:
         """Turn user-edited selectors into a validated :class:`SourceConfig`.
 
@@ -221,6 +242,7 @@ class SourceWizardController:
         company-name rule, or a selector pydantic itself rejects.
         """
         from core.config import (
+            DetailModal,
             FieldRule,
             PageAction,
             PaginationRule,
@@ -261,7 +283,8 @@ class SourceWizardController:
 
         # 逐項查詢一定要用瀏覽器：填欄位、按按鈕這些事 httpx 做不到。使用者勾了
         # 卻沒生效的話，他看到的只會是「怎麼還是只有一頁」，而且沒有任何線索。
-        chosen_engine = engine or ("playwright" if query_loop else None)
+        # 明細小視窗同樣非瀏覽器不可——要點得下去才讀得到裡面的東西。
+        chosen_engine = engine or ("playwright" if (query_loop or detail_modal) else None)
 
         # Detail-page following has to survive an edit. Directories that list
         # only names keep the e-mail one click away, so dropping this silently
@@ -293,6 +316,7 @@ class SourceWizardController:
                 page_end=page_end,
                 engine=chosen_engine,
                 query_loop=_build_query_loop(QueryLoop, ResultDrill, query_loop),
+                detail_modal=_build_detail_modal(DetailModal, detail_modal),
             )
         except ValidationError as exc:
             raise SourceConfigError(f"來源設定無效：{exc}") from exc

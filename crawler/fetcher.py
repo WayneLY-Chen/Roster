@@ -233,9 +233,17 @@ def _collect_modal_details(page: Any, modal: Any, list_selector: str) -> list[st
     這件事非做不可：資料是靠位置對回去的，失敗時如果直接跳過不放，後面每一
     筆的聯絡資訊都會錯位到別人家去——而且看起來完全正常。
     """
+    expected = len(page.query_selector_all(list_selector))
     rows = page.query_selector_all(list_selector)[: modal.max_rows]
     details: list[str] = []
     for index, row in enumerate(rows):
+        # 頁面在中途被換掉了（有些網站點某一列等於再往下鑽一層）。再點下去
+        # 的東西已經不是原本那幾列，硬做下去會把別人的電話掛到這一筆頭上。
+        # 停下來、其餘留空——少一點資料，比錯的資料好。
+        if len(page.query_selector_all(list_selector)) != expected:
+            log.info("清單在讀取詳細視窗的途中變了，其餘幾列不再點開")
+            details.extend([""] * (len(rows) - index))
+            break
         try:
             target = row.query_selector(modal.click_selector)
             if target is None:
@@ -250,6 +258,198 @@ def _collect_modal_details(page: Any, modal: Any, list_selector: str) -> list[st
             log.debug("第 {} 列的詳細視窗打不開：{}", index + 1, exc)
             details.append("")
     return details
+
+
+#: 找得出「彈出來的那一塊」的候選寫法。涵蓋 Bootstrap、各家 UI 框架與手寫的。
+_PANEL_HINTS = (
+    "[role=dialog]", "[class*=modal]", "[class*=dialog]",
+    "[class*=popup]", "[class*=lightbox]",
+)
+
+#: 在瀏覽器裡跑，回報每一個候選容器的「選擇器、看不看得見、有多少字」。
+#:
+#: 為什麼要自己算選擇器：Playwright 沒有「把這個元素轉回 CSS 選擇器」的東西，
+#: 而我們要存進來源設定的正是那一段字串——爬取時是另一個行程、另一次載入，
+#: 手上只會有選擇器，不會有這一次的元素物件。
+_PANEL_PROBE_JS = """
+(hints) => {
+  const escape = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s;
+  const out = [];
+  for (const el of document.querySelectorAll(hints.join(','))) {
+    // <body> 要排除。Bootstrap 開啟彈窗時會把 modal-open 加在 body 上，
+    // 它於是符合 [class*=modal]——挑到它的話，每一筆讀到的是整頁的文字。
+    if (el === document.body || el === document.documentElement) continue;
+    let css = '';
+    if (el.id) {
+      css = '#' + escape(el.id);
+    } else if (typeof el.className === 'string' && el.className.trim()) {
+      const classes = el.className.trim().split(/\\s+/).filter(Boolean);
+      css = el.tagName.toLowerCase() + classes.map(c => '.' + escape(c)).join('');
+    }
+    if (!css) continue;
+    const box = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    const visible = box.width > 120 && box.height > 60
+      && style.display !== 'none' && style.visibility !== 'hidden'
+      && style.opacity !== '0';
+    out.push({css, visible, chars: (el.innerText || '').trim().length});
+  }
+  return out;
+}
+"""
+
+#: 關掉小視窗的那顆按鈕，文字長這樣。
+_CLOSE_WORDS = ("確定", "關閉", "close", "ok", "×", "✕", "x")
+
+#: 分析時最多試點幾列來找小視窗。
+#:
+#: 每一下都是對別人網站的一次互動，所以要有上限；但只試一列不夠——清單選擇器
+#: 常常是 ``tr`` 這種很寬的東西，第一列可能是表頭，也可能是「還要再點一層」的
+#: 子分類（ieatpe 就是），點下去是往下鑽而不是開視窗。
+_MODAL_PROBE_ROWS = 4
+
+
+def _panels(page: Any) -> dict[str, dict[str, Any]]:
+    """目前頁面上每一個候選彈出容器的狀態，以選擇器為 key。"""
+    try:
+        found = page.evaluate(_PANEL_PROBE_JS, list(_PANEL_HINTS))
+    except Exception as exc:                  # noqa: BLE001
+        log.debug("讀不到頁面上的彈出容器：{}", exc)
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in found or []:
+        css = str(item.get("css") or "")
+        if css and css not in result:
+            result[css] = item
+    return result
+
+
+def _find_close_button(page: Any, panel_selector: str) -> str | None:
+    """小視窗裡那顆關閉鈕的選擇器；找不到就回 ``None``（改按 Esc）。
+
+    盡量找得到它：Esc 不是每個網站都吃，而關不掉的話下一列點下去會被這一個
+    蓋住——結果是第 2 筆之後全部讀到同一份內容，而且看起來完全正常。
+    """
+    for candidate in ("button", "a", "[class*=close]"):
+        selector = f"{panel_selector} {candidate}"
+        try:
+            elements = page.query_selector_all(selector)
+        except Exception:                     # noqa: BLE001
+            continue
+        for element in elements:
+            try:
+                text = (element.inner_text() or "").strip().lower()
+                classes = (element.get_attribute("class") or "").lower()
+            except Exception:                 # noqa: BLE001
+                continue
+            if any(word in text for word in _CLOSE_WORDS) or "close" in classes:
+                return selector
+    return None
+
+
+def _detect_detail_modal(
+    page: Any, list_selector: str, click_selector: str = "a"
+) -> dict[str, Any] | None:
+    """點第一列看看會不會跳出小視窗，會的話把它的設定描述出來。
+
+    有一整類名錄的明細沒有網址：清單上只有公司名稱，電話、信箱、負責人全在
+    「點一下跳出來的那一塊」裡面。不做這一步的話，抓回來的每一筆都只有名字
+    ——資料看起來有進來，實際上全是空的。
+
+    判斷方式是「點之前看不見、點之後看得見」，而不是「頁面上有沒有 class 帶
+    modal 的東西」：那種容器在很多網站上一直都在（藏著），光看存不存在會把
+    cookie 提示、登入視窗都認成明細。
+
+    認出來之後還要確認**裡面真的是聯絡資料**——用讀名錄那一套去拆，至少要拆得
+    出兩個看得懂的欄位。少了這一關，一個純圖片的廣告彈窗也會被存成明細設定。
+    """
+    # 不能只試第一列。清單選擇器常常是 ``tr`` 這種很寬的東西，而同一頁上可能
+    # 還有表頭、或是「還要再點一層」的子分類表——ieatpe 的第一個 tr 點下去是
+    # 往下鑽，不是開小視窗。試了才知道，所以多試幾列。
+    #
+    # 而且「點了沒有小視窗」本身常常是有進展的：那一下把子分類換成了廠商清單，
+    # 下一次試就點得到真正的公司了。所以每一輪都重新查一次列。
+    appeared: list[tuple[str, dict[str, Any]]] = []
+    for attempt in range(_MODAL_PROBE_ROWS):
+        rows = page.query_selector_all(list_selector)
+        if not rows:
+            return None
+        target = None
+        for row in rows[attempt:]:
+            found = row.query_selector(click_selector)
+            if found is not None:
+                target = found
+                break
+        if target is None:
+            return None
+
+        before = _panels(page)
+        try:
+            _click_even_if_hidden(target)
+            page.wait_for_timeout(900)
+        except Exception as exc:              # noqa: BLE001
+            log.debug("第 {} 次試點失敗：{}", attempt + 1, exc)
+            return None
+
+        after = _panels(page)
+        appeared = [
+            (css, item)
+            for css, item in after.items()
+            if item.get("visible") and not before.get(css, {}).get("visible")
+        ]
+        if appeared:
+            break
+    if not appeared:
+        return None
+
+    # 挑「最小的、但裡面確實有聯絡資料」的那一層。
+    #
+    # 一個彈窗通常是好幾層巢狀的容器（.modal > .modal-dialog > .modal-content
+    # > .modal-body），字數由外而內遞減但內容差不多。挑最大的那一層等於把外框
+    # 與按鈕文字一起讀進來；由小到大找第一個拆得出欄位的，拿到的才是真正裝
+    # 資料的那一塊。
+    from crawler.labels import parse_record
+
+    panel_selector = ""
+    record = None
+    for css, _item in sorted(appeared, key=lambda pair: pair[1].get("chars", 0)):
+        panel = page.query_selector(css)
+        if panel is None:
+            continue
+        try:
+            text = panel.inner_text() or ""
+        except Exception:                     # noqa: BLE001
+            continue
+        candidate = parse_record(text)
+        if candidate.pair_count >= 2:
+            panel_selector, record = css, candidate
+            break
+
+    if record is None:
+        log.info("點開了一塊東西，但裡面看不出是聯絡資料，不當成明細視窗")
+        return None
+
+    # 關閉鈕不一定在讀資料的那一塊裡面——Bootstrap 的「確定」在 .modal-footer，
+    # 跟 .modal-body 是兄弟。所以整組彈出來的容器都找一遍，由外而內。
+    #
+    # 找得到很重要：Esc 不是每個網站都吃，關不掉的話下一列點下去會被這一個
+    # 蓋住，第 2 筆之後全部讀到同一份內容，而且看起來完全正常。
+    close_selector = None
+    for css, _item in sorted(
+        appeared, key=lambda pair: pair[1].get("chars", 0), reverse=True
+    ):
+        close_selector = _find_close_button(page, css)
+        if close_selector:
+            break
+    log.info(
+        "找到明細小視窗：{}（拆得出 {} 個欄位）", panel_selector, record.pair_count
+    )
+    return {
+        "click_selector": click_selector,
+        "panel_selector": panel_selector,
+        "close_selector": close_selector,
+        "sample_fields": sorted(record.fields),
+    }
 
 
 def _submit_one_query(page: Any, loop: Any, value: str) -> None:
@@ -302,6 +502,9 @@ class FetchResult:
     #: 逐列點開的小視窗內容，順序與清單上的每一列一一對應。
     #: 只有來源設了 ``detail_modal`` 時才會有東西。
     details: list[str] = field(default_factory=list)
+    #: 分析時試點第一列的結果：有沒有跳出明細小視窗，以及它的選擇器。
+    #: 只有分析階段（``probe_modal_for``）才會有東西，正常爬取時是 ``None``。
+    modal_probe: "dict[str, Any] | None" = None
     #: 逐項查詢用：到這一份結果為止，**已經整個做完**幾個查詢條件。
     #: 中斷續跑靠它，所以它只在一個條件底下的東西全部處理完才前進。
     completed_values: int | None = None
@@ -625,6 +828,7 @@ class PlaywrightFetcher(BaseFetcher):
         value: str | None = None,
         drill_row_selector: str | None = None,
         drill_click_selector: str = "a",
+        probe_modal_for: str | None = None,
     ) -> FetchResult:
         """開頁面、送出**一次**查詢，回傳結果的 HTML。
 
@@ -671,7 +875,37 @@ class PlaywrightFetcher(BaseFetcher):
                 _click_even_if_hidden(target)
                 page.wait_for_timeout(1500)
 
-            return FetchResult(url=page.url, status_code=200, html=page.content())
+            html = page.content()
+            # 明細小視窗要在**這一頁**上試，而且要在讀完 HTML 之後——點下去
+            # 會蓋住畫面，先讀才不會把彈窗的內容混進清單。這一步不另外開頁面，
+            # 所以不多送一次請求。
+            probe = None
+            if probe_modal_for:
+                self.limiter.wait(minimum=self.robots.crawl_delay(url))
+                probe = _detect_detail_modal(page, probe_modal_for)
+
+            return FetchResult(
+                url=page.url, status_code=200, html=html, modal_probe=probe
+            )
+        finally:
+            page.close()
+
+    def probe_detail_modal(
+        self, url: str, list_selector: str, click_selector: str = "a"
+    ) -> dict[str, Any] | None:
+        """開一個不需要查詢的清單頁，試點第一列看有沒有明細小視窗。
+
+        查詢型的名錄走 :meth:`fetch_with_first_query` 的 ``probe_modal_for``
+        （那裡已經在正確的那一頁上了）；這個是給「網址打開就是清單」的站用的。
+        """
+        if not self.robots.can_fetch(url):
+            raise RobotsDisallowedError(url, self.user_agent)
+
+        page = self._context.new_page()
+        try:
+            self.limiter.wait(minimum=self.robots.crawl_delay(url))
+            page.goto(url, wait_until=self._settings.wait_until)
+            return _detect_detail_modal(page, list_selector, click_selector)
         finally:
             page.close()
 
@@ -797,7 +1031,14 @@ class PlaywrightFetcher(BaseFetcher):
         list_selector: str | None,
         completed: int | None = None,
     ) -> FetchResult:
-        """把頁面目前的狀態交出去（需要的話連同每一列點開的小視窗）。"""
+        """把頁面目前的狀態交出去（需要的話連同每一列點開的小視窗）。
+
+        **HTML 一定要先讀。** 點開小視窗會動到 DOM——有些網站點下去等於再往下
+        鑽一層，整張表被換掉。先收集再讀 HTML 的話，交出去的兩份東西是頁面在
+        不同時刻的樣子，而詳細資料是靠**位置**對回每一列的：第 2 筆的電話會
+        掛到第 5 筆頭上，或者整批對不上而全部落空。實測遇過（負責人全是空的）。
+        """
+        html = page.content()
         details = (
             _collect_modal_details(page, modal, list_selector or "")
             if modal is not None and list_selector
@@ -806,7 +1047,7 @@ class PlaywrightFetcher(BaseFetcher):
         return FetchResult(
             url=page.url,
             status_code=200,
-            html=page.content(),
+            html=html,
             details=details,
             completed_values=completed,
         )
