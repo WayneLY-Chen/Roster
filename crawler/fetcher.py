@@ -578,12 +578,17 @@ class PlaywrightFetcher(BaseFetcher):
         submit_selector: str,
         *,
         value: str | None = None,
+        drill_row_selector: str | None = None,
+        drill_click_selector: str = "a",
     ) -> FetchResult:
         """開頁面、送出**一次**查詢，回傳結果的 HTML。
 
         分析查詢型名錄時用得到：還沒查詢的頁面上一筆資料都沒有，只看那一頁是
         猜不出「一筆資料長什麼樣」的。送一次查詢再看，跟人打開網頁隨便選一個
         分類按下去是完全一樣的動作。
+
+        ``drill_row_selector`` 再往下點一層：有些網站查出來的是子分類，點其中
+        一項才是廠商。給了就會點第一列，回傳那之後的頁面。
         """
         if not self.robots.can_fetch(url):
             raise RobotsDisallowedError(url, self.user_agent)
@@ -607,6 +612,20 @@ class PlaywrightFetcher(BaseFetcher):
             )
             self.limiter.wait(minimum=self.robots.crawl_delay(url))
             _submit_one_query(page, loop, chosen)
+
+            if drill_row_selector:
+                rows = page.query_selector_all(drill_row_selector)
+                target = None
+                for row in rows:
+                    target = row.query_selector(drill_click_selector)
+                    if target is not None:
+                        break
+                if target is None:
+                    raise CrawlError(f"{drill_row_selector} 裡面沒有可以點的東西")
+                self.limiter.wait(minimum=self.robots.crawl_delay(url))
+                _click_even_if_hidden(target)
+                page.wait_for_timeout(1500)
+
             return FetchResult(url=page.url, status_code=200, html=page.content())
         finally:
             page.close()
@@ -656,19 +675,44 @@ class PlaywrightFetcher(BaseFetcher):
                     # 不要讓 98 個分類裡的第 7 個失敗，害其餘 91 個都收不到。
                     log.warning("逐項查詢「{}」失敗：{}", value, exc)
                     continue
-                details = (
-                    _collect_modal_details(page, modal, list_selector or "")
-                    if modal is not None and list_selector
-                    else []
-                )
-                yield FetchResult(
-                    url=page.url,
-                    status_code=200,
-                    html=page.content(),
-                    details=details,
-                )
+                drill = getattr(loop, "drill", None)
+                if drill is None:
+                    yield self._snapshot(page, modal, list_selector)
+                    continue
+
+                # 查詢結果還不是名單，中間要再點一層。
+                for index in range(drill.max_rows):
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    # 每一次都重新取一遍列：點下去之後整張表常常被重畫，
+                    # 先存起來的那些元素會全部失效（stale）。
+                    rows = page.query_selector_all(drill.row_selector)
+                    if index >= len(rows):
+                        break
+                    self.limiter.wait(minimum=self.robots.crawl_delay(url))
+                    try:
+                        target = rows[index].query_selector(drill.click_selector)
+                        if target is None:
+                            continue
+                        _click_even_if_hidden(target)
+                        page.wait_for_timeout(drill.wait_ms)
+                    except Exception as exc:  # noqa: BLE001 - 一列點不開
+                        log.debug("往下點第 {} 列失敗：{}", index + 1, exc)
+                        continue
+                    yield self._snapshot(page, modal, list_selector)
         finally:
             page.close()
+
+    def _snapshot(self, page: Any, modal: Any, list_selector: str | None) -> FetchResult:
+        """把頁面目前的狀態交出去（需要的話連同每一列點開的小視窗）。"""
+        details = (
+            _collect_modal_details(page, modal, list_selector or "")
+            if modal is not None and list_selector
+            else []
+        )
+        return FetchResult(
+            url=page.url, status_code=200, html=page.content(), details=details
+        )
 
     def close(self) -> None:
         for closer in (

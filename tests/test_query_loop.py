@@ -201,6 +201,19 @@ class _FakePage:
     def wait_for_timeout(self, _ms: int) -> None:
         pass
 
+    def close(self) -> None:
+        pass
+
+    def goto(self, _url: str, **_kwargs) -> None:
+        pass
+
+    def content(self) -> str:
+        return "<html></html>"
+
+    @property
+    def url(self) -> str:
+        return "https://a.test/q"
+
     @property
     def keyboard(self):
         page = self
@@ -298,3 +311,121 @@ def test_a_query_loop_without_a_browser_says_so(tmp_config):
     crawler = GenericHtmlSource(source, fetcher=_PlainFetcher(), config=tmp_config)
     with pytest.raises(SourceConfigError):
         list(crawler.iter_pages())
+
+
+# ------------------------------------------- 中間還要再點一層（三層網站）
+
+
+def test_a_result_drill_needs_a_row_selector():
+    from core.config import ResultDrill
+
+    with pytest.raises(ValidationError):
+        ResultDrill(row_selector="   ")
+
+
+def test_drilling_clicks_each_row_and_yields_one_page_each():
+    """有些網站是三層的：選一個大分類 → 出來一張子分類清單 → 點其中一項才
+    看得到廠商。中間那一層看起來很像資料，裡面卻一家公司都沒有。"""
+    from core.config import ResultDrill
+    from crawler.fetcher import PlaywrightFetcher
+
+    class _Page(_FakePage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sub_rows = [_FakeElement(self, f"子分類{i}") for i in range(3)]
+            self.content_calls = 0
+
+        def query_selector_all(self, selector: str):
+            return list(self.sub_rows) if selector == "#tbSub tr" else []
+
+        def content(self) -> str:
+            self.content_calls += 1
+            return f"<html>第{self.content_calls}次</html>"
+
+        @property
+        def url(self) -> str:
+            return "https://a.test/q"
+
+    page = _Page()
+    fetcher = PlaywrightFetcher.__new__(PlaywrightFetcher)   # 不啟動真的瀏覽器
+    fetcher.limiter = _NoWait()
+    fetcher.robots = _AllowAll()
+    fetcher.user_agent = "test"
+    fetcher._settings = _Settings()
+    fetcher._context = _Context(page)
+
+    loop = QueryLoop(
+        input_selector="#q",
+        submit_selector="#go",
+        values=["甲"],
+        drill=ResultDrill(row_selector="#tbSub tr", click_selector="a", max_rows=10),
+    )
+
+    pages = list(fetcher.iter_query_pages("https://a.test/q", loop))
+
+    # 一個查詢條件 × 三列子分類 = 三份結果，不是一份。
+    assert len(pages) == 3
+    assert page.clicked.count("子分類0") == 1
+
+
+def test_drilling_stops_at_the_row_ceiling():
+    from core.config import ResultDrill
+    from crawler.fetcher import PlaywrightFetcher
+
+    class _Page(_FakePage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sub_rows = [_FakeElement(self, f"列{i}") for i in range(50)]
+
+        def query_selector_all(self, selector: str):
+            return list(self.sub_rows) if selector == "tr" else []
+
+        def content(self) -> str:
+            return "<html></html>"
+
+        @property
+        def url(self) -> str:
+            return "https://a.test/q"
+
+    page = _Page()
+    fetcher = PlaywrightFetcher.__new__(PlaywrightFetcher)
+    fetcher.limiter = _NoWait()
+    fetcher.robots = _AllowAll()
+    fetcher.user_agent = "test"
+    fetcher._settings = _Settings()
+    fetcher._context = _Context(page)
+
+    loop = QueryLoop(
+        input_selector="#q",
+        submit_selector="#go",
+        values=["甲"],
+        drill=ResultDrill(row_selector="tr", max_rows=4),
+    )
+
+    assert len(list(fetcher.iter_query_pages("https://a.test/q", loop))) == 4
+
+
+class _NoWait:
+    def wait(self, minimum=None):
+        return 0.0
+
+
+class _AllowAll:
+    def can_fetch(self, _url: str) -> bool:
+        return True
+
+    def crawl_delay(self, _url: str):
+        return None
+
+
+class _Settings:
+    wait_until = "load"
+    nav_timeout_ms = 1000
+
+
+class _Context:
+    def __init__(self, page) -> None:
+        self._page = page
+
+    def new_page(self):
+        return self._page

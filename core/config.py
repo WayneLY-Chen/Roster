@@ -217,6 +217,36 @@ class PageAction(_Base):
         return self
 
 
+class ResultDrill(_Base):
+    """查詢結果還不是名單，中間要再點一層。
+
+    有些網站是三層的：選一個大分類 → 出來一張**子分類**清單 → 點其中一項才
+    看得到廠商。中間那一層看起來很像資料（整齊、有連結、筆數也對），但裡面
+    一家公司都沒有。少了這一步，跑完幾十次查詢的結果會是「一筆都沒抓到」，
+    而且完全不會報錯。
+
+    每一列都是一次往返，所以 ``max_rows`` 是硬上限——這既是時間的問題，也是
+    對別人網站的基本禮貌。
+    """
+
+    #: 中間那一層的每一列（例如 ``#tbSub tbody tr``）。
+    row_selector: str
+    #: 那一列裡要點的東西（例如 ``a``）。
+    click_selector: str = "a"
+    #: 點下去之後等多久（毫秒）讓真正的名單出現。
+    wait_ms: int = Field(default=1200, ge=0, le=30_000)
+    #: 每一輪查詢最多往下點幾列。
+    max_rows: int = Field(default=20, ge=1, le=500)
+
+    @model_validator(mode="after")
+    def _selectors_are_not_blank(self) -> "ResultDrill":
+        if not self.row_selector.strip():
+            raise ValueError("result_drill 需要 row_selector")
+        if not self.click_selector.strip():
+            raise ValueError("result_drill 需要 click_selector")
+        return self
+
+
 class QueryLoop(_Base):
     """同一個查詢表單，換一組條件就查一次。
 
@@ -240,6 +270,8 @@ class QueryLoop(_Base):
     #: 最多查幾次。避免一個有兩千個選項的選單把一整天用掉，也是對別人網站的
     #: 基本禮貌。
     max_queries: int = Field(default=200, ge=1, le=2000)
+    #: 查詢結果還不是名單、中間要再點一層時的設定。
+    drill: "ResultDrill | None" = None
 
     @model_validator(mode="after")
     def _selectors_are_not_blank(self) -> "QueryLoop":

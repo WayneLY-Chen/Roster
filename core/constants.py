@@ -16,7 +16,7 @@ PROJECT_NAME = "Roster"
 DISPLAY_NAME = "名單匠"
 #: 版本號跟著 CHANGELOG.md 走——那份是「這一版改了什麼」的唯一出處，
 #: 「更新資訊」頁直接讀它，不另外維護一份會過期的副本。
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 
 class StrEnum(str, Enum):

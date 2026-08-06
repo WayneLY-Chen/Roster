@@ -507,6 +507,10 @@ class SourceWizardDialog(QDialog):
             if part.strip()
         ]
 
+        # 中間還要再點一層的話，分析已經確認過點下去真的會出現廠商，那是這個
+        # 網站的性質，不是使用者的選擇——跟著走，不另外問。
+        drill = self._query_form.get("drill") or None
+
         if values:
             # 自己指定了要查的字，就用打字的那一個查詢框（如果有的話）。
             # 把關鍵字塞進下拉選單是沒有意義的——選單只吃它自己的選項。
@@ -525,6 +529,7 @@ class SourceWizardDialog(QDialog):
                 "submit_selector": submit_selector,
                 "values": values,
                 "max_queries": len(values),
+                "drill": drill,
             }
 
         try:
@@ -538,6 +543,7 @@ class SourceWizardDialog(QDialog):
             "input_selector": str(self._query_form.get("input_selector") or ""),
             "submit_selector": str(self._query_form.get("submit_selector") or ""),
             "max_queries": max(1, min(max_queries, detected)),
+            "drill": drill,
         }
 
     def _apply_document_links(self, found: dict) -> None:

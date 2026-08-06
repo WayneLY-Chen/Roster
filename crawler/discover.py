@@ -1620,6 +1620,48 @@ def _looks_like_a_directory(result: DiscoveryResult) -> bool:
     return marked / len(names) >= _MIN_COMPANY_RATIO
 
 
+#: 中間那一層長什麼樣。真的踩到的都是表格；``list_selector`` 那一個由分析
+#: 自己找出來，這裡只補上最常見的形狀。
+_DRILL_ROW_CANDIDATES = ("table tbody tr", "table tr")
+
+
+def _try_drilling_one_level(
+    probe, url: str, input_selector: str, submit_selector: str,
+    value: str | None, html: str,
+) -> tuple[DiscoveryResult, dict[str, str]] | None:
+    """查出來的不是名單時，往下再點一層看看。
+
+    有些網站是三層的：選一個大分類 → 出來一張子分類清單 → 點其中一項才看得到
+    廠商。中間那一層看起來很像資料，裡面卻一家公司都沒有。
+
+    回傳 ``(分析結果, 往下點的設定)``，點了還是沒有名單就回 ``None``。
+    """
+    soup = make_soup(html)
+    candidates: list[str] = []
+    for selector in _DRILL_ROW_CANDIDATES:
+        rows = soup.select(selector)
+        if rows and any(row.find("a") is not None for row in rows):
+            candidates.append(selector)
+    if not candidates:
+        return None
+
+    for row_selector in candidates[:1]:       # 一次就好，每一次都是一趟請求
+        try:
+            page = probe(
+                url, input_selector, submit_selector,
+                value=value, drill_row_selector=row_selector,
+            )
+        except Exception as exc:              # noqa: BLE001
+            log.info("往下點一層失敗（{}）：{}", row_selector, exc)
+            continue
+
+        after = discover_from_html(page.html, page.url)
+        if _looks_like_a_directory(after):
+            log.info("往下點一層之後找到名單：{}", row_selector)
+            return after, {"row_selector": row_selector, "click_selector": "a"}
+    return None
+
+
 def _analyse_after_one_query(
     browser: BaseFetcher, url: str, before: DiscoveryResult
 ) -> DiscoveryResult:
@@ -1656,15 +1698,34 @@ def _analyse_after_one_query(
             continue
 
         after = discover_from_html(page.html, page.url)
+        drill: dict[str, str] | None = None
         # 一樣要看內容像不像廠商名錄。選單那條路常常查出來是「商品分類」而不是
         # 廠商，而頁首的導覽選單在任何一頁上都在——只問 ``ok`` 的話，第一次試查
         # 就會帶著一份「加入會員、找商機、認識公會」收工。
         if not _looks_like_a_directory(after):
-            continue
+            # 只有選單那條路才往下鑽。關鍵字查詢的結果本來就直接是廠商，不是的
+            # 話再點一層多半也沒有用——而每一次試點都是一趟請求，分析是使用者
+            # 盯著進度條在等的。
+            drilled = (
+                _try_drilling_one_level(
+                    probe, url, input_selector, submit_selector, value, page.html
+                )
+                if value is None
+                else None
+            )
+            if drilled is None:
+                continue
+            after, drill = drilled
 
         # 查詢表單本身要留著——結果頁上的那個選單可能已經被換過內容了，而使用者
         # 要看到的是「總共有幾個條件可以查」。
-        after.query_form = before.query_form
+        after.query_form = dict(before.query_form or {})
+        if drill:
+            after.query_form["drill"] = drill
+            after.notes.append(
+                "查出來的還不是廠商名單，中間要再點一層才是——已經確認過點下去"
+                "會出現廠商，爬取時會自動做這一步（每一列都是一次往返，會慢很多）。"
+            )
         after.notes.append(
             f"這一頁要先查詢才有資料，{note}，下面的欄位是從查詢結果推出來的。"
         )

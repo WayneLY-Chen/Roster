@@ -42,6 +42,22 @@ PREVIEW_FIELDS: tuple[str, ...] = (
 )
 
 
+def _build_query_loop(query_loop_cls, drill_cls, raw: dict | None):
+    """把介面交來的字典變成設定物件。
+
+    ``drill``（中間還要再點一層）是巢狀的，而且值可能是 ``None``——直接
+    ``QueryLoop(**raw)`` 會把 ``None`` 當成一個 ``ResultDrill`` 去驗證。
+    """
+    if not raw:
+        return None
+    data = dict(raw)
+    drill = data.pop("drill", None)
+    loop = query_loop_cls(**data)
+    if drill:
+        loop = loop.model_copy(update={"drill": drill_cls(**drill)})
+    return loop
+
+
 class SourceWizardController:
     """Discovery, editing, and persistence for one custom crawl source."""
 
@@ -193,7 +209,13 @@ class SourceWizardController:
         before this can be saved -- an empty name, no list selector, no
         company-name rule, or a selector pydantic itself rejects.
         """
-        from core.config import FieldRule, PageAction, PaginationRule, QueryLoop
+        from core.config import (
+            FieldRule,
+            PageAction,
+            PaginationRule,
+            QueryLoop,
+            ResultDrill,
+        )
 
         clean_name = name.strip()
         if not clean_name:
@@ -259,7 +281,7 @@ class SourceWizardController:
                 page_start=page_start,
                 page_end=page_end,
                 engine=chosen_engine,
-                query_loop=QueryLoop(**query_loop) if query_loop else None,
+                query_loop=_build_query_loop(QueryLoop, ResultDrill, query_loop),
             )
         except ValidationError as exc:
             raise SourceConfigError(f"來源設定無效：{exc}") from exc
