@@ -17,6 +17,7 @@ import pandas as pd
 from core.config import AppConfig, get_config
 from core.constants import LogCategory
 from core.errors import ExportError
+from core.legal import OPEN_DATA_ATTRIBUTION
 from core.logging_setup import get_logger
 from core.schemas import CompanyView
 
@@ -48,17 +49,24 @@ HEADER_LABELS: dict[str, str] = {
     "created_at": "建立時間 Created",
     "updated_at": "更新時間 Updated",
     "remark": "備註 Remark",
+    "lead_score": "名單品質 Lead Score",
+    "capital_amount": "資本額 Capital",
+    "registration_status": "登記狀態 Registration",
+    "registration_checked_at": "登記查詢時間 Registry Checked",
 }
 
 DEFAULT_COLUMNS = (
     "id",
     "company_name",
+    "lead_score",
     "tax_id",
     "email",
     "phone",
     "website",
     "address",
     "industry",
+    "registration_status",
+    "capital_amount",
     "contact_person",
     "pipeline_stage",
     "status",
@@ -73,7 +81,10 @@ def resolve_columns(config: AppConfig | None = None) -> list[str]:
     """Configured export columns, filtered to fields that actually exist."""
     config = config or get_config()
     requested = config.exporter.columns or list(DEFAULT_COLUMNS)
-    valid_fields = set(CompanyView.model_fields)
+    # 算出來的欄位（名單品質）跟一般欄位一樣可以匯出，但它不在 model_fields
+    # 裡——漏掉這一半的話，使用者在 config.yaml 填 lead_score 會被當成不存在
+    # 的欄位丟掉，而且只有日誌裡有一行警告。
+    valid_fields = set(CompanyView.model_fields) | set(CompanyView.model_computed_fields)
 
     columns = [name for name in requested if name in valid_fields]
     unknown = [name for name in requested if name not in valid_fields]
@@ -148,6 +159,24 @@ def build_dataframe(
         # 自由欄位沒有雙語標題可以查——它們的名稱就是名錄上原本的文字。
         frame = frame.rename(columns={c: HEADER_LABELS.get(c, c) for c in all_columns})
     return frame
+
+
+#: 哪些欄位的內容來自政府開放資料。有其中任何一欄有值，匯出檔就必須帶著
+#: 顯名標示——見 :mod:`crawler.registry` 的授權說明，那不是選配的。
+REGISTRY_FIELDS = ("capital_amount", "registration_status")
+
+
+def registry_attribution(rows: list[CompanyView]) -> str | None:
+    """這批資料需要標示的資料來源；沒有用到開放資料時回 ``None``。
+
+    以「資料真的在裡面」為判斷依據，而不是「欄位有沒有被選進來」：使用者
+    只匯出公司名稱與信箱、完全沒有登記資料時，硬掛一行來源聲明只是雜訊；
+    反過來只要有一筆帶著登記資料，這份檔案就必須標示。
+    """
+    for row in rows:
+        if any(getattr(row, field, None) for field in REGISTRY_FIELDS):
+            return OPEN_DATA_ATTRIBUTION
+    return None
 
 
 def timestamped_name(prefix: str, extension: str) -> str:

@@ -54,6 +54,7 @@ from datetime import date, datetime
 
 from core.errors import CRMError
 from core.schemas import CompanyFilter, CompanyView
+from core.scoring import LEAD_SCORE_ORDER
 from controllers.core import CompanyController
 from core.i18n import (
     ALL_OPTION,
@@ -79,15 +80,32 @@ ALL = ALL_OPTION
 COLUMNS = [
     ("id", "編號", 40),
     ("company_name", "公司名稱", 170),
+    # 名單品質。放在公司名稱旁邊，因為它要回答的正是「這一列先不先看」，
+    # 掃名單時視線本來就停在這兩欄之間。
+    ("lead_score", "品質", 50),
     ("email", "電子信箱", 140),
     ("phone", "電話", 85),
     ("industry", "產業", 90),
     ("contact_person", "聯絡人", 80),
+    # 空白代表還沒查過登記資料，不是「查到它是空的」。
+    ("registration_status", "登記狀態", 80),
     ("pipeline_stage", "業務階段", 80),
     ("priority", "優先度", 65),
     ("status", "狀態", 70),
     ("tags", "標籤", 110),
     ("updated_at", "更新時間", 100),
+]
+
+#: 「排序」下拉選單。顯示文字 → ``CompanyFilter.order_by`` 的值。
+#:
+#: 只放實際上會用到的幾個。表頭點一下也能排，但那只排「目前這一頁載進來的
+#: 資料」；這個下拉是交給資料庫排的，語意上才是整份名單的排序。
+SORT_OPTIONS: list[tuple[str, str, bool]] = [
+    ("名單品質（高到低）", LEAD_SCORE_ORDER, True),
+    ("更新時間（新到舊）", "updated_at", True),
+    ("收集時間（新到舊）", "created_at", True),
+    ("公司名稱（A→Z）", "company_name", False),
+    ("資本額（大到小）", "capital_amount", True),
 ]
 
 #: 沒有值的儲存格顯示這個。
@@ -201,6 +219,19 @@ class CompaniesPage(BasePage):
         date_column.addWidget(self.date_combo)
         filters.addLayout(date_column)
 
+        # 排序。放在最右邊、緊鄰按鈕，因為它跟左邊那些「篩掉什麼」不是同一
+        # 類動作——那些決定看得到誰，這個只決定誰排前面。
+        sort_column = QVBoxLayout()
+        sort_column.addWidget(caption("排序"))
+        self.sort_combo = WideComboBox()
+        self.sort_combo.addItems([text for text, _, _ in SORT_OPTIONS])
+        self.sort_combo.setToolTip(
+            "「名單品質」會把有信箱、有電話、資本額大、資料新的排在前面。"
+        )
+        self.sort_combo.currentIndexChanged.connect(lambda _index: self._run_search())
+        sort_column.addWidget(self.sort_combo)
+        filters.addLayout(sort_column)
+
         # 靠下對齊。這一列的其他項目都是「說明文字在上、控制項在下」的直向
         # 堆疊，按鈕預設會對齊整個堆疊的垂直中心，看起來就浮在說明文字那一
         # 排、跟輸入框與下拉沒有對齊。
@@ -266,7 +297,10 @@ class CompaniesPage(BasePage):
         tag = self.filter_combos["tags"].currentText()
         industry = self.filter_combos["industry"].currentText()
         day = self.selected_date()
+        _, order_by, descending = SORT_OPTIONS[max(0, self.sort_combo.currentIndex())]
         return CompanyFilter(
+            order_by=order_by,
+            descending=descending,
             text=self.search_entry.text().strip() or None,
             industry=None if industry in ("", ALL) else industry,
             stages=[] if stage in ("", ALL) else [to_value(stage, STAGE_LABELS)],
@@ -443,10 +477,12 @@ class CompaniesPage(BasePage):
         return {
             "id": view.id,
             "company_name": view.company_name,
+            "lead_score": view.lead_score,
             "email": shown(view.email),
             "phone": shown(view.phone),
             "industry": shown(view.industry),
             "contact_person": shown(view.contact_person),
+            "registration_status": shown(view.registration_status),
             "pipeline_stage": label(view.pipeline_stage, STAGE_LABELS),
             "priority": label(view.priority, PRIORITY_LABELS),
             "status": label(view.status, STATUS_LABELS),

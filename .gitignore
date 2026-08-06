@@ -77,5 +77,8 @@ Thumbs.db
 
 # 自己整理的名錄研究：哪些公協會可以爬、robots.txt 各自怎麼規定、
 # 各站的已知限制。實際的來源設定在 custom_sources.yaml（同樣不進版控）。
-docs/
+#
+# 只擋這一個檔案，不是整個 docs/。那個資料夾同時放著 README 拆出來的公開
+# 說明，整個擋掉的話 README 上的連結對每一個 clone 下來的人都是 404。
+docs/taiwan.md
 crash.log

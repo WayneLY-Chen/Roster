@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from core.constants import (
     ActivityType,
@@ -23,6 +23,7 @@ from core.constants import (
     Priority,
     RecordStatus,
 )
+from core.scoring import lead_score as _lead_score
 
 
 class RawCompany(BaseModel):
@@ -114,6 +115,26 @@ class CompanyView(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
+    # --- 公司登記（經濟部商業司開放資料） ---
+    capital_amount: int | None = None
+    registration_status: str | None = None
+    registration_checked_at: datetime | None = None
+
+    #: 不再聯絡的標記。放進讀取模型是因為名單品質分數要看它——被標記過的
+    #: 公司資料再完整都不該排在前面。
+    do_not_contact: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def lead_score(self) -> int:
+        """名單品質，0 到 100。見 :mod:`core.scoring`。
+
+        算出來的而不是存起來的：裡面有一項是「資料多新」，存成欄位的話今天
+        算的分數明天就不對了。做成 computed_field 讓匯出檔跟表格取用它的方式
+        與其他欄位完全一樣。
+        """
+        return _lead_score(self)
+
 
 class ContactView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -173,6 +194,7 @@ class CompanyFilter(BaseModel):
     follow_up_before: date | None = None
     limit: int | None = Field(default=None, ge=1)
     offset: int = Field(default=0, ge=0)
+    #: 欄位名稱，或 :data:`core.scoring.LEAD_SCORE_ORDER`（名單品質，算出來的）。
     order_by: str = "updated_at"
     descending: bool = True
 

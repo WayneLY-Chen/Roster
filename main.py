@@ -831,6 +831,53 @@ def enrich(
 
 
 @app.command()
+def registry(
+    limit: Optional[int] = typer.Option(None, "--limit", "-n", help="最多處理幾家公司。"),
+) -> None:
+    """用統一編號補上經濟部商業司的公司登記資料。
+
+    最有用的是「登記狀態」——名錄不會把倒掉的會員刪掉，這一步把解散、撤銷、
+    廢止的挑出來。沒有統一編號的公司查不了（這個資料集不支援用名稱查詢）。
+    """
+    config = _bootstrap()
+
+    from core.legal import OPEN_DATA_ATTRIBUTION
+    from crawler.registry import enrich_registrations
+
+    def progress(index: int, total: int, name: str) -> None:
+        console.print(f"  [dim]{index}/{total}[/dim] {name}")
+
+    try:
+        summary = enrich_registrations(limit=limit, config=config, progress=progress)
+    except CRMError as exc:
+        _fail(str(exc))
+
+    table = Table(title="公司登記補完結果")
+    table.add_column("項目", style="cyan")
+    table.add_column("數量", justify="right")
+    for label, value in (
+        ("查詢的公司", summary.considered),
+        ("查到登記資料", summary.matched),
+        ("實際更新", summary.updated),
+        ("已停業／解散", summary.defunct),
+        ("查無此統編", summary.not_found),
+        ("沒有統一編號", summary.skipped_no_tax_id),
+        ("對方忙線跳過", summary.busy),
+        ("查詢失敗", summary.failed),
+    ):
+        table.add_row(label, str(value))
+    console.print(table)
+
+    if summary.defunct:
+        console.print(
+            f"[yellow]其中 {summary.defunct} 家的登記狀態已經不是「核准設立」，"
+            "寄信之前建議先確認。[/yellow]"
+        )
+    # 顯名標示是授權條款的強制義務，不是說明文字。見 core.legal。
+    console.print(f"[dim]{OPEN_DATA_ATTRIBUTION}[/dim]")
+
+
+@app.command()
 def security() -> None:
     """上傳 git 前的安全檢查：找出會外洩機密或個資的檔案。
 

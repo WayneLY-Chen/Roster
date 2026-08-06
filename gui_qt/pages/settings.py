@@ -771,6 +771,13 @@ class SettingsPage(BasePage):
         terms_box.setFixedHeight(theme.text_box_height(9))
         section.body_layout.addWidget(terms_box)
 
+        # 開放資料的顯名標示。條款規定未盡標示義務者視為自始未取得授權，
+        # 所以它必須固定出現在畫面上，不能只寫在原始碼的註解裡。
+        attribution_label = QLabel(legal.OPEN_DATA_ATTRIBUTION)
+        attribution_label.setWordWrap(True)
+        attribution_label.setObjectName("MutedLabel")
+        section.body_layout.addWidget(attribution_label)
+
         self._body_layout.addWidget(section)
 
     def _build_backup_section(self) -> None:

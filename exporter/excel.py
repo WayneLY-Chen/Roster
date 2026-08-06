@@ -9,7 +9,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from core.schemas import CompanyView
-from exporter.base import BaseExporter
+from exporter.base import BaseExporter, registry_attribution
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 _HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
@@ -29,6 +29,16 @@ class ExcelExporter(BaseExporter):
         with pd.ExcelWriter(target, engine="openpyxl") as writer:
             frame.to_excel(writer, sheet_name=sheet_name, index=False)
             self._style(writer.sheets[sheet_name], frame)
+
+            attribution = registry_attribution(rows)
+            if attribution:
+                # 開放資料的顯名標示（見 core.legal）。放在自己的工作表而不是
+                # 資料表最下面補一列：資料表有自動篩選與凍結窗格，多出來的那
+                # 一列會被算進篩選範圍，排序一下就跑到中間去了。
+                pd.DataFrame({"": [attribution]}).to_excel(
+                    writer, sheet_name="資料來源", index=False
+                )
+                writer.sheets["資料來源"].column_dimensions["A"].width = _MAX_COLUMN_WIDTH
 
     @staticmethod
     def _style(sheet, frame: pd.DataFrame) -> None:

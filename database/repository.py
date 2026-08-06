@@ -33,6 +33,7 @@ from core.constants import (
 )
 from core.errors import DatabaseError
 from core.logging_setup import get_logger
+from core.scoring import LEAD_SCORE_ORDER, lead_score
 from core.schemas import (
     ActivityView,
     CleanCompany,
@@ -71,6 +72,11 @@ SORTABLE_COLUMNS = {
     "follow_up_date",
     "created_at",
     "updated_at",
+    "capital_amount",
+    "registration_status",
+    # 這一個不是欄位，是算出來的（見 core.scoring）。SQL 排不了它，
+    # search() 會走 Python 端排序那條路。
+    LEAD_SCORE_ORDER,
 }
 
 # Columns scanned by CompanyFilter.text.
@@ -207,11 +213,17 @@ class CompanyRepository:
         criteria = criteria or CompanyFilter()
         residual = _residual_filter(criteria)
 
+        # 名單品質是算出來的，沒有對應的資料庫欄位，所以只能在 Python 端排。
+        by_score = criteria.order_by == LEAD_SCORE_ORDER
+        key = lead_score if by_score else None
+
         sort_field = criteria.order_by if criteria.order_by in SORTABLE_COLUMNS else None
-        column = getattr(Company, sort_field, None) if sort_field else None
-        if column is None:
+        column = None if by_score else (getattr(Company, sort_field, None) if sort_field else None)
+        if column is None and not by_score:
             column, sort_field = Company.updated_at, "updated_at"
-        sort_in_python = is_encrypted_column(column)
+        if key is None:
+            key = _sort_key(sort_field)
+        sort_in_python = by_score or is_encrypted_column(column)
 
         stmt = self._apply_filters(select(Company), criteria)
 
@@ -233,7 +245,7 @@ class CompanyRepository:
         if residual is not None:
             rows = [company for company in rows if residual(company)]
         if sort_in_python:
-            rows.sort(key=_sort_key(sort_field), reverse=criteria.descending)
+            rows.sort(key=key, reverse=criteria.descending)
 
         start = criteria.offset or 0
         end = start + criteria.limit if criteria.limit else None
@@ -308,6 +320,23 @@ class CompanyRepository:
             Company.website.is_not(None),
             Company.website != "",
             or_(Company.email.is_(None), Company.email == ""),
+        )
+        return int(self.session.execute(stmt).scalar_one())
+
+    def count_registrable(self, recheck_after_days: int = 180) -> int:
+        """有統一編號、而且還沒查過（或查很久了）公司登記資料的家數。
+
+        跟 :meth:`count_enrichable` 一樣，是給介面顯示「按下去會處理幾家」用
+        的。沒有統編的一律不算——那一步只能用統編查，見 :mod:`crawler.registry`。
+        """
+        stale = now() - timedelta(days=recheck_after_days)
+        stmt = select(func.count(Company.id)).where(
+            Company.tax_id.is_not(None),
+            Company.tax_id != "",
+            or_(
+                Company.registration_checked_at.is_(None),
+                Company.registration_checked_at <= stale,
+            ),
         )
         return int(self.session.execute(stmt).scalar_one())
 
@@ -725,6 +754,10 @@ class CompanyRepository:
             tags=company.tag_names(),
             created_at=company.created_at,
             updated_at=company.updated_at,
+            capital_amount=company.capital_amount,
+            registration_status=company.registration_status,
+            registration_checked_at=company.registration_checked_at,
+            do_not_contact=company.do_not_contact,
         )
 
     def search_views(self, criteria: CompanyFilter | None = None) -> list[CompanyView]:

@@ -15,7 +15,7 @@ import pandas as pd
 
 from core.constants import PROJECT_NAME, VERSION
 from core.schemas import CompanyView
-from exporter.base import BaseExporter, resolve_columns
+from exporter.base import BaseExporter, registry_attribution, resolve_columns
 
 
 class JsonExporter(BaseExporter):
@@ -43,6 +43,12 @@ class JsonExporter(BaseExporter):
                 "columns": columns,
                 "companies": records,
             }
+            # 開放資料的顯名標示（見 core.legal）。只有這批資料裡真的有公司
+            # 登記資料時才會出現。``wrap=False`` 的裸陣列沒有地方可以放它，
+            # 所以要匯出含登記資料的 JSON 時不要關掉外層物件。
+            attribution = registry_attribution(rows)
+            if attribution:
+                payload["attribution"] = attribution  # type: ignore[index]
         target.write_text(
             json.dumps(payload, ensure_ascii=False, indent=self.indent),
             encoding="utf-8",

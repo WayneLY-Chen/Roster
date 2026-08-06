@@ -39,8 +39,14 @@ from PySide6.QtWidgets import (
 )
 
 from core.errors import CRMError
+from core.legal import OPEN_DATA_ATTRIBUTION as ATTRIBUTION
 from core.schemas import CrawlSummary, VerifySummary
-from controllers.core import CrawlController, EnrichController, VerifyController
+from controllers.core import (
+    CrawlController,
+    EnrichController,
+    RegistryController,
+    VerifyController,
+)
 from controllers.source import SourceWizardController
 from core.i18n import CRAWL_STATUS_LABELS, label
 from gui_qt import theme
@@ -96,10 +102,12 @@ class CrawlerPage(BasePage):
         self.crawl_controller = CrawlController()
         self.verify_controller = VerifyController()
         self.enrich_controller = EnrichController()
+        self.registry_controller = RegistryController()
         self.source_controller = SourceWizardController()
         self.crawl_task: BackgroundTask | None = None
         self.verify_task: BackgroundTask | None = None
         self.enrich_task: BackgroundTask | None = None
+        self.registry_task: BackgroundTask | None = None
 
     # ------------------------------------------------------------- 建立元件
 
@@ -170,6 +178,13 @@ class CrawlerPage(BasePage):
         self.enrich_button = QPushButton("補抓信箱")
         self.enrich_button.clicked.connect(self._start_enrich)
         buttons_row.addWidget(self.enrich_button)
+
+        # 名錄不會把倒掉的會員刪掉。這顆按鈕去經濟部商業司對統一編號，把
+        # 解散、撤銷、廢止的挑出來，順便補上資本額——寄開發信之前先知道
+        # 哪幾家已經不在了，省下來的是實際的時間。
+        self.registry_button = QPushButton("補公司登記資料")
+        self.registry_button.clicked.connect(self._start_registry)
+        buttons_row.addWidget(self.registry_button)
 
         self.manage_sources_button = QPushButton("管理自訂來源")
         self.manage_sources_button.clicked.connect(self._open_source_manager)
@@ -254,8 +269,12 @@ class CrawlerPage(BasePage):
         return value
 
     def _cancel_crawl(self) -> None:
-        # 同一顆按鈕同時停爬取跟補抓信箱——兩者只會有一個在跑，因為彼此的
-        # 開始按鈕在對方執行時都會被停用。
+        # 同一顆按鈕停爬取、補抓信箱與補公司登記資料——同時間只會有一件在跑，
+        # 因為每一件開始時都會把自己的按鈕停用。
+        if self.registry_task is not None and self.registry_task.running:
+            self.registry_task.cancel()
+            self._append_log("取消中...")
+            return
         if self.enrich_task is not None and self.enrich_task.running:
             self.enrich_task.cancel()
             self._append_log("取消中...")
@@ -441,6 +460,88 @@ class CrawlerPage(BasePage):
 
     def _finish_enrich(self) -> None:
         self.enrich_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.app.status_bar.stop_progress()
+
+    # -------------------------------------------------- 補公司登記資料
+
+    def _start_registry(self) -> None:
+        if self.registry_task is not None and self.registry_task.running:
+            return
+
+        try:
+            pending = self.registry_controller.pending_count()
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        if not pending:
+            # 說清楚是「沒有統編」還是「都查過了」，兩件事的下一步完全不同。
+            self.status(
+                "沒有需要查的公司（沒有統一編號的查不了，其餘都查過了）", "success"
+            )
+            return
+
+        crawler = self.registry_controller.config.crawler
+        minutes = max(
+            1,
+            round(pending * max(1.0, crawler.delay_seconds + crawler.delay_jitter / 2) / 60),
+        )
+        reply = QMessageBox.question(
+            self,
+            "補公司登記資料",
+            f"有 {pending} 家公司有統一編號可以查。\n\n"
+            "程式會向經濟部商業司的商工登記公示資料查詢，補上登記狀態"
+            "（核准設立／解散／撤銷／廢止）、資本額、登記負責人與地址。\n"
+            f"查詢之間會保留請求間隔，因此大約需要 {minutes} 分鐘。\n\n"
+            f"{ATTRIBUTION}\n\n"
+            "要開始嗎？（過程中可以按「取消」停止）",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._append_log(f"開始補公司登記資料，共 {pending} 家公司...")
+        self._append_log(ATTRIBUTION)
+        self.registry_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.app.status_bar.start_progress()
+        self.status("查詢公司登記資料中...", "normal")
+
+        self.registry_task = BackgroundTask(
+            self,
+            worker=self.registry_controller.run,
+            on_progress=self._on_enrich_progress,
+            on_done=self._on_registry_done,
+            on_error=self._on_registry_error,
+        )
+        self.registry_task.start()
+
+    def _on_registry_done(self, summary: Any) -> None:
+        self._finish_registry()
+        self._append_log(
+            f"公司登記補完 -- 查詢 {summary.considered} 家，對到 {summary.matched} 家，"
+            f"更新 {summary.updated} 筆"
+            + (f"，查無 {summary.not_found} 家" if summary.not_found else "")
+            + (f"，對方忙線跳過 {summary.busy} 家（下次會再試）" if summary.busy else "")
+        )
+        if summary.defunct:
+            # 這是整件事最重要的一句話，不要跟其他數字混在同一行。
+            self._append_log(
+                f"⚠ 其中 {summary.defunct} 家的登記狀態已經不是「核准設立」，"
+                "寄信之前建議先確認。"
+            )
+            self.status(f"補完，其中 {summary.defunct} 家已停業或解散", "warning")
+        else:
+            self.status(f"公司登記補完，更新 {summary.updated} 筆", "success")
+        bump_data_version()
+
+    def _on_registry_error(self, exc: Exception) -> None:
+        self._finish_registry()
+        self._append_log(f"錯誤：{exc}")
+        self.report_error(exc)
+
+    def _finish_registry(self) -> None:
+        self.registry_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.app.status_bar.stop_progress()
 

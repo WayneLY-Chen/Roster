@@ -355,6 +355,36 @@ class EnrichController:
         )
 
 
+class RegistryController:
+    """用統一編號去經濟部商業司補公司登記資料。
+
+    補回來最有用的不是資本額，是「這家公司還在不在」——名錄網站不會把倒掉的
+    會員刪掉，寄開發信之前先把解散、撤銷、廢止的挑出來，省的是實際的時間。
+    """
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config or get_config()
+
+    def pending_count(self) -> int:
+        """有統編、還沒查過（或查很久了）的家數。沒有統編的查不了。"""
+        from crawler.registry import RECHECK_AFTER_DAYS
+
+        with session_scope() as session:
+            return CompanyRepository(session).count_registrable(RECHECK_AFTER_DAYS)
+
+    def run(self, limit: int | None = None, *, report: Callable[[Any], None], cancel_event):
+        from crawler.registry import enrich_registrations
+
+        return enrich_registrations(
+            limit=limit,
+            config=self.config,
+            progress=lambda index, total, name: report(
+                {"done": index, "total": total, "name": name}
+            ),
+            cancel_event=cancel_event,
+        )
+
+
 class ExportController:
     def __init__(self, config: AppConfig | None = None) -> None:
         self.config = config or get_config()

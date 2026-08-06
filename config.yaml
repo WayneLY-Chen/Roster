@@ -91,12 +91,18 @@ exporter:
   columns:
     - "id"
     - "company_name"
+    # 名單品質，0-100。算出來的（有信箱、有電話、資本額、資料新舊……），
+    # 不是資料庫欄位，所以不會有「匯出的分數跟畫面上不一樣」的問題。
+    - "lead_score"
     - "tax_id"
     - "email"
     - "phone"
     - "website"
     - "address"
     - "industry"
+    # 這兩欄要先做過「補公司登記資料」才會有內容。
+    - "registration_status"
+    - "capital_amount"
     - "english_name"
     - "fax"
     - "products"

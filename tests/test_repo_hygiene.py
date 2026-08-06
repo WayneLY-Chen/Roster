@@ -191,3 +191,76 @@ def test_every_imported_package_is_declared_in_requirements():
     assert not missing, "有 import 但 requirements 沒宣告：\n" + "\n".join(
         f"  {name} <- {', '.join(files[:5])}" for name, files in sorted(missing.items())
     )
+
+
+# ---------------------------------------------------------------- 文件連結
+
+#: 說明文件。README 只留安裝與導覽，細節分在 docs/ 底下——這一拆就多了一整
+#: 排跨檔案的相對連結，而 Markdown 的壞連結在 GitHub 上是靜靜地變成 404。
+_DOC_FILES = [ROOT / "README.md", ROOT / "CHANGELOG.md", *sorted((ROOT / "docs").glob("*.md"))]
+
+_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+
+
+def _anchors(text: str) -> set[str]:
+    """GitHub 會替每一個標題產生的錨點。
+
+    規則是「轉小寫、去掉標點、空白換成連字號」，中日韓文字會原樣保留——
+    所以「## 這家公司還在不在？」的錨點是 ``#這家公司還在不在``。
+    """
+    found = set()
+    for line in text.splitlines():
+        if line.startswith("#"):
+            title = line.lstrip("#").strip()
+            found.add(
+                re.sub(r"[^\w\u4e00-\u9fff\- ]", "", title).strip().replace(" ", "-").lower()
+            )
+    return found
+
+
+def test_every_link_between_the_docs_resolves(tracked_files):
+    """README 拆成 docs/ 之後，跨檔案的連結壞掉在網頁上是無聲的 404。
+
+    「本機有這個檔案」不等於「連結會通」。實際發生過：``docs/`` 整個被
+    ``.gitignore`` 擋著，說明文件在自己電腦上打得開，但 clone 下來的人與
+    GitHub 上的頁面看到的全是 404。所以這裡問的是 git **有沒有追蹤**它，
+    不是檔案系統上存不存在。
+    """
+    tracked = {Path(name) for name in tracked_files}
+    broken: list[str] = []
+    for doc in _DOC_FILES:
+        text = doc.read_text(encoding="utf-8")
+        for target in _LINK.findall(text):
+            if target.startswith(("http://", "https://", "mailto:", "#!")):
+                continue
+            path_part, _, anchor = target.partition("#")
+            owner = doc
+            if path_part:
+                resolved = (doc.parent / path_part).resolve()
+                if not resolved.exists():
+                    broken.append(f"{doc.name}: 檔案不存在 -> {target}")
+                    continue
+                relative = resolved.relative_to(ROOT)
+                if relative not in tracked:
+                    broken.append(
+                        f"{doc.name}: 指向沒有進版控的檔案 -> {target}"
+                        "（本機看得到，clone 下來的人看到 404）"
+                    )
+                    continue
+                owner = resolved
+            if anchor and anchor.lower() not in _anchors(
+                owner.read_text(encoding="utf-8")
+            ):
+                broken.append(f"{doc.name}: 找不到錨點 -> {target}")
+    assert not broken, "說明文件裡有壞掉的連結：\n" + "\n".join(f"  {b}" for b in broken)
+
+
+def test_the_readme_stays_short_enough_to_read():
+    """README 是專案的門面，長到要捲十次就沒有人會讀完。
+
+    細節該放在 docs/ 底下，這裡只留安裝、上手與導覽。這條沒有什麼神聖的
+    數字，它只是一個「又開始往裡面塞東西了」的提醒。
+    """
+    lines = len((ROOT / "README.md").read_text(encoding="utf-8").splitlines())
+
+    assert lines <= 320, f"README 有 {lines} 行，太長了——把細節搬到 docs/ 底下"

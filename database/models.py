@@ -99,6 +99,20 @@ class Company(Base):
     #: 主要產品／代理品項。名錄上常見的「代理廠商及代銷產品」。
     products: Mapped[str | None] = mapped_column(Text)
     contact_person: Mapped[str | None] = mapped_column(EncryptedString(128))
+
+    # --- 公司登記（經濟部商業司開放資料，靠統一編號查回來的） ---
+    #
+    # 這三欄不放進 extra_fields，因為它們要被排序與篩選——名單品質分數會看
+    # 資本額，而「這家公司還在不在」是使用者寄信之前唯一真的想知道的事。
+    # extra_fields 是加密的 JSON，SQL 進不去。這些是公開的商業登記資訊、
+    # 不是個資，跟公司名稱、統編同一類，所以也不加密。
+    #: 登記資本額（新台幣元）。實收資本額另外放在 extra_fields 裡。
+    capital_amount: Mapped[int | None] = mapped_column(Integer, index=True)
+    #: 「核准設立」「解散」「撤銷」「廢止」……原文照存。
+    registration_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    #: 最後一次去查登記資料的時間。有值就代表查過了——查回來是「查無此統編」
+    #: 的也算查過，不然每一次補完都會把同一批查不到的再查一遍。
+    registration_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     #: 這個名錄有、但程式沒有對應欄位的東西，原樣保留。
     #:
     #: 每個公會列的欄位都不一樣——旅行公會有「會員代表」「入會年月日」

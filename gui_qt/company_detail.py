@@ -59,6 +59,8 @@ from core.i18n import (
     status_labels,
     to_value,
 )
+from core.legal import OPEN_DATA_ATTRIBUTION
+from core.scoring import explain, lead_score
 from gui_qt import theme
 from gui_qt.pages.base import bump_data_version
 from gui_qt.widgets import CaptionedControl, DataTable, LabeledEntry, WideComboBox, caption
@@ -179,6 +181,7 @@ class CompanyDetailDialog(QDialog):
         )
         self.tags_entry.set(", ".join(company.tags))
         self._set_extra_fields(company.extra_fields)
+        self._refresh_quality(company)
         self.remark_box.setPlainText(company.remark or "")
 
         self._contacts = list(data["contacts"])
@@ -282,17 +285,52 @@ class CompanyDetailDialog(QDialog):
         grid.addWidget(self.tags_entry, 8, 0, 1, 2)
 
         self._build_extra_fields(grid, row=9)
+        self._build_quality(grid, row=13)
 
-        grid.addWidget(caption("備註"), 12, 0, 1, 2)
+        grid.addWidget(caption("備註"), 15, 0, 1, 2)
         self.remark_box = QTextEdit()
         self.remark_box.setPlaceholderText(NO_DATA)
         self.remark_box.setFixedHeight(theme.text_box_height(6))
-        grid.addWidget(self.remark_box, 13, 0, 1, 2)
+        grid.addWidget(self.remark_box, 16, 0, 1, 2)
 
         save_button = QPushButton("儲存")
         save_button.setObjectName("PrimaryButton")  # 這個對話框最主要的動作
         save_button.clicked.connect(self._save)
-        grid.addWidget(save_button, 14, 1)
+        grid.addWidget(save_button, 17, 1)
+
+    # -- 名單品質 ---------------------------------------------------------
+
+    def _build_quality(self, grid: QGridLayout, row: int) -> None:
+        """這一筆的名單品質分數是怎麼來的，以及公司登記資料的來源標示。
+
+        分數在公司列表上只是一個數字，看不出為什麼是那個數字。把配分攤開來
+        寫，使用者才知道「要提高它，下一步該補什麼」。
+        """
+        grid.addWidget(caption("名單品質"), row, 0, 1, 2)
+        self.quality_label = QLabel(NO_DATA)
+        self.quality_label.setObjectName("MutedLabel")
+        self.quality_label.setWordWrap(True)
+        grid.addWidget(self.quality_label, row + 1, 0, 1, 2)
+
+    def _refresh_quality(self, company) -> None:
+        score = lead_score(company)
+        parts = [f"{name} {points}" for name, points in explain(company) if points]
+        lines = [f"{score} / 100" + (f"（{'、'.join(parts)}）" if parts else "")]
+
+        if company.registration_status:
+            detail = f"登記狀態：{company.registration_status}"
+            if company.capital_amount:
+                detail += f"　資本額 {company.capital_amount:,} 元"
+            if company.registration_checked_at:
+                detail += f"　查詢時間 {company.registration_checked_at:%Y-%m-%d}"
+            lines.append(detail)
+            # 顯名標示是授權條款的強制義務，不是說明文字——有登記資料就要有
+            # 這一行。見 core.legal。
+            lines.append(OPEN_DATA_ATTRIBUTION)
+        elif company.tax_id:
+            lines.append("還沒查過公司登記資料。到「爬取」頁按「補公司登記資料」。")
+
+        self.quality_label.setText("\n".join(lines))
 
     # -- 其他欄位 ---------------------------------------------------------
 
