@@ -20,10 +20,14 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -63,7 +67,14 @@ from core.legal import OPEN_DATA_ATTRIBUTION
 from core.scoring import HOW_TO_FILL, MAX_POINTS, explain, lead_score
 from gui_qt import theme
 from gui_qt.pages.base import bump_data_version
-from gui_qt.widgets import CaptionedControl, DataTable, LabeledEntry, WideComboBox, caption
+from gui_qt.widgets import (
+    CaptionedControl,
+    DataTable,
+    ErrorBanner,
+    LabeledEntry,
+    WideComboBox,
+    caption,
+)
 
 CONTACT_COLUMNS = [
     ("name", "姓名", 140),
@@ -130,9 +141,7 @@ class CompanyDetailDialog(QDialog):
         self.tabs.addTab(self.activity_tab, "活動記錄")
         self.tabs.addTab(self.attachments_tab, "附件")
 
-        self.error_label = QLabel("")
-        self.error_label.setStyleSheet(f"color: {theme.pick(theme.DANGER)};")
-        self.error_label.setWordWrap(True)
+        self.error_label = ErrorBanner()
         outer.addWidget(self.error_label)
 
         self._build_details_tab()
@@ -157,7 +166,7 @@ class CompanyDetailDialog(QDialog):
             return
 
         if data is None:
-            self._show_error(RuntimeError(f"company {self.company_id} not found"))
+            self.error_label.set_text("找不到這一家公司，可能已經被刪掉了。")
             return
 
         company = data["company"]
@@ -198,13 +207,21 @@ class CompanyDetailDialog(QDialog):
             self.delete_contact_button,
             self.add_activity_button,
             self.attach_button,
+            self.open_attachment_button,
+            self.save_attachment_button,
             self.delete_attachment_button,
         ):
             widget.setEnabled(enabled)
         self.hint_label.setVisible(not enabled)
 
     def _show_error(self, exc: Exception) -> None:
-        self.error_label.setText(f"{type(exc).__name__}: {exc}")
+        """把例外顯示出來——翻成中文，而且使用者關得掉。
+
+        以前這裡是 ``f"{type(exc).__name__}: {exc}"``，資料庫的例外會把整句
+        SQL 連同所有參數一起印出來，其中包含加密後的欄位。使用者看到的是
+        一段英文加一串密文，看不懂、不知道要做什麼，截圖一貼就外流了。
+        """
+        self.error_label.show_error(exc)
 
     # -- details tab ------------------------------------------------------
 
@@ -599,9 +616,17 @@ class CompanyDetailDialog(QDialog):
         self.activity_subject_entry = LabeledEntry("主旨")
         form.addWidget(self.activity_subject_entry, 0, 1)
 
+        # 按鈕要跟旁邊的輸入框對齊。
+        #
+        # 「類型」與「主旨」都是兩行高（說明文字在上、控制項在下），而裸的
+        # QPushButton 只有一行——放進同一列會被擺在那一列的**垂直中央**，
+        # 看起來浮在輸入框上面一截。給它一個空的說明列佔掉上面那一行，
+        # 兩邊的控制項就落在同一條線上。
         self.add_activity_button = QPushButton("新增")
         self.add_activity_button.clicked.connect(self._add_activity)
-        form.addWidget(self.add_activity_button, 0, 2)
+        add_control = CaptionedControl("")
+        add_control.attach(self.add_activity_button)
+        form.addWidget(add_control, 0, 2)
 
         form.addWidget(caption("備註"), 1, 0, 1, 3)
         self.activity_body_box = QTextEdit()
@@ -656,6 +681,17 @@ class CompanyDetailDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
+        # 附件加進來之後要拿得回去。只有「附加」跟「刪除」的話，檔案等於進了
+        # 一個看得到、打不開的地方——使用者要看內容只能自己去翻資料夾，而
+        # 那個資料夾在哪裡程式也不會告訴他。
+        self.open_attachment_button = QPushButton("開啟")
+        self.open_attachment_button.setToolTip("用系統預設的程式打開這個附件")
+        self.open_attachment_button.clicked.connect(self._open_attachment)
+        buttons.addWidget(self.open_attachment_button)
+        self.save_attachment_button = QPushButton("另存為...")
+        self.save_attachment_button.setToolTip("把這個附件複製到你選的位置")
+        self.save_attachment_button.clicked.connect(self._save_attachment_as)
+        buttons.addWidget(self.save_attachment_button)
         self.attach_button = QPushButton("附加檔案...")
         self.attach_button.clicked.connect(self._attach_file)
         buttons.addWidget(self.attach_button)
@@ -693,6 +729,54 @@ class CompanyDetailDialog(QDialog):
             return
         bump_data_version()
         self._load()
+
+    def _selected_attachment_file(self) -> Path | None:
+        """選取那一筆附件在磁碟上的檔案；沒選、或檔案不在了就回 ``None``。
+
+        訊息裡只講檔名，不講完整路徑——那是使用者自己電腦上的位置，畫面上
+        不需要出現，截圖出去也不該出現。
+        """
+        row = self.attachments_table.selected_row()
+        if row is None:
+            self.error_label.set_text("請先在上面選一個附件。")
+            return None
+        found = next(
+            (a for a in self._attachments if a["id"] == row["id"]), None
+        )
+        path = Path(found["path"]) if found else None
+        if path is None or not path.exists():
+            self.error_label.set_text(
+                f"找不到「{row['filename']}」這個檔案，它可能已經被移走或刪掉了。"
+            )
+            return None
+        self.error_label.clear()
+        return path
+
+    def _open_attachment(self) -> None:
+        path = self._selected_attachment_file()
+        if path is None:
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.error_label.set_text(
+                f"這台電腦上沒有可以打開「{path.name}」的程式。"
+                "可以先用「另存為...」存到別的地方再開。"
+            )
+
+    def _save_attachment_as(self) -> None:
+        source = self._selected_attachment_file()
+        if source is None:
+            return
+        target, _selected_filter = QFileDialog.getSaveFileName(
+            self, "另存附件", source.name
+        )
+        if not target:
+            return
+        try:
+            shutil.copy2(source, target)
+        except OSError as exc:
+            self._show_error(exc)
+            return
+        self.error_label.show_note(f"已存出「{Path(target).name}」。")
 
     def _delete_attachment(self) -> None:
         row = self.attachments_table.selected_row()

@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QProgressBar,
+    QPushButton,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -526,3 +527,88 @@ class StatusBar(QWidget):
         self.progress.hide()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
+
+
+class ErrorBanner(QFrame):
+    """一條可以關掉的錯誤訊息。
+
+    為什麼要能關掉：以前這裡是一個 ``QLabel``，訊息一旦出現就佔著位置不走，
+    使用者把問題修好之後那句話還在，看起來像是又錯了一次。沒有任何辦法把它
+    收掉——只能重開視窗。
+
+    訊息一律先經過 :func:`core.friendly_errors.friendly`。介面上不會出現 SQL、
+    參數或加密後的內容，那些留在日誌裡。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ErrorBanner")
+        colour = theme.pick(theme.DANGER)
+        self.setStyleSheet(
+            f"#ErrorBanner {{ border: 1px solid {colour}; border-radius: 6px; }}"
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 6, 6, 6)
+        row.setSpacing(8)
+
+        self.message = QLabel("")
+        self.message.setWordWrap(True)
+        self.message.setStyleSheet(f"color: {colour}; border: none;")
+        self.message.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        row.addWidget(self.message, 1)
+
+        self.close_button = QPushButton("✕")
+        self.close_button.setFlat(True)
+        self.close_button.setFixedWidth(28)
+        self.close_button.setToolTip("關掉這則訊息")
+        self.close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_button.setStyleSheet(f"color: {colour}; border: none;")
+        self.close_button.clicked.connect(self.clear)
+        row.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
+
+        self.hide()
+
+    # -- API ---------------------------------------------------------------
+
+    def show_error(self, exc: BaseException) -> None:
+        """顯示一個例外，翻成使用者看得懂的說法。"""
+        from core.friendly_errors import friendly
+
+        self.set_text(friendly(exc))
+
+    def set_text(self, text: str) -> None:
+        """直接顯示一句話（介面自己發現的問題，例如「請輸入聯絡人姓名」）。"""
+        self._render(text, theme.pick(theme.DANGER))
+
+    def show_note(self, text: str) -> None:
+        """顯示一句「做完了」之類的話，不要用紅色。
+
+        同一條橫幅兩種用途：出錯的時候紅色，做完的時候不紅。用紅色講「已加入
+        3 個檔案」，使用者第一眼看到的是出事了。
+        """
+        self._render(text, theme.pick(theme.MUTED))
+
+    def _render(self, text: str, colour: str) -> None:
+        text = (text or "").strip()
+        self.setStyleSheet(
+            f"#ErrorBanner {{ border: 1px solid {colour}; border-radius: 6px; }}"
+        )
+        self.message.setStyleSheet(f"color: {colour}; border: none;")
+        self.close_button.setStyleSheet(f"color: {colour}; border: none;")
+        self.message.setText(text)
+        self.setVisible(bool(text))
+
+    def clear(self) -> None:
+        self.set_text("")
+
+    # -- 相容舊寫法 --------------------------------------------------------
+    #
+    # 原本各頁用的是 ``error_label.setText(...)``。保留這個名字，換過來的時候
+    # 不必一次改掉每一個呼叫點，也不會有漏掉的地方安靜地失效。
+    def setText(self, text: str) -> None:  # noqa: N802 - 對齊 QLabel 的名字
+        self.set_text(text)
+
+    def text(self) -> str:
+        return self.message.text()

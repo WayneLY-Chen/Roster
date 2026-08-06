@@ -20,6 +20,11 @@ fail() {
     exit 1
 }
 
+# 貓跟狗。圖放在 assets/pets.txt，不寫在這裡：那是用全形字元排出來的，
+# 混在腳本裡每改一次都要重數一遍空白，抽成一個檔案三個平台共用同一份。
+printf "\n"
+cat "$here/assets/pets.txt" 2>/dev/null
+
 printf "\n名單匠 Roster — 安裝程式\n"
 printf "安裝位置：%s\n" "$here"
 

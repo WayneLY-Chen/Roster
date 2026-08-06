@@ -14,6 +14,11 @@ cd "$root"
 say()  { printf "\n\033[1m%s\033[0m\n" "$1"; }
 fail() { printf "\n\033[31m[ERROR] %s\033[0m\n\n" "$1"; exit 1; }
 
+# The mascots. The drawing lives in assets/pets.txt rather than in here:
+# it is full-width artwork, and all three platforms print the same file.
+printf "\n"
+cat "$root/assets/pets.txt" 2>/dev/null
+
 printf "\nRoster setup\n"
 printf "Install location: %s\n" "$root"
 

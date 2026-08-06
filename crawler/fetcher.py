@@ -298,6 +298,45 @@ _PANEL_PROBE_JS = """
 }
 """
 
+#: 從「真的點得開小視窗的那一列」往上找，收斂成只框住同一張表的選擇器。
+#:
+#: 為什麼需要：分析挑出來的清單選擇器常常是 ``tr`` 這種很寬的東西，同一頁上
+#: 的子分類表、表頭也一起被框進去。爬取時每一列都要點開讀明細，而點到子分類
+#: 那一列等於整張表被換掉——只好停手，於是真正的廠商一個明細也讀不到。
+#:
+#: 往上走到第一個「有 id 或 class、而且框起來會變少」的祖先就停，回傳的選擇器
+#: 一定還框得住剛剛點成功的那一列（下面有檢查）。找不到就回空字串，維持原樣。
+_ROW_SCOPE_JS = """
+(row) => {
+  const escape = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s;
+  const cssFor = (el) => {
+    if (el.id) return '#' + escape(el.id);
+    if (typeof el.className === 'string' && el.className.trim()) {
+      const cs = el.className.trim().split(/\\s+/).filter(Boolean);
+      return el.tagName.toLowerCase() + cs.map(c => '.' + escape(c)).join('');
+    }
+    return '';
+  };
+  const tag = row.tagName.toLowerCase();
+  const wide = document.querySelectorAll(tag).length;
+  let suffix = tag;
+  let node = row.parentElement;
+  while (node && node !== document.body && node !== document.documentElement) {
+    const own = cssFor(node);
+    if (own) {
+      const scoped = own + ' ' + suffix;
+      const hit = document.querySelectorAll(scoped);
+      if (hit.length < wide && Array.prototype.indexOf.call(hit, row) !== -1) {
+        return scoped;
+      }
+    }
+    suffix = node.tagName.toLowerCase() + ' ' + suffix;
+    node = node.parentElement;
+  }
+  return '';
+}
+"""
+
 #: 關掉小視窗的那顆按鈕，文字長這樣。
 _CLOSE_WORDS = ("確定", "關閉", "close", "ok", "×", "✕", "x")
 
@@ -370,6 +409,7 @@ def _detect_detail_modal(
     # 而且「點了沒有小視窗」本身常常是有進展的：那一下把子分類換成了廠商清單，
     # 下一次試就點得到真正的公司了。所以每一輪都重新查一次列。
     appeared: list[tuple[str, dict[str, Any]]] = []
+    opened_row: Any = None
     for attempt in range(_MODAL_PROBE_ROWS):
         rows = page.query_selector_all(list_selector)
         if not rows:
@@ -378,7 +418,7 @@ def _detect_detail_modal(
         for row in rows[attempt:]:
             found = row.query_selector(click_selector)
             if found is not None:
-                target = found
+                target, opened_row = found, row
                 break
         if target is None:
             return None
@@ -449,7 +489,40 @@ def _detect_detail_modal(
         "panel_selector": panel_selector,
         "close_selector": close_selector,
         "sample_fields": sorted(record.fields),
+        "row_selector": _scope_to_the_row_that_worked(page, opened_row, list_selector),
     }
+
+
+def _scope_to_the_row_that_worked(
+    page: Any, row: Any, list_selector: str
+) -> str | None:
+    """把清單選擇器收斂到「剛剛真的點得開小視窗的那一列」所在的那一張表。
+
+    回傳 ``None`` 代表沒得收斂（原本就夠窄，或找不到有 id/class 的祖先），
+    照原樣用即可。
+    """
+    if row is None:
+        return None
+    try:
+        scoped = row.evaluate(_ROW_SCOPE_JS)
+    except Exception as exc:                  # noqa: BLE001
+        log.debug("收斂清單選擇器失敗：{}", exc)
+        return None
+    scoped = str(scoped or "").strip()
+    if not scoped or scoped == list_selector:
+        return None
+    try:
+        narrowed = len(page.query_selector_all(scoped))
+        original = len(page.query_selector_all(list_selector))
+    except Exception:                         # noqa: BLE001
+        return None
+    if not narrowed or narrowed >= original:
+        return None
+    log.info(
+        "清單選擇器收斂：{}（{} 列）→ {}（{} 列）",
+        list_selector, original, scoped, narrowed,
+    )
+    return scoped
 
 
 def _submit_one_query(page: Any, loop: Any, value: str) -> None:
@@ -1004,6 +1077,22 @@ class PlaywrightFetcher(BaseFetcher):
                 for index in range(drill.max_rows):
                     if cancel_event is not None and cancel_event.is_set():
                         return
+                    # 每一列都要從「剛查完」的那一頁重新點下去。
+                    #
+                    # 點第一列會把畫面換成那個子分類底下的廠商清單——留在那裡
+                    # 去點「第 2 列」，點到的是**廠商**，開出來的是明細小視窗，
+                    # 不是下一個子分類。結果就是第 2 批之後每一筆都是同一家
+                    # 公司、而且一個欄位都沒有。實測遇過。
+                    #
+                    # 重查一次比按上一頁可靠：這一類頁面多半是表單回傳（每一次
+                    # 動作都是一次 POST），上一頁常常拿到的是過期或空的畫面。
+                    if index:
+                        self.limiter.wait(minimum=self.robots.crawl_delay(url))
+                        try:
+                            _submit_one_query(page, loop, value)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("回到查詢結果失敗，這個條件先到這裡：{}", exc)
+                            break
                     # 每一次都重新取一遍列：點下去之後整張表常常被重畫，
                     # 先存起來的那些元素會全部失效（stale）。
                     rows = page.query_selector_all(drill.row_selector)

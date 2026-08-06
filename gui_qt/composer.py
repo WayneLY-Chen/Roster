@@ -72,6 +72,7 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
+    QTextFormat,
     QTextImageFormat,
     QTextListFormat,
 )
@@ -92,6 +93,7 @@ from core.config import AppConfig, get_config
 from core.constants import LogCategory
 from core.logging_setup import get_logger
 from gui_qt import theme
+from gui_qt.widgets import WideComboBox
 
 log = get_logger(LogCategory.GUI)
 
@@ -104,6 +106,20 @@ MAX_IMAGE_WIDTH = 520
 #: 需要跟著亮/暗模式切換，深色模式下 QTextEdit 本身的底色由 QSS 決定，這個
 #: 藍色在兩種背景上都看得清楚）。
 LINK_COLOUR = "#1a56b3"
+
+#: 字級下拉可以選的值，單位是 px。
+#:
+#: 用 px 而不是 pt，是因為信最後是在網頁郵件裡被讀的，而 px 就是那邊的
+#: 單位——``QTextEdit.toHtml()`` 對這個屬性吐出來的正是 ``font-size:20px``，
+#: 使用者選幾就是幾，中間沒有換算。
+#:
+#: 這一組數字跟 Gmail 的字級選單同一個範圍：小到註腳，大到標題，中間不放
+#: 每一個整數——選單太長反而找不到想要的那一個。
+FONT_SIZES_PX = (10, 11, 12, 13, 14, 16, 18, 20, 24, 28, 32, 36)
+
+#: 沒有指定字級時，網頁郵件實際會用的大小。下拉要停在這一格。
+DEFAULT_FONT_SIZE_PX = 14
+
 
 _BODY_RE = re.compile(r"<body[^>]*>(.*)</body>", re.IGNORECASE | re.DOTALL)
 _IMG_SRC_RE = re.compile(r'<img\s+[^>]*?src="([^"]+)"', re.IGNORECASE)
@@ -206,11 +222,27 @@ class RichTextEditor(QWidget):
         self._base_point_size = self.edit.font().pointSizeF() or 10.0
         layout.addWidget(self.edit, 1)
 
+        # 下拉要跟著游標走：點到一段 24px 的字，選單就該停在 24 px。不同步的
+        # 話使用者看到的永遠是上一次選的那個數字，等於在騙他。
+        if show_toolbar:
+            self.edit.cursorPositionChanged.connect(self._sync_size_combo)
+            self._sync_size_combo()
+
     # --------------------------------------------------------------- 工具列
 
     def _build_toolbar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setSpacing(6)
+
+        # 字級。用 px 而不是 pt：收信的一端是網頁郵件，而 ``toHtml()`` 對這個
+        # 屬性吐出來的正是 ``font-size:20px``——寫幾就是幾，不必在腦袋裡換算。
+        self.size_combo = WideComboBox()
+        self.size_combo.addItems([f"{size} px" for size in FONT_SIZES_PX])
+        self.size_combo.setToolTip("字級（會套用到選取的文字）")
+        self.size_combo.setFixedHeight(theme.toolbar_button_height())
+        self.size_combo.activated.connect(self._apply_font_size)
+        bar.addWidget(self.size_combo)
+
         buttons = (
             ("粗體", self._toggle_bold),
             ("斜體", self._toggle_italic),
@@ -282,6 +314,12 @@ class RichTextEditor(QWidget):
                     size = fmt.fontPointSize()
                     if size and abs(size - self._base_point_size) > 0.5:
                         return True
+                    # 字級下拉設的是 px，不是 pt。不看這一項的話，使用者把
+                    # 整封信調成 24px 之後仍然會被當成「沒有格式」用純文字
+                    # 寄出去，字級一路掉光——而編輯區裡看起來明明是大的。
+                    pixels = fmt.property(QTextFormat.Property.FontPixelSize)
+                    if isinstance(pixels, (int, float)) and pixels > 0:
+                        return True
                 it += 1
             block = block.next()
         return False
@@ -349,7 +387,57 @@ class RichTextEditor(QWidget):
         else:
             fmt.setFontWeight(QFont.Weight.Bold)
             fmt.setFontPointSize(target)
+        # 標題用 pt，字級下拉用 px。兩個屬性同時掛在同一段字上時誰贏要看 Qt
+        # 的心情，所以套標題就把 px 清掉——按了「大標題」卻沒有變大，是最難
+        # 查的那種問題。
+        fmt.setProperty(QTextFormat.Property.FontPixelSize, 0)
         cursor.mergeCharFormat(fmt)
+
+    # --------------------------------------------------------------- 字級
+
+    def _apply_font_size(self, index: int) -> None:
+        """把選到的字級套上去。
+
+        有選字就套在選取範圍上；沒選字就設定「接下來打的字」——跟 Gmail 一樣。
+        不強迫先選字：使用者常常是先把字級調好再開始打。
+        """
+        if not 0 <= index < len(FONT_SIZES_PX):
+            return
+        pixels = FONT_SIZES_PX[index]
+        fmt = QTextCharFormat()
+        fmt.setProperty(QTextFormat.Property.FontPixelSize, pixels)
+        # pt 也要一起清掉。大/小標題設的是 pt，兩個屬性同時存在時到底以哪個
+        # 為準要看 Qt 的心情——留一個就不必猜。
+        fmt.setFontPointSize(0)
+
+        cursor = self.edit.textCursor()
+        if cursor.hasSelection():
+            cursor.mergeCharFormat(fmt)
+        self.edit.mergeCurrentCharFormat(fmt)
+        self.edit.setFocus()
+
+    def _current_font_size_px(self) -> int:
+        """游標所在位置的字級（px）。沒有明確設過就回預設值。"""
+        fmt = self.edit.textCursor().charFormat()
+        pixels = fmt.property(QTextFormat.Property.FontPixelSize)
+        if isinstance(pixels, (int, float)) and pixels > 0:
+            return int(pixels)
+        points = fmt.fontPointSize()
+        if points:
+            # 大/小標題是用 pt 設的。換算成 px 只是為了讓下拉停在最接近的
+            # 那一格，不會反過來去改文件裡的值。
+            return int(round(points * 96 / 72))
+        return DEFAULT_FONT_SIZE_PX
+
+    def _sync_size_combo(self) -> None:
+        current = self._current_font_size_px()
+        closest = min(
+            range(len(FONT_SIZES_PX)),
+            key=lambda i: abs(FONT_SIZES_PX[i] - current),
+        )
+        self.size_combo.blockSignals(True)
+        self.size_combo.setCurrentIndex(closest)
+        self.size_combo.blockSignals(False)
 
     def _toggle_bullet(self) -> None:
         """選取範圍（或目前這行）已經是清單就移出清單，否則建立一個。"""

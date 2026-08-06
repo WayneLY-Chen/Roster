@@ -1740,11 +1740,21 @@ def _drilled_page_has_companies(html: str, shape: DiscoveryResult) -> bool:
     是那個分類的事，不是選擇器的事。
     """
     selector = shape.list_selector
-    rule = (shape.fields or {}).get("company_name")
-    if not selector or rule is None:
+    if not selector:
         return False
-    soup = make_soup(html)
-    for item in soup.select(selector)[:200]:
+    return _items_look_like_companies(make_soup(html).select(selector), shape)
+
+
+def _items_look_like_companies(items: list[Tag], shape: DiscoveryResult) -> bool:
+    """拿已經學會的「公司名稱」規則去套這幾個區塊，套得出名字就算數。
+
+    一家也算：往下點一層本來就是一次點一個分類，分類底下有幾家公司是那個
+    分類的事，不是選擇器的事。
+    """
+    rule = (shape.fields or {}).get("company_name")
+    if rule is None:
+        return False
+    for item in items[:200]:
         found = item.select_one(rule.selector) if rule.selector else None
         text = found.get_text(" ", strip=True) if found is not None else ""
         if text and _has_company_marker(text):
@@ -1906,9 +1916,48 @@ def _analyse_after_one_query(
     return before
 
 
+def _narrow_list_to_the_rows_that_open(
+    result: DiscoveryResult, html: str = ""
+) -> None:
+    """把清單選擇器換成偵測時收斂出來的那一個（只框住真正的廠商列）。
+
+    分析挑清單靠的是「哪一種區塊重複最多」，在 ieatpe 那種頁面上挑到的是
+    ``tr``——它同時框住子分類表、表頭與廠商表。爬取時每一列都要點開讀明細，
+    點到子分類那一列會把整張表換掉，只好停手，於是真正的廠商一個明細也讀不到
+    （使用者看到的就是「爬到了，可是沒有負責人」）。
+
+    偵測小視窗時我們已經知道**哪一列真的點得開**，順手把它所在的那一張表框
+    起來。這才是「分析幫使用者把方法設定好」該做的事，不是留給使用者自己去
+    猜要填什麼選擇器。
+
+    順便重算預覽：不重算的話，畫面上還是會把 ``01063900`` 這種分類代號當成
+    一家公司列給使用者看，而實際爬取已經不會再抓它了。
+    """
+    modal = result.detail_modal
+    if not modal:
+        return
+    narrowed = str(modal.pop("row_selector", "") or "").strip()
+    if not narrowed or narrowed == result.list_selector:
+        return
+
+    # 有 HTML 就先套套看。收斂是在瀏覽器的當下算出來的，而試點的過程有可能
+    # 又往下鑽了一層——那樣的話這個選擇器講的已經是另一頁，套上去會把整份預覽
+    # 弄成空的。套得出公司名稱才換，套不出來就當作沒這回事。
+    if html:
+        items = make_soup(html).select(narrowed)
+        if not _items_look_like_companies(items, result):
+            log.info("收斂後的清單選擇器套不出公司名稱，維持原本的：{}", narrowed)
+            return
+        result.item_count = len(items)
+        result.preview = build_preview(items, result, result.url)
+
+    log.info("清單選擇器改用偵測時確認過的：{} → {}", result.list_selector, narrowed)
+    result.list_selector = narrowed
+
+
 def _probe_detail_modal(
     browser: BaseFetcher, url: str, result: DiscoveryResult
-) -> dict[str, object] | None:
+) -> tuple[dict[str, object] | None, str]:
     """點開第一筆，看詳細資料是不是一個跳出來的小視窗。
 
     要在「清單真的出現了」的那一頁上點。查詢型的名錄還沒查詢之前一筆都沒有，
@@ -1919,14 +1968,14 @@ def _probe_detail_modal(
     """
     selector = result.list_selector
     if not selector:
-        return None
+        return None, ""
 
     form = result.query_form or {}
     try:
         if form.get("input_selector"):
             probe = getattr(browser, "fetch_with_first_query", None)
             if probe is None:
-                return None
+                return None, ""
             drill = form.get("drill") or {}
             page = probe(
                 url,
@@ -1937,15 +1986,15 @@ def _probe_detail_modal(
                 drill_click_selector=str(drill.get("click_selector") or "a"),
                 probe_modal_for=selector,
             )
-            return page.modal_probe
+            return page.modal_probe, (page.html or "")
 
         simple = getattr(browser, "probe_detail_modal", None)
         if simple is None:
-            return None
-        return simple(url, selector)
+            return None, ""
+        return simple(url, selector), ""
     except Exception as exc:                  # noqa: BLE001 - 這一步是加分的
         log.info("試點第一筆看有沒有小視窗時失敗：{}", exc)
-        return None
+        return None, ""
 
 
 def _retry_in_a_browser(
@@ -1996,7 +2045,10 @@ def _retry_in_a_browser(
         # 起來有進來，實際上全是空的。實際遇到過。
         if result.ok:
             _step(progress, DISCOVERY_STEPS[6])
-            result.detail_modal = _probe_detail_modal(browser, url, result)
+            result.detail_modal, probed_html = _probe_detail_modal(
+                browser, url, result
+            )
+            _narrow_list_to_the_rows_that_open(result, probed_html)
     except Exception as exc:              # noqa: BLE001
         log.warning("browser retry failed: {}", exc)
         return None

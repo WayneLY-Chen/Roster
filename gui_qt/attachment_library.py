@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from core.errors import CRMError
 from controllers.mail import MailController
-from gui_qt.widgets import DataTable, caption
+from gui_qt.widgets import DataTable, ErrorBanner, caption
 
 COLUMNS = [
     ("label", "顯示名稱", 180),
@@ -100,9 +100,7 @@ class AttachmentLibraryDialog(QDialog):
         buttons.addWidget(close_button, 0, Qt.AlignmentFlag.AlignBottom)
         outer.addLayout(buttons)
 
-        self.error_label = QLabel("")
-        self.error_label.setObjectName("MutedLabel")
-        self.error_label.setWordWrap(True)
+        self.error_label = ErrorBanner()
         outer.addWidget(self.error_label)
 
         self.refresh()
@@ -113,7 +111,7 @@ class AttachmentLibraryDialog(QDialog):
         try:
             items = self.controller.attachments()
         except CRMError as exc:
-            self.error_label.setText(str(exc))
+            self.error_label.show_error(exc)
             return
 
         self.table.set_rows(
@@ -161,9 +159,9 @@ class AttachmentLibraryDialog(QDialog):
                 self.controller.add_attachment(path)
                 added += 1
             except CRMError as exc:
-                self.error_label.setText(str(exc))
+                self.error_label.show_error(exc)
         if added:
-            self.error_label.setText(f"已加入 {added} 個檔案。")
+            self.error_label.show_note(f"已加入 {added} 個檔案。")
         self.refresh()
 
     def _rename(self) -> None:
@@ -184,7 +182,7 @@ class AttachmentLibraryDialog(QDialog):
         try:
             self.controller.update_attachment(name, label=label)
         except CRMError as exc:
-            self.error_label.setText(str(exc))
+            self.error_label.show_error(exc)
             return
         self.refresh()
 
@@ -203,7 +201,7 @@ class AttachmentLibraryDialog(QDialog):
         try:
             self.controller.update_attachment(name, note=note)
         except CRMError as exc:
-            self.error_label.setText(str(exc))
+            self.error_label.show_error(exc)
             return
         self.refresh()
 
@@ -231,9 +229,9 @@ class AttachmentLibraryDialog(QDialog):
         try:
             self.controller.remove_attachment(name)
         except CRMError as exc:
-            self.error_label.setText(str(exc))
+            self.error_label.show_error(exc)
             return
-        self.error_label.setText(f"已刪除 {name}。")
+        self.error_label.show_note(f"已刪除 {name}。")
         self.refresh()
 
     def _open_folder(self) -> None:

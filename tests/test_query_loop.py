@@ -376,6 +376,68 @@ def test_drilling_clicks_each_row_and_yields_one_page_each():
     assert page.clicked.count("子分類0") == 1
 
 
+class _LeavingElement(_FakeElement):
+    """點下去就會把畫面帶離查詢結果頁的那種列（子分類）。"""
+
+    def click(self) -> None:
+        super().click()
+        self._page.leave_results()
+
+
+def test_drilling_reruns_the_query_before_each_row():
+    """點完一列要先把查詢重做一次，才點得到下一列。
+
+    點第一列會把畫面換成那個子分類底下的廠商清單。留在那一頁去點「第 2 列」，
+    點到的是**廠商**，開出來的是明細小視窗，不是下一個子分類——結果是第 2 批
+    之後每一筆都是同一家公司，而且一個欄位都沒有。實測遇過。
+    """
+    from core.config import ResultDrill
+    from crawler.fetcher import PlaywrightFetcher
+
+    class _Page(_FakePage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sub_rows = [_LeavingElement(self, f"子分類{i}") for i in range(3)]
+            #: 有沒有停在「剛查完」的那一頁。點一列就會離開，重查才回得來。
+            self.on_results = False
+
+        def select_option(self, selector, value, force=False):
+            super().select_option(selector, value, force)
+            self.on_results = True
+
+        def query_selector_all(self, selector: str):
+            if selector != "#tbSub tr":
+                return []
+            # 已經點進去了就看不到子分類清單了。
+            return list(self.sub_rows) if self.on_results else []
+
+        def leave_results(self) -> None:
+            """點進某一個子分類之後就離開查詢結果頁了。"""
+            self.on_results = False
+
+    page = _Page()
+    fetcher = PlaywrightFetcher.__new__(PlaywrightFetcher)
+    fetcher.limiter = _NoWait()
+    fetcher.robots = _AllowAll()
+    fetcher.user_agent = "test"
+    fetcher._settings = _Settings()
+    fetcher._context = _Context(page)
+
+    loop = QueryLoop(
+        input_selector="#q",
+        submit_selector="#go",
+        values=["甲"],
+        drill=ResultDrill(row_selector="#tbSub tr", click_selector="a", max_rows=3),
+    )
+
+    pages = list(fetcher.iter_query_pages("https://a.test/q", loop))
+
+    # 三列都點得到——沒有重查的話第 2 列開始就找不到子分類清單，只會有 1 份。
+    assert len(pages) == 3
+    # 一個條件查了 3 次：第一次進來，之後每一列各回去一次。
+    assert page.selected == ["甲", "甲", "甲"]
+
+
 def test_drilling_stops_at_the_row_ceiling():
     from core.config import ResultDrill
     from crawler.fetcher import PlaywrightFetcher

@@ -198,8 +198,58 @@ def test_attach_and_delete_file(qt_app, db_session, tmp_path, monkeypatch):
 
 
 def test_load_reports_error_for_missing_company(qt_app, db_session):
+    """公司不見了要用中文講，不是丟一個內部編號給使用者。
+
+    以前這裡顯示的是 ``RuntimeError: company 999999 not found``。那個數字是
+    資料表的列號，使用者拿它做不了任何事，而英文的例外名稱只會讓人以為程式
+    壞了。要講的是「這一家不在了」跟「大概是為什麼」。
+    """
     controller = CompanyController()
     dialog = CompanyDetailDialog(None, controller, 999999, on_saved=None)
 
-    assert "999999" in dialog.error_label.text()
+    shown = dialog.error_label.text()
+    assert "找不到這一家公司" in shown
+    assert dialog.error_label.isVisible() or shown  # 有內容就會顯示出來
+    dialog.close()
+
+
+def test_the_error_banner_can_be_dismissed(qt_app, db_session):
+    """出過一次錯之後，使用者要有辦法把那句話收掉。
+
+    以前錯誤訊息是一個 QLabel，字一旦寫上去就佔著位置不走——問題修好了那句
+    話還在，看起來像又錯了一次，而唯一的辦法是把整個視窗關掉重開。
+    """
+    controller = CompanyController()
+    dialog = CompanyDetailDialog(None, controller, 999999, on_saved=None)
+
+    assert dialog.error_label.text()
+    dialog.error_label.close_button.click()
+    assert dialog.error_label.text() == ""
+    assert not dialog.error_label.isVisible()
+    dialog.close()
+
+
+def test_a_database_error_never_reaches_the_user_as_sql(qt_app, db_session):
+    """資料庫的例外不可以把 SQL 與參數倒到畫面上。
+
+    那串參數裡有加密後的欄位——使用者看到的會是一段英文加一串密文，看不懂、
+    不知道要做什麼，截圖一貼出去就外流了。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    controller = CompanyController()
+    dialog = CompanyDetailDialog(None, controller, None, on_saved=None)
+    exc = IntegrityError(
+        "INSERT INTO contacts (company_id, name, email_encrypted) VALUES (?, ?, ?)",
+        (3, "王小明", b"gAAAAABmSECRET"),
+        Exception("UNIQUE constraint failed: contacts.company_id, contacts.name"),
+    )
+
+    dialog._show_error(exc)
+
+    shown = dialog.error_label.text()
+    assert "這家公司底下已經有同名的聯絡人了。" == shown
+    assert "INSERT" not in shown
+    assert "gAAAAAB" not in shown
+    assert "IntegrityError" not in shown
     dialog.close()

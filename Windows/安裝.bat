@@ -16,6 +16,22 @@ REM  and the launch at the end must not depend on that.
 set "ROOT=%CD%"
 title Roster - setup
 
+REM  The mascots live in assets\pets.txt, not in here.
+REM
+REM  Two reasons. The drawing needs full-width characters, and this file
+REM  is ASCII-only on purpose (see the header). And even if it were not,
+REM  every | / < / > in the artwork would have to be escaped with a caret
+REM  or cmd.exe would try to run it as a pipe or a redirect.
+REM
+REM  Codepage 65001 is UTF-8. It is switched back straight after, so the
+REM  rest of the session keeps whatever the user had.
+for /f "tokens=2 delims=:" %%P in ('chcp') do set "OLDCP=%%P"
+set "OLDCP=%OLDCP: =%"
+chcp 65001 >nul
+echo.
+type "%ROOT%\assets\pets.txt"
+chcp %OLDCP% >nul
+
 echo.
 echo  Roster setup
 echo  Install location: %CD%
