@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -1547,16 +1548,49 @@ class SharedBrowser:
             self._fetcher = None
 
 
+#: 分析一個網址會經過的階段，照順序。畫面上的進度條靠它算刻度。
+#:
+#: 為什麼要有：分析一個 JavaScript 名錄要一兩分鐘（讀頁面、開瀏覽器、試查、
+#: 往下點一層），期間畫面上只有一條來回跑的橫槓。那條橫槓唯一回答得了的問題
+#: 是「有沒有當掉」——跑了 5 秒跟跑了 90 秒看起來一模一樣，使用者不知道還要
+#: 等多久，也不知道它現在到底在做什麼。
+DISCOVERY_STEPS: tuple[str, ...] = (
+    "讀取網頁",
+    "找出重複的資料區塊",
+    "用瀏覽器再看一次（這一頁的資料是載入後才填上去的）",
+    "試查一次，看查詢結果長什麼樣",
+    "往下點一層，確認裡面是不是廠商",
+    "整理欄位與預覽",
+)
+
+ProgressReport = Callable[[int, int, str], None]
+"""``(第幾步, 共幾步, 這一步在做什麼)``。"""
+
+
+def _step(progress: "ProgressReport | None", label: str) -> None:
+    """回報「現在做到哪一步」。沒給回報函式時什麼都不做。"""
+    if progress is None:
+        return
+    try:
+        index = DISCOVERY_STEPS.index(label) + 1
+    except ValueError:                        # pragma: no cover - 不該發生
+        index = 0
+    progress(index, len(DISCOVERY_STEPS), label)
+
+
 def discover(
     url: str,
     config: AppConfig | None = None,
     fetcher: BaseFetcher | None = None,
     browser: "SharedBrowser | None" = None,
+    progress: "ProgressReport | None" = None,
 ) -> DiscoveryResult:
     """Fetch ``url`` and work out how to scrape it.
 
     Goes through the normal fetcher, so robots.txt and the crawl delay apply
     to discovery exactly as they do to a crawl.
+
+    ``progress`` 會在每一個階段開始時被呼叫一次，見 :data:`DISCOVERY_STEPS`。
     """
     config = config or get_config()
     url = url.strip()
@@ -1567,6 +1601,7 @@ def discover(
 
     owned = fetcher is None
     fetcher = fetcher or build_fetcher(config)
+    _step(progress, DISCOVERY_STEPS[0])
     try:
         page = fetcher.fetch(url)
     finally:
@@ -1584,6 +1619,7 @@ def discover(
         log.info("page declares charset {!r}; re-decoded", declared)
 
     log.info("analysing {} ({} bytes)", url, len(html))
+    _step(progress, DISCOVERY_STEPS[1])
     result = discover_from_html(html, page.url)
     result.encoding = declared
     if declared:
@@ -1607,10 +1643,12 @@ def discover(
     # ``owned`` 才重試：呼叫端自己塞 fetcher 進來（測試、站內探索）時，它要的
     # 就是那一個，不該被我們偷換成瀏覽器。
     if not result.ok and owned:
-        retried = _retry_in_a_browser(url, config, result, browser)
+        retried = _retry_in_a_browser(url, config, result, browser, progress)
         if retried is not None:
+            _step(progress, DISCOVERY_STEPS[5])
             return retried
 
+    _step(progress, DISCOVERY_STEPS[5])
     log.info(
         "discovery: list={!r} items={} fields={}",
         result.list_selector, result.item_count, sorted(result.fields),
@@ -1688,6 +1726,7 @@ def _drilled_page_has_companies(html: str, shape: DiscoveryResult) -> bool:
 def _try_drilling_one_level(
     probe, url: str, input_selector: str, submit_selector: str,
     value: str | None, html: str, shape: DiscoveryResult | None = None,
+    progress: "ProgressReport | None" = None,
 ) -> tuple[DiscoveryResult, dict[str, str]] | None:
     """查出來的不是名單時，往下再點一層看看。
 
@@ -1709,6 +1748,7 @@ def _try_drilling_one_level(
         return None
 
     for row_selector in candidates[:1]:       # 一次就好，每一次都是一趟請求
+        _step(progress, DISCOVERY_STEPS[4])
         try:
             page = probe(
                 url, input_selector, submit_selector,
@@ -1731,7 +1771,10 @@ def _try_drilling_one_level(
 
 
 def _analyse_after_one_query(
-    browser: BaseFetcher, url: str, before: DiscoveryResult
+    browser: BaseFetcher,
+    url: str,
+    before: DiscoveryResult,
+    progress: "ProgressReport | None" = None,
 ) -> DiscoveryResult:
     """送出一次查詢，改用結果那一頁來分析。查不出東西就維持原樣。"""
     form = before.query_form or {}
@@ -1764,6 +1807,7 @@ def _analyse_after_one_query(
     select_html: str | None = None
 
     for input_selector, submit_selector, value, note in attempts:
+        _step(progress, DISCOVERY_STEPS[3])
         try:
             page = probe(url, input_selector, submit_selector, value=value)
         except Exception as exc:              # noqa: BLE001
@@ -1782,7 +1826,8 @@ def _analyse_after_one_query(
                 continue
             select_html = page.html
             drilled = _try_drilling_one_level(
-                probe, url, input_selector, submit_selector, value, page.html
+                probe, url, input_selector, submit_selector, value, page.html,
+                progress=progress,
             )
             if drilled is None:
                 continue
@@ -1799,7 +1844,8 @@ def _analyse_after_one_query(
         # 全是分類代號，一筆都存不進去。實際發生過。
         if route == "text" and select_html is not None and select_input:
             drilled = _try_drilling_one_level(
-                probe, url, select_input, select_submit, None, select_html, shape=after
+                probe, url, select_input, select_submit, None, select_html,
+                shape=after, progress=progress,
             )
             if drilled is not None:
                 _, drill = drilled
@@ -1836,6 +1882,7 @@ def _retry_in_a_browser(
     config: AppConfig,
     before: DiscoveryResult,
     shared: "SharedBrowser | None" = None,
+    progress: "ProgressReport | None" = None,
 ) -> DiscoveryResult | None:
     """用瀏覽器重新分析一次；沒有比較好就回傳 None。
 
@@ -1860,6 +1907,7 @@ def _retry_in_a_browser(
             log.info("no browser engine available for the retry: {}", exc)
             return None
 
+    _step(progress, DISCOVERY_STEPS[2])
     try:
         page = browser.fetch(url)
         result = discover_from_html(page.html, page.url)
@@ -1868,7 +1916,7 @@ def _retry_in_a_browser(
         # 資料長什麼樣」的——偵測只好把 <option> 之類的東西當成清單。先送出
         # 一次查詢再分析結果，跟人打開網頁隨便選一個分類按下去是一樣的動作。
         if result.query_form and not _looks_like_a_directory(result):
-            result = _analyse_after_one_query(browser, url, result)
+            result = _analyse_after_one_query(browser, url, result, progress)
     except Exception as exc:              # noqa: BLE001
         log.warning("browser retry failed: {}", exc)
         return None

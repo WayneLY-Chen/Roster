@@ -40,12 +40,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from core.errors import CrawlError, CRMError, RobotsDisallowedError
+from crawler.discover import DISCOVERY_STEPS
 from crawler.documents import DOCUMENT_KINDS
 from crawler.pipeline import COLLECTABLE_FIELDS
 from controllers.source import KNOWN_FIELDS, PREVIEW_FIELDS, SourceWizardController
@@ -284,10 +286,20 @@ class SourceWizardDialog(QDialog):
         hint.setWordWrap(True)
         section.body_layout.addWidget(hint)
 
+        # 分析一個 JavaScript 名錄要一兩分鐘（讀頁面、開瀏覽器、試查、往下
+        # 點一層）。不定進度條唯一回答得了的問題是「有沒有當掉」——跑了 5 秒
+        # 跟跑了 90 秒看起來一模一樣。改成走固定的幾個階段，而且把「現在在
+        # 做什麼」寫在旁邊。
         self.analyse_progress = QProgressBar()
-        self.analyse_progress.setRange(0, 0)  # 不定進度：分析中沒有百分比可言
+        self.analyse_progress.setRange(0, 0)
         self.analyse_progress.hide()
         section.body_layout.addWidget(self.analyse_progress)
+
+        self.analyse_step_label = QLabel("")
+        self.analyse_step_label.setObjectName("MutedLabel")
+        self.analyse_step_label.setWordWrap(True)
+        self.analyse_step_label.hide()
+        section.body_layout.addWidget(self.analyse_step_label)
 
         parent_layout.addWidget(section)
 
@@ -460,10 +472,44 @@ class SourceWizardDialog(QDialog):
         self.query_loop_note.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         body_layout.addWidget(self.query_loop_note)
 
-        # 預設 3 跟頁數上限一樣：先少量試跑，確定抓對了再放大。97 個條件一次
-        # 跑下去，錯了就是白等半小時，而且是對別人的網站送出幾百次請求。
-        self.query_count_entry = LabeledEntry("查詢幾個選單內的資料", "3")
-        body_layout.addWidget(self.query_count_entry)
+        # 起訖跟頁碼那一排是同一個意思，所以用同一種樣子：97 個分類跑完要
+        # 好幾個小時，使用者本來就會分次跑。沒有起點的話，想爬第 7 個分類的
+        # 唯一辦法是從第 1 個重跑到第 7 個。
+        # 要查哪一段。兩種指法擇一，選了一種另一種就反灰——兩邊都填得下去的話
+        # 「到底哪一個算數」就變成一個沒有人答得出來的問題，而答錯的代價是跑掉
+        # 一整個下午。
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(caption("要查哪一段"))
+        self.query_by_number = QRadioButton("用序號")
+        self.query_by_number.setChecked(True)
+        self.query_by_number.toggled.connect(self._sync_query_range_mode)
+        mode_row.addWidget(self.query_by_number)
+        self.query_by_text = QRadioButton("用選項上的文字")
+        mode_row.addWidget(self.query_by_text)
+        mode_row.addStretch(1)
+        body_layout.addLayout(mode_row)
+
+        number_row = QHBoxLayout()
+        self.query_start_entry = LabeledEntry("從第幾個開始", "1")
+        number_row.addWidget(self.query_start_entry)
+        self.query_end_entry = LabeledEntry("到第幾個為止（留空＝往後數）", "")
+        number_row.addWidget(self.query_end_entry)
+        # 預設查 3 個：先少量試跑，確定抓對了再放大。97 個條件一次跑下去，
+        # 錯了就是白等半小時，而且是對別人的網站送出幾百次請求。
+        self.query_count_entry = LabeledEntry("往後查幾個", "3")
+        number_row.addWidget(self.query_count_entry)
+        body_layout.addLayout(number_row)
+
+        text_row = QHBoxLayout()
+        self.query_start_text_entry = LabeledEntry(
+            "從哪一個開始", "", "例如：03 魚類"
+        )
+        text_row.addWidget(self.query_start_text_entry)
+        self.query_end_text_entry = LabeledEntry(
+            "到哪一個為止", "", "例如：10 動植物油脂"
+        )
+        text_row.addWidget(self.query_end_text_entry)
+        body_layout.addLayout(text_row)
 
         # 有些網站的選單要再點好幾層才看得到廠商，打關鍵字反而一步到位。
         # 填了這一格就改走關鍵字，上面的「先查前幾個」就不算數了。
@@ -475,8 +521,32 @@ class SourceWizardDialog(QDialog):
 
         # 沒勾之前整組藏起來。停用的欄位還是看得到，使用者會停下來問「這是什麼、
         # 給誰看的」——那正是它不該在那裡的證據。
-        self._query_inputs = (self.query_count_entry, self.query_values_entry)
+        self._query_inputs = (
+            self.query_by_number,
+            self.query_by_text,
+            self.query_start_entry,
+            self.query_end_entry,
+            self.query_count_entry,
+            self.query_start_text_entry,
+            self.query_end_text_entry,
+            self.query_values_entry,
+        )
+        self._sync_query_range_mode()
         self._sync_query_loop_enabled(False)
+
+    def _sync_query_range_mode(self, _checked: bool = False) -> None:
+        """序號與文字擇一。選了哪一種，另一種就反灰。
+
+        兩邊都填得下去的話，「到底哪一個算數」會變成一個沒有人答得出來的
+        問題，而答錯的代價是對別人的網站跑掉一整個下午。
+        """
+        by_number = self.query_by_number.isChecked()
+        for widget in (
+            self.query_start_entry, self.query_end_entry, self.query_count_entry
+        ):
+            widget.setEnabled(by_number)
+        for widget in (self.query_start_text_entry, self.query_end_text_entry):
+            widget.setEnabled(not by_number)
 
     def _sync_query_loop_enabled(self, checked: bool) -> None:
         on = bool(checked) and self.query_loop_check.isEnabled()
@@ -568,10 +638,6 @@ class SourceWizardDialog(QDialog):
                 "drill": drill,
             }
 
-        try:
-            max_queries = int(self.query_count_entry.get().strip() or "3")
-        except ValueError:
-            max_queries = 3
         detected = int(self._query_form.get("option_count", 0) or 0)
         if not detected:
             return None            # 關鍵字查詢框但沒填字，沒有東西可以查
@@ -579,10 +645,42 @@ class SourceWizardDialog(QDialog):
             # 選單在，但分析實際試過查不出廠商。沒填關鍵字就寧可什麼都不存，
             # 也不要存一條已知會抓回一堆分類代號的設定。
             return None
+
+        def _int(text: str, fallback: int) -> int:
+            try:
+                return int(text.strip())
+            except ValueError:
+                return fallback
+
+        if self.query_by_number.isChecked():
+            start_at = max(1, min(_int(self.query_start_entry.get(), 1), detected))
+            start_value = end_value = ""
+            # 填了終點就以終點為準（「從第 7 個爬到第 9 個」是使用者真正的說法），
+            # 沒填才看「往後查幾個」那一格。
+            end_text = self.query_end_entry.get().strip()
+            if end_text:
+                end_at = max(start_at, min(_int(end_text, detected), detected))
+                max_queries = end_at - start_at + 1
+            else:
+                max_queries = _int(self.query_count_entry.get(), 3)
+            max_queries = max(1, min(max_queries, detected - start_at + 1))
+        else:
+            # 文字要等真的把頁面打開、讀到選單才對得起來，所以原樣存下去，
+            # 由 crawler/fetcher.py 在查詢當下比對。對不到會退回序號並在
+            # 日誌裡說明，不會安靜地爬成別的範圍。
+            start_at = 1
+            start_value = self.query_start_text_entry.get().strip()
+            end_value = self.query_end_text_entry.get().strip()
+            max_queries = detected if end_value else _int(self.query_count_entry.get(), 3)
+            max_queries = max(1, min(max_queries, detected))
+
         return {
             "input_selector": str(self._query_form.get("input_selector") or ""),
             "submit_selector": str(self._query_form.get("submit_selector") or ""),
-            "max_queries": max(1, min(max_queries, detected)),
+            "start_at": start_at,
+            "start_value": start_value,
+            "end_value": end_value,
+            "max_queries": max_queries,
             "drill": drill,
         }
 
@@ -791,7 +889,12 @@ class SourceWizardDialog(QDialog):
 
         self._set_url_locked(True)
         self.analyse_button.setEnabled(False)
+        self.analyse_progress.setRange(0, len(DISCOVERY_STEPS))
+        self.analyse_progress.setValue(0)
+        self.analyse_progress.setFormat("%v / %m")
         self.analyse_progress.show()
+        self.analyse_step_label.setText("準備中…")
+        self.analyse_step_label.show()
         self.summary_label.setText(
             "分析中，請稍候…此步驟會實際連線到目標網站。\n"
             "如果這個網站的資料是網頁開起來之後才產生的，程式會自動再開一次"
@@ -802,6 +905,7 @@ class SourceWizardDialog(QDialog):
         self.analyse_task = BackgroundTask(
             self,
             worker=self.controller.analyse,
+            on_progress=self._on_analyse_step,
             on_done=self._on_analyse_done,
             on_error=self._on_analyse_error,
         )
@@ -1009,8 +1113,25 @@ class SourceWizardDialog(QDialog):
             # 解鎖時由「有沒有抓到公司名稱」決定儲存能不能按，不是無條件開啟。
             self._update_save_state()
 
+    def _on_analyse_step(self, payload: Any) -> None:
+        """分析跑到哪一步了。
+
+        分析要一兩分鐘，而中間有一半的時間是在等別人的網站回應。沒有這一行
+        字的話，使用者只看得到一條橫槓，分不出「還在跑」跟「卡住了」。
+        """
+        if not isinstance(payload, dict) or payload.get("stage") != "step":
+            return
+        step = int(payload.get("step") or 0)
+        total = int(payload.get("total") or len(DISCOVERY_STEPS))
+        self.analyse_progress.setRange(0, total)
+        self.analyse_progress.setValue(step)
+        self.analyse_step_label.setText(
+            f"第 {step} / {total} 步：{payload.get('label', '')}"
+        )
+
     def _stop_analyse_progress(self) -> None:
         self.analyse_progress.hide()
+        self.analyse_step_label.hide()
         self._set_url_locked(False)
         self.analyse_button.setEnabled(True)
         self.explore_button.setEnabled(True)

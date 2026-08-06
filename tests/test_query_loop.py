@@ -182,7 +182,15 @@ class _FakePage:
         return "select"
 
     def eval_on_selector_all(self, _selector: str, _script: str):
-        return ["", "01", "02", "03"]
+        # 形狀要跟真的瀏覽器一樣：``[值, 顯示文字]``。只回值的話，這個替身就
+        # 不再是它要模擬的那個東西，而「起訖用選項文字指定」那條路完全測不到。
+        # 第一個是「--請選擇--」，值是空的。
+        return [
+            ["", "--請選擇--"],
+            ["01", "01 活動物"],
+            ["02", "02 肉及食用雜碎"],
+            ["03", "03 魚類、甲殼類"],
+        ]
 
     def select_option(self, _selector: str, value: str, force: bool = False) -> None:
         self.selected.append(value)
@@ -467,6 +475,81 @@ def test_resuming_skips_the_conditions_already_done():
 
     # 假的頁面把輸入欄位回報成下拉選單，所以走的是 select_option 那一條。
     assert page.selected == ["丙", "丁"]
+
+
+#: 假頁面回報的選單內容，跟 ``_FakePage.eval_on_selector_all`` 一致。
+#: 「--請選擇--」的值是空的，所以真正查得到的是後面三個。
+
+
+def test_a_starting_position_skips_the_earlier_conditions():
+    """97 個分類跑完要好幾個小時，使用者本來就會分次跑。沒有起點的話，想爬
+    第 3 個分類的唯一辦法是從第 1 個重跑。"""
+    page = _CountingPage()
+    loop = QueryLoop(input_selector="#q", submit_selector="#go", start_at=2)
+
+    list(_fetcher_with(page).iter_query_pages("https://a.test/q", loop))
+
+    assert page.selected == ["02", "03"]
+
+
+def test_a_range_given_as_numbers_is_honoured():
+    page = _CountingPage()
+    loop = QueryLoop(
+        input_selector="#q", submit_selector="#go", start_at=2, max_queries=1
+    )
+
+    list(_fetcher_with(page).iter_query_pages("https://a.test/q", loop))
+
+    assert page.selected == ["02"]
+
+
+def test_a_range_can_be_given_as_the_text_on_the_options():
+    """使用者看著畫面說的是「從 02 肉類 爬到 03」，沒有人會去數那是第幾個。"""
+    page = _CountingPage()
+    loop = QueryLoop(
+        input_selector="#q",
+        submit_selector="#go",
+        start_value="02 肉",
+        end_value="03",
+    )
+
+    list(_fetcher_with(page).iter_query_pages("https://a.test/q", loop))
+
+    assert page.selected == ["02", "03"]
+
+
+def test_matching_the_option_text_also_works_on_the_value():
+    """有些選單的顯示文字跟值一樣，有些不一樣。兩邊都比對，使用者打哪一種
+    都認得。"""
+    page = _CountingPage()
+    loop = QueryLoop(input_selector="#q", submit_selector="#go", start_value="03")
+
+    list(_fetcher_with(page).iter_query_pages("https://a.test/q", loop))
+
+    assert page.selected == ["03"]
+
+
+def test_a_range_that_matches_nothing_falls_back_instead_of_crawling_the_wrong_part():
+    """打錯字的代價不該是「安靜地爬了完全不同的一段」——那要跑完才發現。"""
+    page = _CountingPage()
+    loop = QueryLoop(
+        input_selector="#q", submit_selector="#go", start_value="沒有這個分類"
+    )
+
+    list(_fetcher_with(page).iter_query_pages("https://a.test/q", loop))
+
+    assert page.selected == ["01", "02", "03"]
+
+
+def test_a_starting_position_and_resuming_do_not_cancel_each_other_out():
+    """起點是使用者指定的，續跑的進度是在那個起點之後往前推的。兩者互相
+    蓋掉的話，接續會跳到完全不對的地方。"""
+    page = _CountingPage()
+    loop = QueryLoop(input_selector="#q", submit_selector="#go", start_at=2)
+
+    list(_fetcher_with(page).iter_query_pages("https://a.test/q", loop, skip_values=1))
+
+    assert page.selected == ["03"]
 
 
 def test_the_progress_marker_only_moves_when_a_condition_is_finished():

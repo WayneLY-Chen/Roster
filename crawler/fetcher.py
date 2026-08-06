@@ -154,21 +154,63 @@ def _is_a_select(page: Any, selector: str) -> bool:
     return str(tag).lower() == "select"
 
 
-def _option_values(page: Any, selector: str) -> list[str]:
-    """下拉選單裡每一個真正可以查的選項值。
+def _option_pairs(page: Any, selector: str) -> list[tuple[str, str]]:
+    """下拉選單裡每一個真正可以查的 ``(值, 顯示文字)``。
 
     第一個通常是「--請選擇--」，值是空的；那不是一個查詢條件，是提示文字。
+
+    顯示文字要一起帶回來，因為使用者是照著畫面上看到的東西講話的——他說的是
+    「從 03 魚類 爬到 10」，不是「從第 3 個爬到第 10 個」。而 ``value`` 常常
+    只是 ``"03"``，甚至是一組沒有意義的編號。
     """
     if not _is_a_select(page, selector):
         return []
     try:
-        values = page.eval_on_selector_all(
-            f"{selector} option", "els => els.map(e => e.value)"
+        pairs = page.eval_on_selector_all(
+            f"{selector} option",
+            "els => els.map(e => [e.value, (e.textContent || '').trim()])",
         )
     except Exception as exc:                # noqa: BLE001
         log.warning("讀不到 {} 的選項：{}", selector, exc)
         return []
-    return [str(v) for v in (values or []) if str(v).strip()]
+    result: list[tuple[str, str]] = []
+    for entry in pairs or []:
+        # 舊的寫法只問 value，所以這裡兩種形狀都接：一個字串當成「值就是它，
+        # 沒有顯示文字」。瀏覽器回來的東西不保證是我們想的樣子，為了一個
+        # 選項的形狀讓整趟爬取當掉不值得。
+        if isinstance(entry, (list, tuple)):
+            value = str(entry[0]) if entry else ""
+            label = str(entry[1]) if len(entry) > 1 else ""
+        else:
+            value, label = str(entry), ""
+        if value.strip():
+            result.append((value, label))
+    return result
+
+
+def _option_values(page: Any, selector: str) -> list[str]:
+    """下拉選單裡每一個真正可以查的選項值。"""
+    return [value for value, _label in _option_pairs(page, selector)]
+
+
+def _match_option(needle: str, pairs: list[tuple[str, str]], *, last: bool) -> int | None:
+    """使用者打的字對到第幾個選項；對不到回 ``None``。
+
+    值與顯示文字都比對，而且是「包含」不是「等於」——使用者會打「03」也會打
+    「03 魚類」，兩種都要認得。``last`` 是給終點用的：「爬到 10」指的是最後
+    一個含「10」的選項，不是第一個。
+    """
+    needle = needle.strip().lower()
+    if not needle:
+        return None
+    hits = [
+        index
+        for index, (value, label) in enumerate(pairs)
+        if needle in value.strip().lower() or needle in label.strip().lower()
+    ]
+    if not hits:
+        return None
+    return hits[-1] if last else hits[0]
 
 
 def _close_modal(page: Any, modal: Any) -> None:
@@ -662,12 +704,42 @@ class PlaywrightFetcher(BaseFetcher):
             if actions:
                 _run_page_actions(page, actions)
 
-            values = list(loop.values) or _option_values(page, loop.input_selector)
+            pairs = _option_pairs(page, loop.input_selector)
+            values = list(loop.values) or [value for value, _ in pairs]
             if not values:
                 raise CrawlError(
                     f"逐項查詢找不到任何可以查的值：{loop.input_selector} "
                     "既不是下拉選單，來源也沒有指定要查哪些值。"
                 )
+
+            # 使用者指定的起訖。97 個分類跑完要好幾個小時，本來就會分次跑
+            # ——今天 1 到 20，明天從 21 接下去。這一段先套，續跑的進度才是
+            # 「從這個起點之後又做完幾個」，兩者不會互相蓋掉。
+            #
+            # 起訖可以是序號，也可以是選項上的文字：使用者看著畫面說的是
+            # 「從 03 魚類 爬到 10」，沒有人會去數那是第幾個。
+            start_index = max(0, int(getattr(loop, "start_at", 1) or 1) - 1)
+            count = loop.max_queries
+
+            start_text = str(getattr(loop, "start_value", "") or "")
+            matched = _match_option(start_text, pairs, last=False) if pairs else None
+            if start_text and matched is None:
+                log.warning("找不到起點「{}」這個選項，改從第一個開始", start_text)
+            elif matched is not None:
+                start_index = matched
+
+            end_text = str(getattr(loop, "end_value", "") or "")
+            end_index = _match_option(end_text, pairs, last=True) if pairs else None
+            if end_text and end_index is None:
+                log.warning("找不到終點「{}」這個選項，改用「查幾個」的設定", end_text)
+            elif end_index is not None:
+                count = max(1, end_index - start_index + 1)
+
+            if start_index or count != loop.max_queries:
+                log.info(
+                    "逐項查詢從第 {} 個條件開始，共查 {} 個", start_index + 1, count
+                )
+            values = values[start_index:]
 
             # 接續上一次：前面那些條件已經整個做完了，不必再查一遍。
             if skip_values:
@@ -677,7 +749,7 @@ class PlaywrightFetcher(BaseFetcher):
             # 已經**整個做完**幾個條件。中斷續跑靠它，所以它只在一個條件底下的
             # 東西全部處理完之後才前進——不然接續時會跳過還沒點完的那一個。
             completed = 0
-            for value in values[: loop.max_queries]:
+            for value in values[:count]:
                 if cancel_event is not None and cancel_event.is_set():
                     return
                 self.limiter.wait(minimum=self.robots.crawl_delay(url))

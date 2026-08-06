@@ -70,7 +70,12 @@ class SourceWizardController:
         from crawler.discover import discover
 
         report({"stage": "fetching", "url": url})
-        result = discover(url)
+        result = discover(
+            url,
+            progress=lambda step, total, label: report(
+                {"stage": "step", "step": step, "total": total, "label": label}
+            ),
+        )
         report({"stage": "done"})
         return result
 
