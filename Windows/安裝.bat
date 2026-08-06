@@ -11,6 +11,9 @@ REM  pieces are installed.
 REM ---------------------------------------------------------------
 setlocal
 pushd "%~dp0.."
+REM  The project root, captured once. %CD% changes if anything below cd's,
+REM  and the launch at the end must not depend on that.
+set "ROOT=%CD%"
 title Roster - setup
 
 echo.
@@ -102,9 +105,22 @@ echo  To start the application: double-click the launcher in this
 echo  same folder. The command line one is next to it.
 echo.
 
+REM  Launch python directly, not the Chinese-named launcher script.
+REM
+REM  This file is ASCII-only on purpose (see the header). Referring to
+REM  "\U555F\U52D5.bat" from in here broke that rule and the prompt failed with
+REM  "path not found" -- and %~dp0 already ends in a backslash, so the path
+REM  had a doubled separator on top of the mangled name. Reported.
+REM
+REM  pythonw.exe, not python.exe: the GUI should not drag a console window
+REM  along behind it.
 choice /c YN /m "Start Roster now"
 if errorlevel 2 goto :done
-start "" "%~dp0\啟動.bat"
+if exist "%ROOT%\.venv\Scripts\pythonw.exe" (
+    start "" "%ROOT%\.venv\Scripts\pythonw.exe" "%ROOT%\main.py" gui
+) else (
+    start "" "%ROOT%\.venv\Scripts\python.exe" "%ROOT%\main.py" gui
+)
 
 :done
 popd
