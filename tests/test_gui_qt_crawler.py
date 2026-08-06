@@ -246,3 +246,29 @@ def test_custom_sources_dialog_lists_and_deletes(qt_app, patch_config, monkeypat
 
     assert dialog.table.row_count() == 0
     assert changed == ["my_custom"]
+
+
+def test_the_new_source_button_opens_an_empty_wizard(qt_app, patch_config):
+    """按「＋ 自訂網址…」要開一個空白的精靈，不是去編輯某個來源。
+
+    這是實際炸過的當機。``clicked`` 的完整簽章是 ``clicked(bool checked=false)``
+    ——直接把它接到 ``_open_source_wizard(entry=None)`` 的話，Qt 會把那個布林值
+    當成 ``entry`` 送進來，而 ``False is not None`` 成立，於是程式拿 ``False``
+    去當一份來源設定用：
+
+        AttributeError: 'bool' object has no attribute 'get'
+
+    所以這個測試一定要**真的發訊號**，不能直接呼叫 ``_open_source_wizard()``
+    ——直接呼叫的話這個 bug 完全測不到，那正是它當初漏掉的原因。
+    """
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    page.custom_source_button.click()
+
+    wizard = page._wizard
+    assert wizard is not None
+    # 空白精靈：沒有在編輯任何既有來源，網址欄也是空的。
+    assert wizard._editing_source is None
+    assert wizard.url_entry.text() == ""
+    wizard.close()

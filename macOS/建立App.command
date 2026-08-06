@@ -64,6 +64,18 @@ set -uo pipefail
 project="__PROJECT__"
 log="$project/logs/啟動失敗.log"
 
+# 先留腳印，再做任何事。
+#
+# 「點了完全沒反應」是這個 App 最難查的狀況，因為 Finder 啟動時沒有終端機
+# 可以印東西。原本只有「Python 跑起來但失敗」才會留紀錄——真正難查的是**更早**
+# 就掛掉的情況（bundle 沒建好、路徑沒換掉、osascript 被系統擋住），那時候
+# 畫面上什麼都沒有，磁碟上也什麼都沒有，等於無從查起。
+#
+# 所以每一次啟動都先寫一行。下次「點了沒反應」時，這個檔案就是唯一的線索：
+# 有這一行代表殼有跑到，沒有代表問題在更外層（權限、隔離標記、bundle 結構）。
+mkdir -p "$project/logs" 2>/dev/null || true
+echo "=== $(date '+%Y-%m-%d %H:%M:%S') 啟動 ===" >> "$log" 2>/dev/null || true
+
 fail() {
     mkdir -p "$project/logs" 2>/dev/null || true
     {
@@ -75,12 +87,17 @@ fail() {
     # ——那會變成「連錯誤訊息都看不到」，比原本的問題更糟。
     local message
     message="$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tail -c 900)"
-    osascript -e "display dialog \"名單匠啟動失敗：
+    if ! osascript -e "display dialog \"名單匠啟動失敗：
 
 $message
 
 完整訊息：logs/啟動失敗.log\" buttons {\"好\"} default button 1 with title \"名單匠\" with icon stop" \
         >/dev/null 2>&1
+    then
+        # 對話框開不起來（osascript 被系統政策擋掉、或沒有視窗工作階段）。
+        # 那就把紀錄檔直接打開——總比「點了沒反應」好。
+        open -e "$log" >/dev/null 2>&1 || open "$project/logs" >/dev/null 2>&1 || true
+    fi
     exit 1
 }
 
@@ -139,6 +156,19 @@ fi
 # 就是一個點不開的空殼，而畫面上卻寫著「已建立」。
 if [ ! -x "$app/Contents/MacOS/Roster" ]; then
     echo "[錯誤] Roster.app 沒有建立成功（找不到 $app/Contents/MacOS/Roster）。"
+    exit 1
+fi
+
+# 專案路徑真的換進去了嗎？
+#
+# 上面那一步有兩條路（python3，失敗才退回 sed），而兩條都失敗的話會留下一個
+# 寫著 __PROJECT__ 的啟動器——檔案在、也可以執行，所以上面那一關過得了，
+# 但雙擊時它會去找一個叫「__PROJECT__」的資料夾，然後失敗。使用者看到的是
+# 「App 建好了，可是點不開」，而這正是最難自己查出來的那一種。
+if grep -q "__PROJECT__" "$app/Contents/MacOS/Roster"; then
+    echo "[錯誤] 專案路徑沒有寫進 Roster.app 的啟動器裡。"
+    echo "       這樣產生出來的 App 點下去不會有反應。"
+    echo "       請把這幾行整段複製給作者（macOS/診斷.command 的輸出也一起）。"
     exit 1
 fi
 

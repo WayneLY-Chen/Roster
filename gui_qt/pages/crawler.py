@@ -191,7 +191,12 @@ class CrawlerPage(BasePage):
         buttons_row.addWidget(self.verify_button)
 
         self.custom_source_button = QPushButton("＋ 自訂網址…")
-        self.custom_source_button.clicked.connect(self._open_source_wizard)
+        # lambda 是必要的，不能直接接 self._open_source_wizard。
+        #
+        # Qt 的 clicked 是 clicked(bool checked = false)——它會把那個布林值當成
+        # 第一個參數送進來，於是「開一個新的來源」變成「編輯 False 這個來源」，
+        # 一按就爆 AttributeError: 'bool' object has no attribute 'get'。
+        self.custom_source_button.clicked.connect(lambda: self._open_source_wizard())
         buttons_row.addWidget(self.custom_source_button)
 
         # 名錄類網站通常只公開電話跟連結、沒有信箱——信箱要點進公司自己的
