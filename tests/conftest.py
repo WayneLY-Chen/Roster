@@ -8,6 +8,7 @@ stay independent of run order.
 
 from __future__ import annotations
 
+import gc
 import tempfile
 from pathlib import Path
 
@@ -69,8 +70,16 @@ def _preload_worker_modules() -> None:
     preload()
 
 
-def drain_qt_thread_pool(timeout_ms: int = 10_000) -> None:
-    """等 ``QThreadPool`` 借出去的執行緒全部跑完。
+#: 排乾執行緒池要來回幾次。見 :func:`drain_qt_thread_pool`。
+#:
+#: 一次「等工作跑完 → 送出回呼」只擋得住一層。這支專案裡最長的鏈是兩層
+#: （查詢完成 → ``_start_pending_if_any()`` 再開一次查詢），六次是給它的
+#: 安全餘裕，而閒置時每一次的成本趨近於零。
+_DRAIN_ROUNDS = 6
+
+
+def drain_qt_thread_pool(timeout_ms: int = 10_000, rounds: int = _DRAIN_ROUNDS) -> None:
+    """等 ``QThreadPool`` 借出去的執行緒全部跑完，**並且**把回呼送完。
 
     為什麼一定要做：``BackgroundTask`` 把工作丟進**全域**的執行緒池，那個池
     活得比任何一個測試都久。一個測試如果沒等它的工作結束就結束了，那條執行緒
@@ -79,20 +88,115 @@ def drain_qt_thread_pool(timeout_ms: int = 10_000) -> None:
     記憶體，直譯器直接以 access violation 收場，而且回報的位置是**後面某個
     測試**，跟真正的肇事者完全對不起來。
 
-    在測試之間排乾執行緒池，這條路就斷了。
+    ## 為什麼光 ``waitForDone()`` 不夠——整場測試偶爾當掉的真正原因
+
+    ``waitForDone()`` 等的是**工作執行緒**，不是**結果**。worker 跑完之後
+    ``succeeded`` 那個 signal 是跨執行緒發的，Qt 會把它排進 UI 執行緒的事件
+    佇列等著送；這時候工作執行緒已經還回池子裡了，``waitForDone()`` 立刻就
+    回來，而那個回呼**還躺在佇列裡沒有送出去**。
+
+    測試結束，fixture 把引擎 ``dispose()`` 掉。那個回呼就這樣一直躺著，直到
+    **後面某一個測試**呼叫 ``processEvents()``——GUI 測試幾乎每一個都會，那
+    是等自己那份背景工作的標準寫法——順手把它送了出去。於是公司頁的
+    ``_apply_result()`` 在一個跟它無關的測試中間被呼叫，而它最後一行是
+    ``_start_pending_if_any()``：**再開一次查詢**。那次查詢對著已經
+    ``dispose()`` 掉的引擎要一條新連線，在 ``PRAGMA journal_mode=WAL`` 上
+    access violation，整個直譯器當場結束。
+
+    實際抓到的堆疊（``-X faulthandler``）就是這個樣子：崩潰的執行緒是
+    ``gui_qt/tasks.py`` → ``pages/companies.py:_fetch`` → SQLAlchemy 開新連線
+    → ``database/session.py:_on_connect``，而主執行緒當時正停在
+    ``tests/test_gui_qt_logs.py`` 的 ``_wait_for``（也就是 ``processEvents()``）。
+    兩個檔案之間毫無關係——這正是這個 flake 幾年來都對不出肇事者的原因。
+
+    所以排乾必須是「等工作 → 送回呼 → 再等工作」交替進行：送出去的回呼可能
+    再開一個新工作，而那個新工作也得在**引擎還活著的現在**跑完，不能留到
+    下一個測試。
+
+    ## 中間那個 ``gc.collect()`` 不是保險，是修好這個 flake 的那一行
+
+    光加上 ``processEvents()`` 沒有解決問題，只是把崩潰的位置從「後面某個
+    測試」搬到這裡。真正的第二個原因是 **Python 的循環垃圾回收在 Qt 正在
+    送事件的當下去刪 Qt 物件**。
+
+    頁面物件之間幾乎全是循環參照（Qt 的 parent/child 一份、Python 的回呼
+    closure 一份），所以它們只能靠循環回收器釋放，而循環回收是由「配置了
+    多少物件」觸發的——時間點完全是隨機的。它一旦落在 ``processEvents()``
+    裡面，PySide6 就會在 Qt 派送事件的途中把底層的 C++ QWidget 刪掉，那是
+    重入式的解構，直譯器直接 access violation。這解釋了這個 flake 全部的
+    特徵：位置隨機、跟改了什麼無關、測試越多越容易發生、而崩潰點永遠是某
+    一個 ``processEvents()``。
+
+    所以在**每個測試結束、而且不在任何 Qt 派送裡面**的這個時間點主動收一次，
+    上一個測試留下的循環垃圾就會在安全的地方被釋放，不會累積到後面某次
+    ``processEvents()`` 中間才引爆。
+
+    實測（``tests/test_gui_qt_companies.py`` + ``_feedback`` + ``_import_page``
+    + ``_logs`` 四個檔案一起跑，這是最短的可重現組合）：
+
+        原本                                    6 / 30 崩潰
+        只加 processEvents()                    位置變了，照崩
+        把 _Signals 物件全部留著不回收          3 / 12 崩潰（假設不成立）
+        整個 gc.disable()                       0 / 12 崩潰（指向 GC）
+        每一圈都 gc.collect()                   0 / 24 崩潰（但慢十幾倍，見下）
+        目前這個版本（收兩次）                  0 / 24 崩潰
+
+    **不要因為「看起來像沒必要的效能負擔」就把這兩行拿掉。**
+
+    ## 但也不要每一個測試都收——那個代價量過，是十幾倍
+
+    一次完整的循環回收要掃過整個堆積，而這支測試在 SQLAlchemy 與 Qt 之間撐
+    著一個很大的堆積，實測每次 50–200ms。一開始這裡是在上面那個迴圈裡每一圈
+    都收一次，1502 個測試乘以六圈，整場從 100 秒變成二十幾分鐘。
+
+    所以收兩次就好（進迴圈前一次、收尾一次），而且只有**真的建過 Qt 元件的
+    測試**才收——判斷方式是那個測試有沒有要 ``qt_app`` 這個 fixture。沒有
+    widget 就沒有那種循環垃圾，也就沒有這個崩潰。
     """
     try:
-        from PySide6.QtCore import QThreadPool
+        from PySide6.QtCore import QCoreApplication, QThreadPool
     except Exception:      # pragma: no cover - 沒有 Qt 的環境
         return
-    QThreadPool.globalInstance().waitForDone(timeout_ms)
+
+    pool = QThreadPool.globalInstance()
+    app = QCoreApplication.instance()
+    if app is None:        # pragma: no cover - 沒建過 QApplication 的測試
+        pool.waitForDone(timeout_ms)
+        return
+
+    if _TEST_USES_QT:
+        gc.collect()
+    for _ in range(rounds):
+        pool.waitForDone(timeout_ms)
+        # 這一行才是重點：把排隊中的 succeeded/failed/progress 送出去。
+        app.processEvents()
+    # 最後一定要以「等工作跑完」收尾——剛剛那次 processEvents() 可能又開了
+    # 一個新工作，不能讓它活著離開這個測試。
+    pool.waitForDone(timeout_ms)
+    if _TEST_USES_QT:
+        gc.collect()
+
+
+#: 現在跑的這個測試有沒有建過 Qt 元件。由下面那個 autouse fixture 維護。
+#:
+#: 用模組層的旗標而不是把它當參數傳，是因為 :func:`drain_qt_thread_pool` 有
+#: 兩個呼叫端（這裡與 ``db_session``），而 ``db_session`` 拿不到 ``request``
+#: ——它比 autouse 那支晚建立、早拆除，正是需要一起保護的那一段。
+_TEST_USES_QT = False
 
 
 @pytest.fixture(autouse=True)
-def _no_background_threads_leak_between_tests():
+def _no_background_threads_leak_between_tests(request):
     """每一個測試結束都把執行緒池排乾，不管它有沒有用到資料庫。"""
-    yield
-    drain_qt_thread_pool()
+    global _TEST_USES_QT
+    # 建過 widget 的測試一定會要 ``qt_app``（每個 GUI 測試模組各自定義一份），
+    # 所以這是「這個測試碰過 Qt 嗎」最準也最便宜的判斷。
+    _TEST_USES_QT = "qt_app" in request.fixturenames
+    try:
+        yield
+        drain_qt_thread_pool()
+    finally:
+        _TEST_USES_QT = False
 
 
 @pytest.fixture

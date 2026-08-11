@@ -965,3 +965,29 @@ def test_no_contact_person_creates_nothing(db_session):
     db_session.commit()
 
     assert ContactRepository(db_session).count() == 0
+
+
+def test_completion_progress_separates_untried_from_still_missing(db_session):
+    """分批補齊的畫面靠這兩個數字才說得清楚。
+
+    「待補」跑完一批幾乎不會動——補不到的公司仍然缺欄位。會動的是「還沒
+    跑過」。只回一個總數的話，使用者按了五次看到同一個數字，會以為按鈕
+    沒有作用。
+    """
+    from database.models import now
+
+    repo = CompanyRepository(db_session)
+    tried, _ = repo.upsert(_clean("跑過但沒補到"))
+    repo.upsert(_clean("還沒跑過", dedupe_key="n:還沒跑過"))
+    complete, _ = repo.upsert(
+        _clean("資料齊全", dedupe_key="n:資料齊全", email="a@b.com")
+    )
+    complete.website = "https://example.com"
+    tried.completion_checked_at = now()
+    db_session.commit()
+
+    progress = repo.completion_progress(("email", "website"))
+
+    assert progress.pending == 2      # 齊全的那家不算
+    assert progress.untried == 1
+    assert progress.tried == 1

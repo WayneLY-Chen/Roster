@@ -34,10 +34,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from core.config import get_config, save_user_setting
 from core.errors import CRMError
 from core.legal import OPEN_DATA_ATTRIBUTION as ATTRIBUTION
 from core.schemas import CrawlSummary, VerifySummary
@@ -227,6 +229,25 @@ class CrawlerPage(BasePage):
         )
         self.completion_button.clicked.connect(self._start_completion)
         buttons_row.addWidget(self.completion_button)
+
+        # 「這次補幾家」。
+        #
+        # 一份 2700 家的名單整批跑要好幾個小時，而中間任何一個中斷（關機、
+        # 網路斷、搜尋來源被限流）都會讓人不知道跑到哪了。分批跑就沒有這個
+        # 問題，但前提是**程式自己記得上次跑到哪**——所以這裡只問「幾家」，
+        # 不問「從第幾家開始」。從第幾家開始由 completion_checked_at 決定，
+        # 見 crawler/complete.py 的 queue_position()。
+        buttons_row.addWidget(caption("這次補"))
+        self.completion_count = QSpinBox()
+        self.completion_count.setRange(1, 100_000)
+        self.completion_count.setSuffix(" 家")
+        self.completion_count.setValue(get_config().completion.batch_size)
+        self.completion_count.setToolTip(
+            "這次要處理幾家。程式會自己從上次停下來的地方接著跑，"
+            "所以不需要輸入「從第幾家開始」。\n"
+            "沒補到東西的公司也會被記成跑過了，下一批才不會又是同一批。"
+        )
+        buttons_row.addWidget(self.completion_count)
 
         self.manage_sources_button = QPushButton("管理自訂來源")
         self.manage_sources_button.clicked.connect(self._open_source_manager)
@@ -630,27 +651,40 @@ class CrawlerPage(BasePage):
             return
 
         try:
-            pending = self.completion_controller.pending_count()
+            progress = self.completion_controller.pending_progress()
             provider = self.completion_controller.search_provider_label()
         except CRMError as exc:
             self.report_error(exc)
             return
 
-        if not pending:
+        if not progress.pending:
             self.status("每一家公司的資料都齊了，沒有需要補的", "success")
             return
 
-        # 一家公司最多是：商業司一次 + 搜尋一次 + 官網兩頁。全部都缺的那種
-        # 名單才會走完整條路，所以這是上限不是平均值，說「最多」而不說「大約」。
-        crawler = self.completion_controller.config.crawler
-        per_company = max(1.0, crawler.delay_seconds + crawler.delay_jitter / 2) * 4
-        minutes = max(1, round(pending * per_company / 60))
+        batch = min(self.completion_count.value(), progress.pending)
 
+        # 一家公司最多是：商業司一次 + 搜尋一次 + 官網 max_pages 頁。全部都缺
+        # 的那種名單才會走完整條路，所以這是上限不是平均值，說「最多」而不說
+        # 「大約」。
+        settings = self.completion_controller.config.completion
+        crawler = self.completion_controller.config.crawler
+        requests_each = 2 + settings.max_pages
+        per_company = max(1.0, crawler.delay_seconds + crawler.delay_jitter / 2)
+        minutes = max(1, round(batch * per_company * requests_each / 60))
+
+        # 「還沒跑過」跟「待補」要分開講。跑完一批之後待補幾乎不會變——補不到
+        # 的公司仍然缺欄位——會動的是「還沒跑過」。只顯示待補的話，使用者按了
+        # 五次看到同一個數字，會以為按鈕沒有用。
+        queue = f"目前有 {progress.pending} 家公司缺了至少一個欄位"
+        if progress.tried:
+            queue += f"，其中 {progress.untried} 家還沒跑過、{progress.tried} 家跑過但沒補到"
         reply = QMessageBox.question(
             self,
             "補齊公司資料",
-            f"有 {pending} 家公司缺了至少一個欄位。\n\n"
-            "程式會依序做三件事：\n"
+            f"{queue}。\n"
+            f"這次處理 {batch} 家——程式會自己從上次停下來的地方接著跑，"
+            "不必輸入從第幾家開始。\n\n"
+            "每一家依序做三件事：\n"
             "　1. 用公司名稱或統一編號查經濟部商業司，補上統編、"
             "登記負責人、登記地址與登記狀態\n"
             "　2. 還是沒有網址的話，搜尋找出它的官網\n"
@@ -660,14 +694,22 @@ class CrawlerPage(BasePage):
             "每個網站都會各自檢查 robots.txt 並遵守請求間隔，"
             f"因此最多需要 {minutes} 分鐘。\n\n"
             f"{ATTRIBUTION}\n\n"
-            "要開始嗎？（過程中可以按「取消」停止）",
+            "要開始嗎？（過程中可以按「取消」停止，已經補好的會留著）",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self._append_log(f"開始補齊公司資料，共 {pending} 家公司（找官網：{provider}）...")
+        # 真的按下去了才記住這個數字。使用者只是拿滑鼠滾輪滑過那個框、
+        # 最後沒有跑，不該被當成「我以後都要跑這麼多」。
+        self._remember_batch_size(self.completion_count.value())
+
+        self._append_log(
+            f"開始補齊公司資料，這批 {batch} 家（待補共 {progress.pending} 家，"
+            f"找官網：{provider}）..."
+        )
         self._append_log(ATTRIBUTION)
         self.completion_button.setEnabled(False)
+        self.completion_count.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.app.status_bar.start_progress()
         self.status("補齊公司資料中...", "normal")
@@ -679,12 +721,22 @@ class CrawlerPage(BasePage):
             on_done=self._on_completion_done,
             on_error=self._on_completion_error,
         )
-        self.completion_task.start()
+        self.completion_task.start(limit=batch)
+
+    def _remember_batch_size(self, value: int) -> None:
+        """把「這次補幾家」寫回 ``user_settings.yaml``。
+
+        存不進去不該讓補齊跑不了——下次要重打一次數字，僅此而已。
+        """
+        try:
+            save_user_setting("completion", "batch_size", value)
+        except CRMError as exc:
+            self._append_log(f"（記不住「這次補幾家」：{exc}）")
 
     def _on_completion_done(self, summary: Any) -> None:
         self._finish_completion()
         self._append_log(
-            f"補齊完成 -- 處理 {summary.considered} 家，更新 {summary.updated} 家，"
+            f"補齊完成 -- 這批處理 {summary.considered} 家，更新 {summary.updated} 家，"
             f"補上 {summary.fields_filled} 個欄位"
         )
         if summary.filled:
@@ -705,10 +757,24 @@ class CrawlerPage(BasePage):
             self._append_log(
                 f"　{summary.registry_busy} 家因商業司忙線跳過（下次會再試）"
             )
+        # 這一行才是分批跑的人真正要看的：還剩幾家、下次按下去會不會有進展。
+        self._append_log(
+            f"　這批標記完成 {summary.marked_done} 家，還剩 {summary.remaining} 家待補"
+            f"（其中 {summary.remaining_untried} 家還沒跑過）"
+        )
         if summary.search_stopped:
             self._append_log(f"⚠ 搜尋已停止：{summary.search_stopped}")
+            self._append_log(
+                "　被限流時沒搜尋到的公司不會被記成跑過，下次按下去還是它們。"
+            )
             self.status(
                 f"補齊完成（搜尋中途停止），更新 {summary.updated} 家", "warning"
+            )
+        elif summary.remaining_untried:
+            self.status(
+                f"補齊完成，更新 {summary.updated} 家；還有 "
+                f"{summary.remaining_untried} 家沒跑過，可以再按一次",
+                "success",
             )
         else:
             self.status(f"補齊完成，更新 {summary.updated} 家", "success")
@@ -721,6 +787,7 @@ class CrawlerPage(BasePage):
 
     def _finish_completion(self) -> None:
         self.completion_button.setEnabled(True)
+        self.completion_count.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.app.status_bar.stop_progress()
 

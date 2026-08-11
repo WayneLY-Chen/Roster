@@ -884,7 +884,13 @@ def registry(
 
 @app.command()
 def complete(
-    limit: Optional[int] = typer.Option(None, "--limit", "-n", help="最多處理幾家公司。"),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="這次處理幾家。不必指定從第幾家開始——沒跑過的排最前面，跑過的"
+        "照上次跑的時間由舊到新，所以再跑一次就是接著上一次跑。",
+    ),
     fields: Optional[str] = typer.Option(
         None,
         "--fields",
@@ -950,6 +956,9 @@ def complete(
         ("處理的公司", summary.considered),
         ("實際更新", summary.updated),
         ("補上的欄位總數", summary.fields_filled),
+        ("標記為跑過", summary.marked_done),
+        ("還剩待補", summary.remaining),
+        ("其中還沒跑過", summary.remaining_untried),
         ("商業司對到", summary.registry_matched),
         ("送出的搜尋", summary.searches_made),
         ("找到官網", summary.websites_found),

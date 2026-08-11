@@ -58,22 +58,39 @@ from verifier.validators import is_role_address, is_valid_email, is_valid_phone
 log = get_logger(LogCategory.CRAWL)
 
 #: 依序嘗試的聯絡頁路徑，命中率高的排前面。
+#:
+#: 這一串只在**首頁上一個像聯絡頁的連結都找不到**時才會用到，所以它猜錯的
+#: 成本是實打實的請求。順序就是台灣公司網站的實際分佈：``/contact`` 系列
+#: 最常見，其次是繁中語系前綴（多語系網站的根目錄常常是英文版或跳轉頁，
+#: 連結抓不到），最後才是 ``/about`` 系列。
 CONTACT_PATHS = (
     "/contact",
     "/contact-us",
     "/contactus",
-    "/about",
-    "/about-us",
     "/zh-tw/contact",
     "/tw/contact",
     "/contact.html",
     "/contact.php",
+    "/about",
+    "/about-us",
     "/about.html",
 )
 
 #: 連結文字符合這些字樣時，視為聯絡頁。
 _CONTACT_TEXT = re.compile(
-    r"聯絡|連絡|聯繫|客服|洽詢|關於我們|contact|about", re.IGNORECASE
+    r"聯絡|連絡|聯繫|连络|客服|洽詢|詢價|據點|關於我們|關於|"
+    r"contact|about|inquiry|enquiry",
+    re.IGNORECASE,
+)
+
+#: 這些字樣「一定是聯絡頁」，比 :data:`_CONTACT_TEXT` 其餘的（``about``、
+#: ``關於``）更值得先點。
+#:
+#: 這個區分有用是因為頁數有上限：``關於我們`` 常常是公司沿革、董事長的話，
+#: 信箱不在那裡。兩者都符合時先點真正的聯絡頁，等於用同樣的請求次數換到
+#: 更高的命中率。
+_STRONG_CONTACT_TEXT = re.compile(
+    r"聯絡|連絡|聯繫|连络|客服|洽詢|詢價|contact|inquiry|enquiry", re.IGNORECASE
 )
 
 #: 這些網域不是公司自己的網站，抓到也沒有意義。
@@ -132,11 +149,16 @@ def _usable(email: str | None) -> bool:
     return not email.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"))
 
 
-def _contact_links(html: str, base_url: str) -> list[str]:
-    """頁面上指向聯絡頁的連結，同網域者優先。"""
+def _contact_links(html: str, base_url: str, limit: int = 3) -> list[str]:
+    """頁面上指向聯絡頁的連結，真正的聯絡頁排在「關於我們」前面。
+
+    只收同網域的連結。排序是穩定的：先照 :data:`_STRONG_CONTACT_TEXT` 分成
+    兩組，組內維持原本在頁面上的順序。
+    """
     soup = make_soup(html)
     host = _site_host(base_url)
-    found: list[str] = []
+    found: list[tuple[int, str]] = []
+    seen: set[str] = set()
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"]
         if not isinstance(href, str) or href.startswith(("mailto:", "tel:", "#")):
@@ -145,11 +167,12 @@ def _contact_links(html: str, base_url: str) -> list[str]:
         if not _CONTACT_TEXT.search(text):
             continue
         absolute = urljoin(base_url, href)
-        if _site_host(absolute) != host:
+        if _site_host(absolute) != host or absolute in seen:
             continue
-        if absolute not in found:
-            found.append(absolute)
-    return found[:3]
+        seen.add(absolute)
+        found.append((0 if _STRONG_CONTACT_TEXT.search(text) else 1, absolute))
+    found.sort(key=lambda pair: pair[0])
+    return [url for _, url in found[:limit]]
 
 
 def emails_from_page(html: str, base_url: str) -> list[str]:
@@ -382,10 +405,17 @@ def harvest_site_contacts(
     if found.satisfies(wanted):
         return found, requests_made
 
-    targets = _contact_links(first.html, first.url)
+    # 首頁已經用掉一次請求，剩下的額度是還能**成功讀到**幾頁。候選要給得比
+    # 額度多一點，不能剛好：讀不到的候選（404、逾時）不算進額度裡，所以多給
+    # 的部分只有在前面幾個真的失敗時才會用到。
+    #
+    # 以前這裡是寫死的 3，跟 ``max_pages`` 完全沒有關係——把上限調到 5 也只
+    # 會拿到 3 個候選，額度根本用不完。
+    budget = max(3, max_pages - requests_made)
+    targets = _contact_links(first.html, first.url, limit=budget)
     if not targets:
         origin = f"{urlsplit(first.url).scheme}://{urlsplit(first.url).netloc}"
-        targets = [origin + path for path in CONTACT_PATHS[:3]]
+        targets = [origin + path for path in CONTACT_PATHS[:budget]]
 
     for target in targets:
         if requests_made >= max_pages:

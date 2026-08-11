@@ -409,10 +409,19 @@ class CompletionController:
 
     def pending_count(self) -> int:
         """至少缺一個欄位、值得補的家數。"""
+        return self.pending_progress().pending
+
+    def pending_progress(self):
+        """待補家數，以及其中還沒跑過的家數。
+
+        分批補齊的畫面要靠這兩個數字才說得清楚：跑完一批之後「待補」幾乎
+        不會變（補不到的公司仍然缺欄位），會變的是「還沒跑過」。只顯示前者
+        的話，使用者會以為按鈕沒作用。
+        """
         from crawler.complete import FILLABLE_FIELDS
 
         with session_scope() as session:
-            return CompanyRepository(session).count_completable(FILLABLE_FIELDS)
+            return CompanyRepository(session).completion_progress(FILLABLE_FIELDS)
 
     def search_provider_label(self) -> str:
         """目前會用哪一個搜尋來源找官網，給畫面顯示。

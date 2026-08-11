@@ -302,6 +302,71 @@ def test_completion_done_reports_the_rejected_sites_rather_than_hiding_them(
     assert page.app.messages[-1][1] == "success"
 
 
+def test_the_batch_size_box_asks_how_many_not_where_to_start(qt_app, patch_config):
+    """使用者只該被問「這次幾家」。
+
+    問「從第幾筆開始」是把記帳的責任丟回給人：填錯一個數字就跳過一整段，
+    而且填錯完全看不出來——程式照樣回報「處理 200 家」。從第幾家開始由
+    ``completion_checked_at`` 決定，見 crawler/complete.py 的 queue_position()。
+    """
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    assert page.completion_count.value() == patch_config.completion.batch_size
+    tip = page.completion_count.toolTip()
+    assert "從上次停下來的地方" in tip
+    assert "從第幾家開始" in tip
+
+
+def test_completion_done_reports_what_is_left_for_the_next_batch(
+    qt_app, db_session, patch_config
+):
+    """分批跑的人真正要看的是「還剩幾家、下次按下去會不會有進展」。
+
+    「待補」跟「還沒跑過」要分開講：跑完一批之後待補幾乎不會動（補不到的
+    公司仍然缺欄位），會動的是「還沒跑過」。只顯示前者的話，使用者按了五次
+    看到同一個數字，會以為按鈕沒有用。
+    """
+    from crawler.complete import CompletionSummary
+
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    page._on_completion_done(
+        CompletionSummary(
+            considered=200, updated=43, marked_done=200,
+            remaining=2499, remaining_untried=2299,
+        )
+    )
+
+    log_text = page.log_box.toPlainText()
+    assert "標記完成 200 家" in log_text
+    assert "還剩 2499 家" in log_text
+    assert "2299 家還沒跑過" in log_text
+    assert "可以再按一次" in page.app.messages[-1][0]
+
+
+def test_completion_says_the_throttled_companies_will_come_back(
+    qt_app, db_session, patch_config
+):
+    """被限流時沒搜尋到的公司不會被記成跑過——這件事必須講出來。
+
+    不講的話，使用者看到「搜尋已停止」會以為那一批公司白跑了，而實際上
+    下次按下去拿到的還是它們。
+    """
+    from crawler.complete import CompletionSummary
+
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    page._on_completion_done(
+        CompletionSummary(considered=50, updated=3, marked_done=3,
+                          search_stopped="額度用完了")
+    )
+
+    assert "下次按下去還是它們" in page.log_box.toPlainText()
+
+
 def test_completion_done_warns_when_the_search_stopped_partway(
     qt_app, db_session, patch_config
 ):

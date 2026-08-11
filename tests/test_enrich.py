@@ -151,6 +151,51 @@ def test_it_follows_a_contact_link_when_the_home_page_is_not_enough():
     assert contacts.contact_person == "王小明"
 
 
+def test_the_real_contact_page_is_tried_before_about_us():
+    """頁數有上限，所以順序就是命中率。
+
+    「關於我們」多半是公司沿革與董事長的話，信箱不在那裡。兩種連結都在的
+    時候先點真正的聯絡頁，等於用同樣的請求次數換到更高的命中率——這一條
+    壞掉不會有人發現，只會看到「命中率就是這樣」。
+    """
+    home = """<html><body>
+      <h1>測試精密機械股份有限公司</h1>
+      <a href="/about">關於我們</a>
+      <a href="/contact">聯絡我們</a>
+    </body></html>"""
+    about = "<html><body>本公司創立於民國六十年</body></html>"
+    fetcher = _Fetcher({
+        BASE: home,
+        "https://example.com.tw/about": about,
+        "https://example.com.tw/contact": LABELLED_PAGE,
+    })
+
+    contacts, _ = harvest_site_contacts(BASE, fetcher, max_pages=2)
+
+    # 上限兩頁 = 首頁 + 一頁。那一頁必須是 /contact，不是頁面上先出現的 /about。
+    assert fetcher.urls[1] == "https://example.com.tw/contact"
+    assert contacts.email == "sales@example.com.tw"
+
+
+def test_a_higher_page_limit_actually_gets_more_candidates():
+    """把頁數上限調高，候選連結數要跟著調高。
+
+    這兩個數字以前是分開的：上限給 5、候選寫死 3，於是額度根本用不完。
+    """
+    links = "".join(f'<a href="/p{i}">聯絡我們{i}</a>' for i in range(5))
+    home = f"<html><body><h1>測試精密機械股份有限公司</h1>{links}</body></html>"
+    pages = {BASE: home}
+    # 只有最後一頁有信箱，前面幾頁都是空的。
+    for index in range(4):
+        pages[f"https://example.com.tw/p{index}"] = "<html><body>敬請洽詢</body></html>"
+    pages["https://example.com.tw/p4"] = LABELLED_PAGE
+
+    contacts, requests = harvest_site_contacts(BASE, _Fetcher(pages), max_pages=6)
+
+    assert contacts.email == "sales@example.com.tw"
+    assert requests == 6
+
+
 def test_asking_for_less_means_stopping_sooner():
     """只要電話的話，首頁有電話就該收工。"""
     home = """<html><body>

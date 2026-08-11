@@ -20,6 +20,7 @@ from crawler.complete import (
     complete_companies,
     is_aggregator,
     looks_like_a_directory_entry,
+    queue_position,
     search_query,
 )
 from crawler.fetcher import FetchResult
@@ -589,3 +590,147 @@ def test_every_fillable_field_exists_on_the_model(db_session):
     """欄位名單跟資料庫欄位對不起來的話，補完會安靜地什麼都不做。"""
     for name in FILLABLE_FIELDS:
         assert hasattr(Company, name), name
+
+
+# --------------------------------------------------------- 分批跑與自動接續
+#
+# 這一組守的是「使用者輸入 200，按第二次會拿到第 201–400 家」。壞掉的症狀
+# 很不明顯：每一批都會回報「處理 200 家」，看起來很正常，實際上每次都是同
+# 樣那 200 家，而後面 2499 家永遠輪不到。
+
+
+def _make_companies(db_session, count: int) -> list[Company]:
+    made = [
+        Company(company_name=f"公司{index}", dedupe_key=f"name:{index}")
+        for index in range(count)
+    ]
+    db_session.add_all(made)
+    db_session.commit()
+    return made
+
+
+def test_queue_position_puts_the_untried_first_then_the_oldest():
+    from datetime import datetime
+
+    never = Company(id=9, company_name="沒跑過")
+    old = Company(id=1, company_name="很久以前跑過")
+    old.completion_checked_at = datetime(2020, 1, 1)
+    recent = Company(id=2, company_name="剛剛跑過")
+    recent.completion_checked_at = datetime(2030, 1, 1)
+
+    order = sorted([recent, old, never], key=queue_position)
+    assert [c.company_name for c in order] == ["沒跑過", "很久以前跑過", "剛剛跑過"]
+
+
+def test_a_company_is_stamped_even_when_nothing_could_be_filled(
+    db_session, only_a_name, patch_config
+):
+    """補不到東西的**才是**最需要蓋章的。
+
+    不蓋章的話，它下一批仍然「缺欄位」，仍然排在最前面，於是每一批都是它，
+    而後面的公司永遠輪不到。
+    """
+    fetcher = _Fetcher({}, registry_body="[]")
+
+    summary = complete_companies(fetcher=fetcher, provider=_Provider())
+
+    db_session.refresh(only_a_name)
+    assert only_a_name.completion_checked_at is not None
+    assert summary.updated == 0          # 真的什麼都沒補到
+    assert summary.marked_done == 1      # 但這一家算跑過了
+
+
+def test_the_next_batch_carries_on_from_where_the_last_one_stopped(
+    db_session, patch_config
+):
+    """使用者只輸入「幾家」，不輸入「從第幾家開始」——接續是程式的事。"""
+    made = _make_companies(db_session, 5)
+    names = {c.company_name for c in made}
+
+    def run_one_batch():
+        fetcher = _Fetcher({}, registry_body="[]")
+        summary = complete_companies(fetcher=fetcher, provider=_Provider(), limit=2)
+        assert summary.considered == 2
+        return summary
+
+    def already_done() -> set[str]:
+        # 補齊跑在自己的 session 裡，這個 session 手上那份是舊的。
+        db_session.expire_all()
+        return {
+            c.company_name for c in db_session.query(Company)
+            if c.completion_checked_at is not None
+        }
+
+    first = run_one_batch()
+    done_after_first = already_done()
+    assert len(done_after_first) == 2
+    assert first.remaining_untried == 3
+
+    run_one_batch()
+    done_after_second = already_done()
+    # 第二批處理的是**另外**兩家，不是同樣那兩家。
+    assert len(done_after_second) == 4
+    assert done_after_first < done_after_second
+
+    third = run_one_batch()
+    # 第五家沒跑過，所以它一定在這一批裡；另一個名額才輪回最早跑過的那家。
+    assert third.remaining_untried == 0
+    assert already_done() == names
+
+
+def test_a_company_whose_search_never_ran_is_not_marked_done(db_session, patch_config):
+    """被限流時沒搜尋到的公司不算跑過。
+
+    算跑過的話它會被排到 2699 家的最後面，而它其實一次都沒被搜尋過——
+    使用者等額度恢復再按一次，拿到的會是完全不同的一批。
+    """
+    _make_companies(db_session, 3)
+
+    fetcher = _Fetcher({}, registry_body="[]")
+    provider = _Provider(error=SearchUnavailable("額度用完了"))
+
+    summary = complete_companies(fetcher=fetcher, provider=provider)
+
+    assert summary.considered == 3
+    assert summary.search_stopped
+    # 三家都缺網址，三家的搜尋都沒跑成，所以一個章都不蓋。
+    assert summary.marked_done == 0
+    assert all(c.completion_checked_at is None for c in db_session.query(Company))
+
+
+def test_turning_search_off_still_lets_the_queue_move_on(db_session, patch_config):
+    """設定成「不搜尋官網」是使用者自己的決定，不是故障——隊伍要照樣往前走。
+
+    這一條跟上一條的差別只在「為什麼沒有 provider」，但結果必須相反。搞混
+    的話，設定成 none 的使用者會發現按幾次都是同一批公司。
+    """
+    _make_companies(db_session, 2)
+    config = patch_config.model_copy(
+        update={
+            "completion": patch_config.completion.model_copy(
+                update={"search_provider": "none"}
+            )
+        }
+    )
+
+    fetcher = _Fetcher({}, registry_body="[]")
+    summary = complete_companies(fetcher=fetcher, config=config, limit=2)
+
+    assert not summary.search_stopped
+    assert summary.marked_done == 2
+    db_session.expire_all()
+    assert all(c.completion_checked_at is not None for c in db_session.query(Company))
+
+
+def test_the_summary_says_how_much_is_left(db_session, patch_config):
+    """跑完一批之後「還剩幾家」要能直接顯示，不必再開一次資料庫。"""
+    _make_companies(db_session, 4)
+
+    summary = complete_companies(
+        fetcher=_Fetcher({}, registry_body="[]"), provider=_Provider(), limit=1
+    )
+
+    assert summary.considered == 1
+    # 補不到東西，所以四家都還「缺欄位」——但只有三家還沒跑過。
+    assert summary.remaining == 4
+    assert summary.remaining_untried == 3

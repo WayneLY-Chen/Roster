@@ -16,6 +16,7 @@ Python, over rows SQL has already narrowed down as far as it can.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -56,6 +57,22 @@ from database.models import (
 from database.types import email_equals, is_encrypted_column
 
 log = get_logger(LogCategory.DATABASE)
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionProgress:
+    """「補齊公司資料」還剩多少。見 :meth:`CompanyRepository.completion_progress`。"""
+
+    #: 至少還缺一個欄位的家數。
+    pending: int = 0
+    #: 上面那些裡面，一次都還沒被補齊流程碰過的家數。
+    untried: int = 0
+
+    @property
+    def tried(self) -> int:
+        """試過、但還是缺東西的家數。這一批多半是真的補不到的。"""
+        return self.pending - self.untried
+
 
 # Columns the caller may sort by. Anything else falls back to updated_at,
 # which keeps `order_by` safe to wire straight to a GUI dropdown.
@@ -352,12 +369,27 @@ class CompanyRepository:
         :func:`crawler.complete.complete_companies` 真正挑出來的那一批一致，
         兩邊用同一個判斷方式才保證得了。
         """
+        return self.completion_progress(fields).pending
+
+    def completion_progress(self, fields: Iterable[str]) -> "CompletionProgress":
+        """待補的家數，以及其中有幾家**這一輪還沒試過**。
+
+        分批補齊要顯示的是「還有 2699 家要補，其中 2499 家還沒試過」——只有
+        總數的話，使用者跑完一批看到數字幾乎沒動（試過但補不到的公司仍然
+        算「待補」），會以為程式沒在動。
+
+        跟 :meth:`count_completable` 一樣在 Python 端算，理由見那一支。
+        """
         names = tuple(fields)
-        return sum(
-            1
-            for company in self.all()
-            if any(not (getattr(company, name, None) or "").strip() for name in names)
-        )
+        pending = 0
+        untried = 0
+        for company in self.all():
+            if not any(not (getattr(company, name, None) or "").strip() for name in names):
+                continue
+            pending += 1
+            if company.completion_checked_at is None:
+                untried += 1
+        return CompletionProgress(pending=pending, untried=untried)
 
     def distinct_values(self, field: str) -> list[str]:
         """Distinct non-empty values of a column, for GUI filter dropdowns."""

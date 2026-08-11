@@ -35,6 +35,21 @@
 另外，聚合網站（人力銀行、維基百科、社群、購物平台）在候選階段就直接排除。
 它們幾乎一定會提到公司名字，驗證那一關攔不住，但它們不是公司的官網。
 
+## 分批跑，而且自己記得上次跑到哪
+
+一份 2699 家的名單整批跑要六個小時，中間任何一個中斷都會讓人不知道跑到哪
+了。所以呼叫端只需要說「這次跑幾家」（``limit``），**從第幾家開始是這裡的
+事**：:func:`_targets` 照 :func:`queue_position` 排序——還沒跑過的排最前面，
+跑過的照上次跑的時間由舊到新——所以再呼叫一次就是接著上一次。
+
+書籤是 ``Company.completion_checked_at``。它的重點只有一個，而且反直覺：
+**補不到東西的公司也要蓋章。** 少了這一條整個功能是壞的——真正補不到的公司
+永遠都還缺欄位，所以每一批挑出來的都是同一批，名單會永遠停在前 N 家。
+
+唯一不蓋章的情況是「該跑的關卡根本沒跑成」：搜尋來源被限流、商業司忙線。
+那不是「查過了沒有」，是「還沒查」，蓋了章等於把它排到隊伍最後面。這兩者
+在程式裡分別是 ``search_exhausted`` 與 :class:`~crawler.registry.RegistryBusy`。
+
 ## 不覆蓋使用者已經有的資料
 
 預設只填空欄位。使用者手動改過的、或原始檔案裡就有的值，這一步一律不動——
@@ -155,6 +170,16 @@ class CompletionSummary:
     filled: dict[str, int] = field(default_factory=dict)
     #: 至少被改到一個欄位的公司數。
     updated: int = 0
+    #: 蓋上「跑過了」書籤的家數，也就是下一批不會再挑到的家數。
+    #:
+    #: 這個數字跟 :attr:`updated` 分開看才有意義：``處理 200 家、更新 43 家、
+    #: 標記完成 200 家`` 代表這一批確實往前推了 200 家；如果標記只有 12 家，
+    #: 那就是搜尋來源中途被限流了，剩下的下一批會重跑。
+    marked_done: int = 0
+    #: 這一批之外還剩幾家待補、其中幾家還沒跑過。做完才知道，供畫面顯示
+    #: 「還剩 2499 家」。
+    remaining: int = 0
+    remaining_untried: int = 0
     #: 本來就什麼都不缺，連一次請求都沒送。
     skipped_complete: int = 0
     #: 搜尋回了結果，但沒有一個通得過「首頁要提到這家公司」。
@@ -356,12 +381,14 @@ def _harvest(
     fetcher: BaseFetcher,
     summary: CompletionSummary,
     confirm: bool,
+    max_pages: int = 3,
 ) -> SiteContacts:
     """去一個網站上抓聯絡資料。``confirm`` 時首頁必須提到這家公司。"""
     contacts, requests_made = harvest_site_contacts(
         website,
         fetcher,
         wanted=wanted or HARVESTABLE_FIELDS,
+        max_pages=max_pages,
         confirm_name=company.company_name if confirm else None,
     )
     summary.sites_visited += requests_made
@@ -419,6 +446,16 @@ def complete_companies(
     # httpx client 就永遠不會關。
     provider_to_close = provider if owns_provider else None
 
+    # 「搜尋這一關是壞掉了，不是沒有」。兩者要分開，因為它決定要不要蓋
+    # ``completion_checked_at`` 這個書籤：
+    #
+    #   設定成 ``none``  → 使用者自己關的，那就是這個名單的正常狀態，
+    #                      蓋章，讓隊伍往前走。
+    #   限流／額度用完  → 這一關**根本沒跑**。蓋了章就等於把這家公司排到
+    #   ／金鑰沒填        隊伍最後面，而它其實一次都沒被搜尋過——下一批
+    #                      換成別人，這一家要等整整一輪才輪得到。不蓋。
+    search_exhausted = bool(summary.search_stopped)
+
     try:
         with session_scope() as session:
             repo = CompanyRepository(session)
@@ -432,41 +469,57 @@ def complete_companies(
                 if progress is not None:
                     progress(index, len(targets), company.company_name)
 
+                changed = False
+                # 這一家算不算「跑過了」。見 ``search_exhausted`` 的說明與
+                # ``Company.completion_checked_at`` 的欄位註解。
+                deferred = False
                 try:
-                    changed = _complete_one(
+                    changed, deferred = _complete_one(
                         company, wanted_fields, overwrite, fetcher,
-                        provider, summary, settings,
+                        provider, summary, settings, search_exhausted,
                     )
                 except RobotsDisallowedError as exc:
                     summary.skipped_robots += 1
                     log.info("{}：robots.txt 不允許，略過（{}）", company.company_name, exc)
-                    continue
                 except RegistryBusy as exc:
+                    # 商業司只是現在忙，不是「查過了」。蓋章會把它排到隊伍
+                    # 最後面，而它其實什麼都還沒查——下一批要換成別人。
                     summary.registry_busy += 1
+                    deferred = True
                     log.info("{}：{}", company.company_name, exc)
-                    continue
                 except CrawlError as exc:
                     summary.failed += 1
                     message = f"{company.company_name}：{exc}"
                     summary.errors.append(message)
                     log.warning(message)
-                    continue
                 except Exception as exc:  # noqa: BLE001 - 一家壞掉不該停掉整批
                     summary.failed += 1
                     message = f"{company.company_name}：{type(exc).__name__}: {exc}"
                     summary.errors.append(message)
                     log.warning(message)
-                    continue
 
                 if changed:
                     summary.updated += 1
                     company.updated_at = now()
+                if not deferred:
+                    # 補不到東西的也要蓋章——而且**它們才是重點**。真正補不到
+                    # 的公司永遠都還缺欄位，不蓋章的話下一批挑出來的又是同一批，
+                    # 名單永遠停在前 N 家。
+                    company.completion_checked_at = now()
+                    summary.marked_done += 1
                 session.commit()
 
                 # 搜尋來源已經壞了（限流、額度用完）。停掉搜尋那一關，但不要
                 # 停掉整批——剩下的公司仍然走得完商業司與「已經有網址」兩條路。
                 if summary.search_stopped:
                     provider = None
+                    search_exhausted = True
+
+            # 這一批做完之後還剩多少。在同一個 session 裡算完再帶出去，
+            # 呼叫端（GUI／CLI）就不必為了顯示一句話再開一次資料庫。
+            left = repo.completion_progress(wanted_fields)
+            summary.remaining = left.pending
+            summary.remaining_untried = left.untried
     finally:
         if owns_fetcher:
             fetcher.close()
@@ -474,13 +527,27 @@ def complete_companies(
             provider_to_close.close()
 
     log.info(
-        "補齊完成：處理 {} 家、更新 {} 家、補上 {} 個欄位"
+        "補齊完成：處理 {} 家、更新 {} 家、補上 {} 個欄位、標記完成 {} 家，還剩 {} 家"
         "（商業司對到 {}、搜尋 {} 次、找到官網 {} 個、造訪 {} 頁）",
         summary.considered, summary.updated, summary.fields_filled,
+        summary.marked_done, summary.remaining,
         summary.registry_matched, summary.searches_made,
         summary.websites_found, summary.sites_visited,
     )
     return summary
+
+
+def queue_position(company) -> tuple[int, float, int]:
+    """排隊用的鍵：沒跑過的排最前面，跑過的照時間由舊到新，同分再照 id。
+
+    這一個函式就是「使用者輸入 200，程式自己知道要從第幾家開始」的全部
+    機制。分開寫出來是為了讓它能被單獨測試——排錯的話症狀是「每次都跑同
+    一批」，那種錯在整合測試裡很難一眼看出來。
+    """
+    stamp = getattr(company, "completion_checked_at", None)
+    if stamp is None:
+        return (0, 0.0, company.id or 0)
+    return (1, stamp.timestamp(), company.id or 0)
 
 
 def _targets(
@@ -492,9 +559,20 @@ def _targets(
 ) -> list:
     """要處理哪幾家。
 
-    指定 ``company_ids`` 時照單全收（那是使用者自己挑的，即使看起來不缺
-    東西也照跑）；沒指定時只挑真的缺欄位的——把已經完整的公司也送進去，
-    只會浪費請求。
+    指定 ``company_ids`` 時照單全收、順序照給的（那是使用者自己挑的，即使
+    看起來不缺東西也照跑）；沒指定時只挑真的缺欄位的——把已經完整的公司也
+    送進去，只會浪費請求。
+
+    ## 分批的順序
+
+    沒指定 ``company_ids`` 時照 :func:`queue_position` 排序：**還沒跑過的
+    排前面，跑過的照上次跑的時間由舊到新**。所以使用者在畫面上輸入「這次
+    跑 200 家」，按第二次就是第 201–400 家，不需要自己記到第幾家，也沒有
+    「從第幾筆開始」那種一填錯就跳過一整段的輸入框。
+
+    這件事非做不可的理由：``_missing()`` 是唯一的篩選條件時，**補不到東西
+    的公司永遠留在名單最前面**——它補不到，所以下一批它還是缺，所以還是它。
+    2699 家的名單會永遠停在前 200 家，而且每一批都重跑同樣的請求。
     """
     if company_ids is not None:
         targets = [c for c in (repo.get(i) for i in company_ids) if c is not None]
@@ -503,6 +581,7 @@ def _targets(
             company for company in repo.all()
             if overwrite or _missing(company, wanted_fields, overwrite=False)
         ]
+        targets.sort(key=queue_position)
     return targets[:limit] if limit else targets
 
 
@@ -514,14 +593,21 @@ def _complete_one(
     provider: SearchProvider | None,
     summary: CompletionSummary,
     settings,
-) -> bool:
-    """一家公司的三關。回傳有沒有改到東西。"""
+    search_exhausted: bool = False,
+) -> tuple[bool, bool]:
+    """一家公司的三關。回傳 ``(有沒有改到東西, 這一家算不算沒跑過)``。
+
+    第二個值是給 ``completion_checked_at`` 這個書籤用的。``True`` 代表「該跑
+    的關卡有一關根本沒跑成」，呼叫端就不蓋章，這家公司會留在隊伍原本的位置
+    等下一批——而不是被當成試過了、排到 2699 家的最後面。
+    """
     missing = _missing(company, wanted_fields, overwrite)
     if not missing:
         summary.skipped_complete += 1
-        return False
+        return False, False
 
     changed = False
+    deferred = False
 
     # 第一關：商業司。
     if settings.use_registry and (missing & REGISTRY_FIELDS):
@@ -532,23 +618,31 @@ def _complete_one(
     website = (company.website or "").strip()
     confirm = False
     candidates = [website] if website else []
-    if not website and "website" in missing and provider is not None:
-        try:
-            candidates = _run_search(company, provider, summary, settings.max_candidates)
-            confirm = True
-        except SearchUnavailable as exc:
-            # 記在 summary 上而不是往上丟。往上丟的話這家公司會被 continue
-            # 掉，連帶把商業司那一關**已經補好的東西**排除在統計外、而且
-            # 跳過 session.commit()。搜尋壞掉不該讓前一關的成果消失。
-            # 呼叫端看到 search_stopped 有值就會停掉後續的搜尋。
-            summary.search_stopped = str(exc)
-            log.warning("停止搜尋官網：{}", exc)
-            candidates = []
+    if not website and "website" in missing:
+        if provider is not None:
+            try:
+                candidates = _run_search(
+                    company, provider, summary, settings.max_candidates
+                )
+                confirm = True
+            except SearchUnavailable as exc:
+                # 記在 summary 上而不是往上丟。往上丟的話這家公司會被 continue
+                # 掉，連帶把商業司那一關**已經補好的東西**排除在統計外、而且
+                # 跳過 session.commit()。搜尋壞掉不該讓前一關的成果消失。
+                # 呼叫端看到 search_stopped 有值就會停掉後續的搜尋。
+                summary.search_stopped = str(exc)
+                log.warning("停止搜尋官網：{}", exc)
+                candidates = []
+                deferred = True
+        elif search_exhausted:
+            # 前面某一家已經把搜尋來源用到限流／額度用完了，所以這一家的
+            # 搜尋那一關連送都沒送出去。不算跑過。
+            deferred = True
 
     # 第三關：到網站上抓聯絡資料。
     site_wanted = missing & SITE_FIELDS
     if not candidates or not (site_wanted or "website" in missing):
-        return changed
+        return changed, deferred
 
     # 有沒有哪個候選是「真的讀到了、但內容證明不是這家公司」。
     #
@@ -564,7 +658,10 @@ def _complete_one(
         # 不允許」等於「這家公司不處理了」——剩下的候選一個都不會試，而且
         # 商業司那一關明明已經補到的東西也不會被計入結果。
         try:
-            contacts = _harvest(company, candidate, site_wanted, fetcher, summary, confirm)
+            contacts = _harvest(
+                company, candidate, site_wanted, fetcher, summary, confirm,
+                max_pages=getattr(settings, "max_pages", 3),
+            )
         except RobotsDisallowedError:
             summary.skipped_robots += 1
             log.info("{}：{} 的 robots.txt 不允許，換下一個候選", company.company_name, candidate)
@@ -589,9 +686,9 @@ def _complete_one(
             if _fill(company, field_name, contacts.get(field_name), overwrite):
                 summary.count(field_name)
                 changed = True
-        return changed
+        return changed, deferred
 
     # 讀到了，但每一個都證明不是這家公司的網站。
     if read_but_rejected:
         summary.rejected_unconfirmed += 1
-    return changed
+    return changed, deferred
