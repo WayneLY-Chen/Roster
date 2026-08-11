@@ -50,14 +50,30 @@ class _FakeApp:
     def __init__(self) -> None:
         self.current_page = CrawlerPage.title
         self.messages: list[tuple[str, str]] = []
+        self.progress_events: list[tuple[int, int | None]] = []
+        self.progress_total: int | None = None
         self.status_bar = self
 
     def set_status(self, message: str, tone: str = "normal") -> None:
         self.messages.append((message, tone))
 
     # status_bar stand-in
-    def start_progress(self) -> None:
-        pass
+    #
+    # 簽章必須跟 gui_qt.widgets.StatusBar 一模一樣，由
+    # test_the_fake_status_bar_matches_the_real_one 盯著。
+    #
+    # 對不上的代價不是「少測到一點東西」：``advance_progress`` 以前根本不存在
+    # 於這個替身上，於是每一次爬取進度都在 ``_handle_progress`` 裡丟
+    # AttributeError。Qt 會把 slot 裡的例外吞掉（印出 traceback 之後繼續），
+    # 所以測試照樣是綠的——但整份測試報告裡混著幾十份 traceback，而且進度
+    # 回報那條路實際上一行都沒被驗證過。更糟的是那個例外是在「pool 執行緒
+    # 正在送訊號」的當下逼 Python 組 traceback，正是 gui_qt/tasks.py 開頭
+    # 記載會讓整個直譯器以 access violation 收場的那種情境。
+    def start_progress(self, total: int | None = None) -> None:
+        self.progress_total = total
+
+    def advance_progress(self, done: int, total: int | None = None) -> None:
+        self.progress_events.append((done, total))
 
     def stop_progress(self) -> None:
         pass
@@ -71,6 +87,36 @@ def _wait_for_task(qt_app, task, timeout: float = 5.0) -> None:
         time.sleep(0.005)
     assert task is None or not task.running, "background task never completed"
     qt_app.processEvents()
+
+
+def test_the_fake_status_bar_matches_the_real_one():
+    """替身的進度介面必須跟 :class:`gui_qt.widgets.StatusBar` 一模一樣。
+
+    這一條是補寫的，因為對不上這件事真的發生過而且沒有人發現：``_FakeApp``
+    上沒有 ``advance_progress``，於是爬取的每一次進度回報都在
+    ``BackgroundTask._handle_progress`` 裡丟 ``AttributeError``。
+
+    為什麼沒被發現：Qt 會把 slot 裡的例外印出來然後**繼續跑**，所以測試
+    全都是綠的。代價有三個——測試報告裡混著幾十份 traceback、進度回報那條
+    路實際上完全沒被驗證、以及那個例外是在 pool 執行緒送訊號的當下逼 Python
+    組 traceback，正好命中 ``gui_qt/tasks.py`` 開頭記載的那個會讓整個直譯器
+    以 access violation 收場的情境。
+
+    比對簽章而不只是比對「有沒有這個方法」：``start_progress`` 真的那一支
+    收一個 ``total``，替身少收一個參數一樣會炸。
+    """
+    import inspect
+
+    from gui_qt.widgets import StatusBar
+
+    fake = _FakeApp().status_bar
+    for name in ("start_progress", "advance_progress", "stop_progress"):
+        assert hasattr(fake, name), f"替身少了 StatusBar.{name}"
+        real_params = list(inspect.signature(getattr(StatusBar, name)).parameters)
+        fake_params = list(inspect.signature(getattr(type(fake), name)).parameters)
+        assert fake_params == real_params, (
+            f"StatusBar.{name} 的簽章是 {real_params}，替身是 {fake_params}"
+        )
 
 
 def test_build_lists_offline_sample_source(qt_app, patch_config):
@@ -143,7 +189,8 @@ def test_starting_a_crawl_uses_the_sources_own_settings(qt_app, patch_config, mo
 def test_crawl_against_sample_source_completes_and_bumps_version(
     qt_app, db_session, patch_config
 ):
-    page = CrawlerPage(_FakeApp())
+    app = _FakeApp()
+    page = CrawlerPage(app)
     page.ensure_built()
 
     before = current_data_version()
@@ -157,9 +204,25 @@ def test_crawl_against_sample_source_completes_and_bumps_version(
     assert row["source"] == "sample"
     assert row["found"] > 0
 
-    assert current_data_version() == before + 1
     assert page.start_button.isEnabled() is True
     assert "完成" in page.log_box.toPlainText()
+
+    # 進度真的送到 status bar 了。這一段是補寫的：``advance_progress`` 以前
+    # 根本不在 ``_FakeApp`` 上，所以每一次進度回報都在丟 AttributeError，
+    # 而 Qt 把它吞掉了——這條路從來沒有被驗證過，改壞了也不會有人知道。
+    assert app.progress_events, "爬完一輪卻沒有任何進度事件送到 status bar"
+    done, _total = app.progress_events[0]
+    assert done >= 1
+
+    # 每一次進度都會 bump 一次，最後完成時再 bump 一次。
+    #
+    # 這裡原本寫的是 ``== before + 1``，而它會過**是因為上面那個 bug**：
+    # ``_on_crawl_progress`` 先呼叫 ``advance_progress`` 才呼叫
+    # ``bump_data_version()``，前者一丟 AttributeError，後者整個不會執行。
+    # 所以那句斷言驗證的是「進度不會 bump」——正好跟
+    # ``gui_qt/pages/crawler.py`` 裡寫明的用意相反（爬一趟可能一個多小時，
+    # 公司頁要能跟著長出來，不能等到最後）。
+    assert current_data_version() == before + len(app.progress_events) + 1
 
 
 def test_verify_runs_against_real_controller(qt_app, db_session, patch_config):

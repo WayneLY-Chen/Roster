@@ -43,6 +43,10 @@ from core.config import get_config  # noqa: E402
 from core.constants import PROJECT_NAME, VERSION, LogCategory, RecordStatus  # noqa: E402
 from core.errors import CRMError  # noqa: E402
 from core.logging_setup import get_logger, setup_logging  # noqa: E402
+from core.repo import (  # noqa: E402
+    git_tracked_files,
+    git_untracked_unignored_files,
+)
 from core.schemas import CompanyFilter  # noqa: E402
 
 console = Console()
@@ -1071,7 +1075,7 @@ def security() -> None:
     sensitive_patterns = (
         ".env", ".db", ".sqlite", ".xlsx", ".csv", ".json", ".log", ".pem", ".key",
     )
-    tracked = _git_tracked_files(PROJECT_ROOT)
+    tracked = git_tracked_files(PROJECT_ROOT)
     if tracked is None:
         warnings.append("目前不是 git 儲存庫，略過已追蹤檔案檢查")
     else:
@@ -1085,6 +1089,29 @@ def security() -> None:
             problems.append(
                 "以下敏感檔案已被 git 追蹤，需先 git rm --cached：\n    "
                 + "\n    ".join(risky)
+            )
+
+    # --- 4b. 還沒被追蹤、但也沒被忽略的敏感檔 ---
+    #
+    # 這是風險最高的狀態，而原本的檢查完全看不到它：上面那一段只看「已經被
+    # 追蹤的」，下面那張表只看三個寫死的路徑。一份剛匯入用的會員名冊放在專案
+    # 根目錄，兩邊都不會提到它——然後 `git add -A` 一下就進了公開的 repo。
+    #
+    # 實際遇過：`TAMI會員聯絡資訊.xlsx`（2699 家公司的聯絡資料）躺在根目錄，
+    # 而這支指令印的是「✓ 檢查通過，可以安全上傳 git」。
+    loose = git_untracked_unignored_files(PROJECT_ROOT)
+    if loose:
+        exposed = [
+            path for path in loose
+            if any(path.endswith(ext) for ext in sensitive_patterns)
+            and not path.endswith((".env.example", "requirements.txt"))
+        ]
+        if exposed:
+            problems.append(
+                "以下敏感檔案沒有被 git 追蹤，但也沒有被 .gitignore 忽略——"
+                "下一次 git add -A 就會把它們送上去：\n    "
+                + "\n    ".join(exposed)
+                + "\n  處理方式：把檔案移到專案資料夾外，或加進 .gitignore。"
             )
 
     # --- 4. 專案資料夾中實際存在的敏感檔 ---
@@ -1116,26 +1143,6 @@ def security() -> None:
         raise typer.Exit(code=1)
 
     console.print("\n[bold green]✓ 檢查通過，可以安全上傳 git。[/bold green]")
-
-
-def _git_tracked_files(root: Path) -> list[str] | None:
-    """git 已追蹤的檔案清單；不是 git 儲存庫則回傳 None。"""
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "ls-files"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 @app.command()

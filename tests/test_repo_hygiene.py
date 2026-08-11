@@ -264,3 +264,66 @@ def test_the_readme_stays_short_enough_to_read():
     lines = len((ROOT / "README.md").read_text(encoding="utf-8").splitlines())
 
     assert lines <= 320, f"README 有 {lines} 行，太長了——把細節搬到 docs/ 底下"
+
+
+# ---------------------------------------------------- python main.py security
+#
+# 這一支是 README 明文要求「上傳 git 之前跑一次」的安全檢查。它自己壞掉的話
+# 沒有任何東西會發現——它壞掉的樣子就是「印出一個綠色的勾」。
+
+
+#
+# 這些輔助函式住在 ``core/repo.py`` 而不是 ``main.py``，就是為了讓這裡能直接
+# import。``main.py`` 在 import 的當下會 ``sys.stdout.reconfigure(...)``——
+# 在測試裡那個 ``sys.stdout`` 是 pytest 的擷取物件，重新設定它會影響整場
+# 測試的輸出處理。
+
+
+def test_the_security_check_survives_non_ascii_filenames():
+    """檔名有中文時不能爆掉。
+
+    ``subprocess.run(text=True)`` 會拿**系統語言**的編碼去解碼子程序的輸出，
+    繁體中文 Windows 那個是 cp950；而這個專案自己就有 ``docs/名單.md``、
+    ``docs/爬取.md``，git 是以 UTF-8 吐出來的。解碼在 subprocess 自己的讀取
+    執行緒裡爆掉，攔不到，只會讓 stdout 變成 None，接著以 AttributeError
+    收場——也就是說，`python main.py security` 在它最主要的使用環境上
+    直接當掉。
+    """
+    from core.repo import git_tracked_files
+
+    tracked = git_tracked_files(ROOT)
+
+    assert tracked, "應該要列得出已追蹤的檔案"
+    assert any(name.endswith("docs/名單.md") for name in tracked), (
+        "中文檔名沒有正確解碼出來"
+    )
+
+
+def test_the_security_check_sees_files_that_are_neither_tracked_nor_ignored(tmp_path):
+    """「還沒追蹤、但也沒被忽略」是風險最高的狀態，一定要看得到。
+
+    原本的檢查只看「已經被追蹤的檔案」和三個寫死的路徑，所以一份放在專案
+    根目錄的名單檔兩邊都不會被提到——然後 ``git add -A`` 一下就進了公開的
+    repo。實際發生過：一份 2699 家公司的聯絡資料躺在根目錄，而這支指令
+    印的是「檢查通過，可以安全上傳 git」。
+    """
+    from core.repo import git_untracked_unignored_files
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("ignored.csv\n", encoding="utf-8")
+    (tmp_path / "會員名單.xlsx").write_bytes(b"x")
+    (tmp_path / "ignored.csv").write_text("x", encoding="utf-8")
+
+    loose = git_untracked_unignored_files(tmp_path)
+
+    assert loose is not None
+    assert "會員名單.xlsx" in loose
+    assert "ignored.csv" not in loose, ".gitignore 蓋到的不該再報一次"
+
+
+def test_the_git_helpers_report_none_outside_a_repository(tmp_path):
+    """不是 git 儲存庫時回 ``None``，讓呼叫端能分辨「沒有」與「查不到」。"""
+    from core.repo import git_tracked_files, git_untracked_unignored_files
+
+    assert git_tracked_files(tmp_path) is None
+    assert git_untracked_unignored_files(tmp_path) is None

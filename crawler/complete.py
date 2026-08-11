@@ -119,8 +119,9 @@ AGGREGATOR_HOSTS: tuple[str, ...] = (
     # 台灣中小企業的虛擬主機／型錄平台。它們替上千家公司各開一頁，頁面上
     # 當然有公司全名，而網址是流水號或電話號碼，不含公司名——所以
     # looks_like_a_directory_entry 抓不到，只能列在這裡。
-    "web66.com.tw", "tggo.com.tw", "web139.com.tw", "url.com.tw",
+    "web66.com.tw", "tw66.com.tw", "tggo.com.tw", "web139.com.tw", "url.com.tw",
     "bizman.com.tw", "twnic.net", "hotcom.com.tw", "superbuy.com.tw",
+    "comptw.com", "inc.com.tw", "chanchao.com.tw", "taiwanmachinery",
     # 百科與新聞
     "wikipedia.org", "wikiwand.com", "cnyes.com", "moneydj.com", "ettoday.net",
     "udn.com", "chinatimes.com", "ltn.com.tw", "businesstoday.com.tw",
@@ -183,32 +184,46 @@ def is_aggregator(url: str) -> bool:
     return any(bad in host for bad in AGGREGATOR_HOSTS)
 
 
-def looks_like_a_directory_entry(url: str, company_name: str) -> bool:
+def looks_like_a_directory_entry(
+    url: str, company_name: str, tax_id: str | None = None
+) -> bool:
     """這個網址是「某個名錄裡的一筆」而不是這家公司自己的網站嗎？
 
-    判斷依據是一個很硬的規律：**公司自己的網站不會把自家名字放在網址路徑裡**。
-    ``tsmc.com/chinese``、``sinbon.com/tw/contact``——名字在網域上，不在路徑上。
-    名錄則相反，路徑就是那筆資料的識別：
+    判斷依據是一個很硬的規律：**公司自己的網站不會把自己的識別資料放在網址
+    路徑裡**。``tsmc.com/chinese``、``sinbon.com/tw/contact``——識別在網域上，
+    路徑講的是「這一頁是什麼」。名錄剛好相反，路徑就是那一筆的鍵：
 
-        findcompany.com.tw/信邦電子股份有限公司
-        104.com.tw/company/信邦電子
+        findcompany.com.tw/信邦電子股份有限公司     ← 名字
+        104.com.tw/company/信邦電子                 ← 名字
+        comptw.com/item/28388051                    ← 統一編號
+        inc.com.tw/c/84666583                       ← 統一編號
+
+    統編這一條是拿 TAMI 名冊實測出來的：12 家裡有 3 家被這種頁面騙過去。
+    能查得到是因為第一關（商業司）已經先跑完，所以搜尋的時候手上就有統編。
 
     這一關存在的理由是 :data:`AGGREGATOR_HOSTS` **一定列不完**。台灣的公司
     資料聚合站多到列不出來，而它們每一個都通得過「頁面上有沒有提到這家公司」
     ——它們的頁面標題就是公司全名。少了這一關，漏列一個網域的代價就是把名錄
-    頁當成官網存進去。
+    頁當成官網存進去，然後從那一頁抓回**名錄業者自己的**信箱。實測踩過：
+    某家公司的「官網」抓成展覽公司的雜誌頁，信箱抓成那家展覽公司的 info@。
 
     網址是百分之百編碼過的（中文網址一定是），所以要先還原再比。
     """
+    path = unquote(urlsplit(url or "").path)
+
     key = company_name_key(company_name)
-    if len(key) < 2:
-        return False
-    path = urlsplit(url or "").path
-    return key in comparison_text(unquote(path))
+    if len(key) >= 2 and key in comparison_text(path):
+        return True
+
+    digits = "".join(ch for ch in str(tax_id or "") if ch.isdigit())
+    return len(digits) == 8 and digits in path
 
 
 def candidate_sites(
-    hits: Iterable[SearchHit], limit: int = 3, company_name: str = ""
+    hits: Iterable[SearchHit],
+    limit: int = 3,
+    company_name: str = "",
+    tax_id: str | None = None,
 ) -> list[str]:
     """搜尋結果裡值得一試的官網候選，依序排列。
 
@@ -231,7 +246,9 @@ def candidate_sites(
         url = normalize_website(hit.url)
         if not url or is_aggregator(url):
             continue
-        if company_name and looks_like_a_directory_entry(url, company_name):
+        if (company_name or tax_id) and looks_like_a_directory_entry(
+            url, company_name, tax_id
+        ):
             continue
         host = urlsplit(url).netloc.lower()
         if host in seen:
@@ -325,7 +342,11 @@ def _run_search(
     name = company.company_name or ""
     summary.searches_made += 1
     hits = provider.search(search_query(name), limit=10)
-    return candidate_sites(hits, limit=max_candidates, company_name=name)
+    # 統編是第一關剛補回來的。名錄用它當網址路徑上的鍵，所以它是這裡最好用
+    # 的線索之一——見 looks_like_a_directory_entry。
+    return candidate_sites(
+        hits, limit=max_candidates, company_name=name, tax_id=company.tax_id
+    )
 
 
 def _harvest(
@@ -529,6 +550,13 @@ def _complete_one(
     if not candidates or not (site_wanted or "website" in missing):
         return changed
 
+    # 有沒有哪個候選是「真的讀到了、但內容證明不是這家公司」。
+    #
+    # 這個跟「一個都讀不到」要分開算。全部候選都被 robots.txt 擋下時，
+    # 那是 skipped_robots，不是「無法確認」——兩個數字同時加一的話，報表上
+    # 12 家公司可以生出 3 + 5 = 8 次失敗，讀的人沒辦法從數字回推發生什麼事。
+    read_but_rejected = False
+
     for candidate in candidates:
         # 一個候選讀不到，不該讓這家公司整筆放棄。
         #
@@ -546,6 +574,7 @@ def _complete_one(
             continue
 
         if confirm and not contacts.confirmed:
+            read_but_rejected = True
             continue
 
         if confirm:
@@ -562,7 +591,7 @@ def _complete_one(
                 changed = True
         return changed
 
-    # 每一個候選都沒能證明自己是這家公司的網站。
-    if confirm and candidates:
+    # 讀到了，但每一個都證明不是這家公司的網站。
+    if read_but_rejected:
         summary.rejected_unconfirmed += 1
     return changed

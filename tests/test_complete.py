@@ -198,14 +198,56 @@ def test_the_search_engine_order_is_kept_exactly():
 @pytest.mark.parametrize(
     "url",
     [
-        # 中小企業的虛擬主機／型錄平台。網址是流水號或電話號碼、不含公司名，
-        # 所以 looks_like_a_directory_entry 抓不到，只能靠網域黑名單。
+        # 中小企業的虛擬主機／型錄平台。網址是流水號或電話號碼、不含公司名
+        # 也不含統編，所以 looks_like_a_directory_entry 抓不到，只能靠黑名單。
         "https://0226989999.web66.com.tw/web/Comp?command=Intro",
+        "https://1206985149550.tw66.com.tw/web/Comp?command=Intro",
         "https://www.tggo.com.tw/index.cgi?user=tggo03&mnm=page",
+        # 展覽公司的型錄雜誌。實測踩過：某家公司的「官網」抓成這裡，
+        # 信箱跟著抓成展覽公司自己的 info@。
+        "https://www.chanchao.com.tw/magazine/parts/ch/page.asp?id=60317",
     ],
 )
-def test_smb_hosting_platforms_are_not_official_sites(url):
+def test_smb_hosting_and_catalogue_platforms_are_not_official_sites(url):
     assert is_aggregator(url)
+
+
+@pytest.mark.parametrize(
+    "url, name, tax_id",
+    [
+        ("https://www.comptw.com/item/28388051", "威尚機械工業股份有限公司", "28388051"),
+        ("https://inc.com.tw/c/84666583", "聖惠機械股份有限公司", "84666583"),
+        (
+            "https://some-unknown-directory.example/company/28388051/detail",
+            "威尚機械工業股份有限公司",
+            "28388051",
+        ),
+    ],
+)
+def test_a_url_keyed_by_the_tax_id_is_a_directory_entry(url, name, tax_id):
+    """名錄用統編當網址上的鍵。公司自己的網站不會這樣做。
+
+    拿 TAMI 名冊實測出來的：12 家裡有 3 家被這種頁面騙過去。查得到是因為
+    第一關（商業司）已經先把統編補回來了。
+    """
+    assert looks_like_a_directory_entry(url, name, tax_id)
+
+
+def test_a_tax_id_that_is_not_in_the_path_does_not_match():
+    assert not looks_like_a_directory_entry(
+        "https://www.yspmc.com.tw/about", "雍興精機股份有限公司", "05384743"
+    )
+
+
+def test_a_directory_entry_is_dropped_even_when_only_the_tax_id_gives_it_away():
+    hits = [
+        SearchHit("https://unknown.example/item/28388051"),
+        SearchHit("https://www.weishang.com.tw/"),
+    ]
+    picked = candidate_sites(
+        hits, company_name="威尚機械工業股份有限公司", tax_id="28388051"
+    )
+    assert picked == ["https://www.weishang.com.tw"]
 
 
 def test_one_candidate_per_host():
@@ -368,6 +410,9 @@ def test_a_robots_blocked_candidate_does_not_abandon_the_whole_company(
     db_session.refresh(only_a_name)
     assert only_a_name.website == "https://tsmc.example"
     assert summary.skipped_robots == 1
+    # 被 robots.txt 擋下不等於「讀到了但不是這家公司」。兩個都加一的話，
+    # 報表上的數字加起來會比公司家數還多，讀的人沒辦法回推發生什麼事。
+    assert summary.rejected_unconfirmed == 0
 
 
 def test_the_registry_result_survives_a_search_that_breaks(db_session, only_a_name, patch_config):
