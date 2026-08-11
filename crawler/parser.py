@@ -157,6 +157,24 @@ def harvest_emails(scope: Tag) -> list[str]:
     return found
 
 
+def phones_in_text(text: str | None) -> list[str]:
+    """Every phone-shaped substring in a blob of text, in order of appearance.
+
+    Split out from :func:`harvest_phones` because a *labelled* value needs it
+    too: ``傳真： 02-2723-5678 02-2723-1234`` reaches the label parser as one
+    string (there is no second label to end the value at), and normalizing the
+    whole thing yields a number that is neither of the two.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    for match in _PHONE_IN_TEXT.findall(text):
+        candidate = match.strip()
+        if candidate and candidate not in found:
+            found.append(candidate)
+    return found
+
+
 def harvest_phones(scope: Tag) -> list[str]:
     """Every phone-shaped string on the page, ``tel:`` links first."""
     found: list[str] = []
@@ -166,9 +184,9 @@ def harvest_phones(scope: Tag) -> list[str]:
             candidate = href[len("tel:") :].strip()
             if candidate and candidate not in found:
                 found.append(candidate)
-    for match in _PHONE_IN_TEXT.findall(scope.get_text(" ", strip=True)):
-        if match not in found:
-            found.append(match.strip())
+    for candidate in phones_in_text(scope.get_text(" ", strip=True)):
+        if candidate not in found:
+            found.append(candidate)
     return found
 
 

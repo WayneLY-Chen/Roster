@@ -84,6 +84,43 @@ verifier:
     - "tempmail.com"
     - "yopmail.com"
 
+# 補齊公司資料：只有公司名稱的名單，自動補上統編、負責人、登記地址、
+# 官網、信箱、電話、傳真、聯絡人。「爬取」頁的「補齊公司資料」按鈕，
+# 或命令列的 python main.py complete。
+completion:
+  # 只有公司名稱、沒有網址時，去哪裡找它的官網。
+  #
+  #   auto        有金鑰就用金鑰（Brave 優先），沒有就用 DuckDuckGo。預設。
+  #   duckduckgo  免金鑰。用 html.duckduckgo.com——那是唯一一個 robots.txt
+  #               明文寫 Allow: / 的搜尋端點。Google 與 Bing 都寫著
+  #               Disallow: /search，這支程式會自己把那些網址擋下來。
+  #               缺點是對方會限流，一次跑幾百家後段容易被擋。
+  #   brave       Brave Search API，免費方案每月 2000 次。要金鑰。
+  #   google      Google Custom Search JSON API，免費額度每日 100 次。
+  #               要金鑰與搜尋引擎 ID。
+  #   none        完全不搜尋，只補商業司那一關與「檔案裡本來就有網址」的公司。
+  #
+  # 金鑰在「設定」頁填，會存進系統的憑證保管庫，不會寫進任何設定檔。
+  search_provider: "auto"
+
+  # 一家公司最多試幾個官網候選。每一個候選都要送至少一次請求去驗證它的
+  # 首頁有沒有提到這家公司，所以調高不會比較準，只會比較慢。
+  max_candidates: 3
+
+  # 要不要查經濟部商業司的公司登記資料（統編、負責人、登記地址、登記狀態）。
+  # 這一關是政府開放資料，免費且最可靠，沒有理由關掉——除非你的名單根本
+  # 不是台灣公司。
+  use_registry: true
+
+  # 匯入完就自動接著補齊。預設關閉：補齊會連網，匯入 500 筆等於送出 500 次
+  # 以上的請求，那件事該由使用者自己按下去。匯入頁上的勾選框會存回這裡。
+  auto_after_import: false
+
+  # 自動補齊一次最多處理幾家。這是保護不是設定——勾了自動補齊之後匯入一份
+  # 三千筆的檔案，不該變成一個跑好幾小時的動作。超過的部分到「爬取」頁
+  # 按「補齊公司資料」自己處理。
+  auto_after_import_limit: 200
+
 exporter:
   output_dir: "./output"
   excel_sheet_name: "Companies"

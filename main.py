@@ -837,7 +837,8 @@ def registry(
     """用統一編號補上經濟部商業司的公司登記資料。
 
     最有用的是「登記狀態」——名錄不會把倒掉的會員刪掉，這一步把解散、撤銷、
-    廢止的挑出來。沒有統一編號的公司查不了（這個資料集不支援用名稱查詢）。
+    廢止的挑出來。這一支只吃統一編號（它用的那個資料集不支援名稱查詢）；
+    只有公司名稱的名單請改用 complete。
     """
     config = _bootstrap()
 
@@ -873,6 +874,109 @@ def registry(
             f"[yellow]其中 {summary.defunct} 家的登記狀態已經不是「核准設立」，"
             "寄信之前建議先確認。[/yellow]"
         )
+    # 顯名標示是授權條款的強制義務，不是說明文字。見 core.legal。
+    console.print(f"[dim]{OPEN_DATA_ATTRIBUTION}[/dim]")
+
+
+@app.command()
+def complete(
+    limit: Optional[int] = typer.Option(None, "--limit", "-n", help="最多處理幾家公司。"),
+    fields: Optional[str] = typer.Option(
+        None,
+        "--fields",
+        "-f",
+        help="只補這幾個欄位，逗號分隔。預設全部："
+        "tax_id,address,contact_person,website,email,phone,fax",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="連已經有值的欄位也覆蓋。預設只補空的——這個選項會蓋掉你手動填過的資料。",
+    ),
+) -> None:
+    """把只有公司名稱的名單補齊：統編、負責人、地址、官網、信箱、電話、聯絡人。
+
+    跟 enrich、registry 的差別在前提。那兩支各自需要「已經有網址」與「已經
+    有統編」；這一支從只有名字開始，一家公司走三關：
+
+      1. 查經濟部商業司（有統編就用統編，只有名稱就用名稱模糊查詢）
+      2. 還是沒有網址的話，搜尋找出官網
+      3. 到官網上抓公開刊登的信箱、電話、傳真、聯絡人
+
+    搜尋來的網址一定會先驗證（首頁文字要提到這家公司）才採用，通不過就留白。
+    """
+    config = _bootstrap()
+
+    from core.legal import OPEN_DATA_ATTRIBUTION
+    from crawler.complete import FILLABLE_FIELDS, complete_companies
+
+    chosen = None
+    if fields:
+        chosen = [name.strip() for name in fields.split(",") if name.strip()]
+        unknown = set(chosen) - set(FILLABLE_FIELDS)
+        if unknown:
+            _fail(
+                f"不認得的欄位：{'、'.join(sorted(unknown))}。"
+                f"可用的有：{', '.join(FILLABLE_FIELDS)}"
+            )
+
+    if overwrite:
+        console.print(
+            "[yellow]--overwrite：已經有值的欄位也會被覆蓋，包含你手動填過的。[/yellow]"
+        )
+
+    def progress(index: int, total: int, name: str) -> None:
+        console.print(f"  [dim]{index}/{total}[/dim] {name}")
+
+    try:
+        summary = complete_companies(
+            limit=limit,
+            fields=chosen,
+            overwrite=overwrite,
+            config=config,
+            progress=progress,
+        )
+    except CRMError as exc:
+        _fail(str(exc))
+
+    table = Table(title="補齊結果")
+    table.add_column("項目", style="cyan")
+    table.add_column("數量", justify="right")
+    for label, value in (
+        ("處理的公司", summary.considered),
+        ("實際更新", summary.updated),
+        ("補上的欄位總數", summary.fields_filled),
+        ("商業司對到", summary.registry_matched),
+        ("送出的搜尋", summary.searches_made),
+        ("找到官網", summary.websites_found),
+        ("造訪的頁面", summary.sites_visited),
+        ("搜尋到但無法確認", summary.rejected_unconfirmed),
+        ("被 robots.txt 擋下", summary.skipped_robots),
+        ("商業司忙線跳過", summary.registry_busy),
+        ("失敗", summary.failed),
+    ):
+        table.add_row(label, str(value))
+    console.print(table)
+
+    if summary.filled:
+        from core.i18n import field_label
+
+        detail = Table(title="各欄位補上幾筆")
+        detail.add_column("欄位", style="cyan")
+        detail.add_column("數量", justify="right")
+        for name, count in sorted(summary.filled.items()):
+            detail.add_row(field_label(name), str(count))
+        console.print(detail)
+
+    if summary.rejected_unconfirmed:
+        console.print(
+            f"[dim]{summary.rejected_unconfirmed} 家搜尋到了網頁，但頁面內容沒有提到"
+            "該公司，因此沒有採用——寧可留白也不要存錯的網址。[/dim]"
+        )
+    if summary.search_stopped:
+        console.print(f"[yellow]搜尋中途停止：{summary.search_stopped}[/yellow]")
+    if summary.search_provider:
+        console.print(f"[dim]找官網使用：{summary.search_provider}[/dim]")
     # 顯名標示是授權條款的強制義務，不是說明文字。見 core.legal。
     console.print(f"[dim]{OPEN_DATA_ATTRIBUTION}[/dim]")
 

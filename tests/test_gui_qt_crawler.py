@@ -187,6 +187,73 @@ def test_enrich_with_nothing_pending_reports_status_without_blocking_dialog(
     assert page.app.messages[-1] == ("沒有「有網址、缺信箱」的公司需要補抓", "success")
 
 
+def test_completion_with_nothing_pending_reports_status_without_blocking_dialog(
+    qt_app, db_session, patch_config
+):
+    """空資料庫沒有東西可補，所以不會跳確認視窗——這對測試很重要，
+    真的跳出來會把事件迴圈卡住。"""
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    page._start_completion()
+
+    assert page.completion_task is None
+    assert page.app.messages[-1] == ("每一家公司的資料都齊了，沒有需要補的", "success")
+
+
+def test_the_completion_button_says_what_it_needs_and_what_it_finds(qt_app, patch_config):
+    """三顆補完按鈕的前提各不相同，使用者要看得出來該按哪一顆。
+
+    「補抓信箱」要先有網址、「補公司登記資料」要先有統編，只有名字的名單
+    按那兩顆都會得到「沒有需要處理的公司」——那句話讀起來像是「已經很完整
+    了」。這一顆的說明必須講清楚它不需要那些前提。
+    """
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    assert page.completion_button.text() == "補齊公司資料"
+    tip = page.completion_button.toolTip()
+    assert "只有公司名稱" in tip
+    assert "商業司" in tip
+
+
+def test_completion_done_reports_the_rejected_sites_rather_than_hiding_them(
+    qt_app, db_session, patch_config
+):
+    """通不過驗證的網址是刻意留白，不是搜尋壞了。
+
+    不講的話使用者只會看到「找到 0 個官網」，然後以為功能沒用。
+    """
+    from crawler.complete import CompletionSummary
+
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    summary = CompletionSummary(considered=3, updated=1, rejected_unconfirmed=2)
+    summary.filled = {"tax_id": 1}
+    page._on_completion_done(summary)
+
+    log_text = page.log_box.toPlainText()
+    assert "沒有提到" in log_text
+    assert "統一編號 1" in log_text  # 欄位名要翻成中文，不是印 tax_id
+    assert page.app.messages[-1][1] == "success"
+
+
+def test_completion_done_warns_when_the_search_stopped_partway(
+    qt_app, db_session, patch_config
+):
+    """限流跑到一半停掉，結果就不完整——那不是 success。"""
+    from crawler.complete import CompletionSummary
+
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    page._on_completion_done(CompletionSummary(considered=5, updated=1, search_stopped="額度用完了"))
+
+    assert "額度用完了" in page.log_box.toPlainText()
+    assert page.app.messages[-1][1] == "warning"
+
+
 def test_on_source_saved_refreshes_the_source_combo(qt_app, patch_config, monkeypatch):
     """``_on_source_saved`` must drop the config cache and re-read the source list.
 

@@ -89,6 +89,23 @@ def normalize_company_name(value: str | None) -> str | None:
     return cleaned or None
 
 
+def comparison_text(value: str | None) -> str:
+    """Character-level folding shared by every name comparison.
+
+    Full-width forms, case, ``台``/``臺`` spelling and all punctuation and
+    spacing are removed; nothing is *dropped* from the text itself.
+
+    Kept public and separate from :func:`company_name_key` because matching a
+    name against a whole page of text needs this half but not the other half:
+    stripping legal-form suffixes off a page's worth of prose would cut a
+    company name in two whenever it happened to fall at the end.
+    """
+    if not value:
+        return ""
+    folded = to_halfwidth(str(value)).lower().replace("臺", "台")
+    return _NON_NAME_CHARS.sub("", folded)
+
+
 def company_name_key(value: str | None) -> str:
     """Comparison key for a company name.
 
@@ -109,9 +126,7 @@ def company_name_key(value: str | None) -> str:
             if key.endswith(suffix) and len(key) > len(suffix):
                 key = key[: -len(suffix)].strip(" .,-·")
                 changed = True
-    key = key.replace("臺", "台")
-    key = _NON_NAME_CHARS.sub("", key)
-    return key
+    return comparison_text(key)
 
 
 def normalize_email(value: str | None) -> str | None:

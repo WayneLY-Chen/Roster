@@ -195,6 +195,7 @@ class SettingsPage(BasePage):
 
         self._build_overview_section()
         self._build_encryption_section()
+        self._build_search_section()
         self._build_gmail_section()
         self._build_mailer_section()
         self._build_scheduler_section()
@@ -364,6 +365,173 @@ class SettingsPage(BasePage):
         section.body_layout.addWidget(note)
 
         self._body_layout.addWidget(section)
+
+    def _build_search_section(self) -> None:
+        """「補齊公司資料」找官網時用哪個搜尋來源，以及選填的金鑰。
+
+        這一整段都是選填的。預設的 DuckDuckGo 不需要金鑰也不需要設定，
+        所以這裡先講「你不必動這個」，再講「什麼時候你會想動」——會走到
+        這一段的人，多半是已經被限流擋過一次才來的。
+        """
+        from crawler.websearch import available_providers
+
+        section = Section("搜尋官網（選填）")
+
+        intro = QLabel(
+            "「爬取」頁的「補齊公司資料」在只有公司名稱、沒有網址時，會用搜尋"
+            "找出官網。預設用 DuckDuckGo，不需要金鑰也不需要設定——這一段可以"
+            "完全不管。<br>"
+            "DuckDuckGo 對密集查詢會限流，一次要跑幾百家時容易在後段被擋。"
+            "遇到那種情況，在這裡填一把免費金鑰就會自動改走官方 API。"
+        )
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setObjectName("MutedLabel")
+        intro.setWordWrap(True)
+        section.body_layout.addWidget(intro)
+
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(caption("搜尋來源"))
+        self.search_provider_combo = WideComboBox()
+        self._search_providers = available_providers()
+        self.search_provider_combo.addItems(list(self._search_providers.values()))
+        current = getattr(self.controller.config, "completion", None)
+        current_name = getattr(current, "search_provider", "auto")
+        self.search_provider_combo.setCurrentText(
+            self._search_providers.get(current_name, self._search_providers["auto"])
+        )
+        # 跟外觀下拉一樣：先設好初始值，再接訊號。
+        self.search_provider_combo.currentTextChanged.connect(self._on_search_provider_changed)
+        provider_row.addWidget(self.search_provider_combo, 1)
+        section.body_layout.addLayout(provider_row)
+
+        self.search_key_status_label = QLabel("")
+        self.search_key_status_label.setWordWrap(True)
+        section.body_layout.addWidget(self.search_key_status_label)
+
+        form_row = QHBoxLayout()
+        self.brave_key_entry = LabeledEntry("Brave 金鑰", placeholder="選填")
+        self.brave_key_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
+        form_row.addWidget(self.brave_key_entry, 1)
+        self.google_key_entry = LabeledEntry("Google 金鑰", placeholder="選填")
+        self.google_key_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
+        form_row.addWidget(self.google_key_entry, 1)
+        self.google_cx_entry = LabeledEntry("Google 搜尋引擎 ID", placeholder="選填")
+        form_row.addWidget(self.google_cx_entry, 1)
+        section.body_layout.addLayout(form_row)
+
+        button_row = QHBoxLayout()
+        self.save_search_keys_button = QPushButton("儲存到系統")
+        self.save_search_keys_button.clicked.connect(self._save_search_keys)
+        if not self.controller.keyring_available():
+            self.save_search_keys_button.setEnabled(False)
+        button_row.addWidget(self.save_search_keys_button)
+        clear_search_button = QPushButton("清除")
+        clear_search_button.clicked.connect(self._clear_search_keys)
+        button_row.addWidget(clear_search_button)
+        button_row.addStretch(1)
+        section.body_layout.addLayout(button_row)
+
+        note = QLabel(
+            "免費金鑰申請："
+            '<a href="https://brave.com/search/api/">Brave Search API</a>'
+            "（每月 2000 次）或 "
+            '<a href="https://developers.google.com/custom-search/v1/overview">'
+            "Google Custom Search</a>（每日 100 次，還需要到 "
+            '<a href="https://programmablesearchengine.google.com/">'
+            "Programmable Search Engine</a> 建一個搜尋引擎取得 ID）。<br>"
+            "金鑰跟 Gmail 密碼一樣存在作業系統的憑證保管庫，不會寫進這個資料夾"
+            "裡的任何檔案。"
+        )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setOpenExternalLinks(True)
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
+
+        self._refresh_search_key_status()
+        self._body_layout.addWidget(section)
+
+    def _refresh_search_key_status(self) -> None:
+        """顯示哪幾把金鑰已經設定好了，以及現在實際會用哪一個來源。"""
+        from controllers.core import CompletionController
+
+        try:
+            active = CompletionController(self.controller.config).search_provider_label()
+        except CRMError as exc:
+            active = str(exc)
+
+        from crawler.websearch import configured_keys
+
+        keys = configured_keys()
+        parts = [
+            f"Brave 金鑰：{'已設定' if keys.get('brave') else '未設定'}",
+            f"Google 金鑰：{'已設定' if keys.get('google') else '未設定'}",
+        ]
+        self.search_key_status_label.setText(
+            "　｜　".join(parts) + f"\n目前實際使用：{active}"
+        )
+
+    def _on_search_provider_changed(self, text: str) -> None:
+        name = next(
+            (key for key, shown in self._search_providers.items() if shown == text),
+            "auto",
+        )
+        try:
+            self.controller.save_search_provider(name)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self._refresh_search_key_status()
+        self.status(f"搜尋來源已改為「{text}」", "success")
+
+    def _save_search_keys(self) -> None:
+        """把填了的金鑰存進保管庫。空白的欄位一律不動。
+
+        空白不代表「刪掉它」——使用者打開設定頁看到的就是空白（金鑰從來不會
+        被讀回畫面上），把空白當成刪除等於每次進來按一下儲存就會清掉已經設好
+        的金鑰。要刪請按「清除」。
+        """
+        from crawler.websearch import (
+            BRAVE_KEY_SECRET,
+            GOOGLE_CX_SECRET,
+            GOOGLE_KEY_SECRET,
+        )
+
+        pending = {
+            BRAVE_KEY_SECRET: self.brave_key_entry.get().strip(),
+            GOOGLE_KEY_SECRET: self.google_key_entry.get().strip(),
+            GOOGLE_CX_SECRET: self.google_cx_entry.get().strip(),
+        }
+        filled = {name: value for name, value in pending.items() if value}
+        if not filled:
+            self.status("沒有填入任何金鑰，沒有變更", "warning")
+            return
+
+        try:
+            for name, value in filled.items():
+                self.controller.save_credential(name, value)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        for entry in (self.brave_key_entry, self.google_key_entry, self.google_cx_entry):
+            entry.set("")
+        self._refresh_search_key_status()
+        self.status(f"已儲存 {len(filled)} 項到系統憑證保管庫", "success")
+
+    def _clear_search_keys(self) -> None:
+        from crawler.websearch import (
+            BRAVE_KEY_SECRET,
+            GOOGLE_CX_SECRET,
+            GOOGLE_KEY_SECRET,
+        )
+
+        for name in (BRAVE_KEY_SECRET, GOOGLE_KEY_SECRET, GOOGLE_CX_SECRET):
+            self.controller.delete_credential(name)
+        for entry in (self.brave_key_entry, self.google_key_entry, self.google_cx_entry):
+            entry.set("")
+        self._refresh_search_key_status()
+        self.status("搜尋金鑰已清除，補齊資料會改用 DuckDuckGo", "success")
 
     def _build_gmail_section(self) -> None:
         section = Section("Gmail 帳號")

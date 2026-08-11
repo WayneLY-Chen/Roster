@@ -340,6 +340,25 @@ class CompanyRepository:
         )
         return int(self.session.execute(stmt).scalar_one())
 
+    def count_completable(self, fields: Iterable[str]) -> int:
+        """至少缺 ``fields`` 其中一個欄位的家數。
+
+        跟 :meth:`count_enrichable`、:meth:`count_registrable` 一樣，是給介面
+        顯示「按下去會處理幾家」用的。
+
+        這一支在 Python 端算，不是 SQL——``email``、``phone``、``address``、
+        ``contact_person`` 都是加密欄位，SQL 看到的是密文，``!= ''`` 那種
+        條件在上面得到的答案是錯的。而且這個數字必須跟
+        :func:`crawler.complete.complete_companies` 真正挑出來的那一批一致，
+        兩邊用同一個判斷方式才保證得了。
+        """
+        names = tuple(fields)
+        return sum(
+            1
+            for company in self.all()
+            if any(not (getattr(company, name, None) or "").strip() for name in names)
+        )
+
     def distinct_values(self, field: str) -> list[str]:
         """Distinct non-empty values of a column, for GUI filter dropdowns."""
         column = getattr(Company, field, None)

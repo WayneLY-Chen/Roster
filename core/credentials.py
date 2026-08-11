@@ -46,6 +46,12 @@ SECRET_ENV_VARS: dict[str, str] = {
     "gmail_address": "GMAIL_ADDRESS",
     "gmail_app_password": "GMAIL_APP_PASSWORD",
     "crawler_contact": "CRM_CRAWLER_CONTACT",
+    # 「補齊公司資料」找官網用的搜尋金鑰。兩個都是選填——沒填就用免金鑰的
+    # DuckDuckGo，見 crawler/websearch.py。搜尋引擎 ID 不算密碼，但跟金鑰
+    # 一起存管理起來單純，而且它同樣沒有理由出現在專案資料夾裡。
+    "brave_search_key": "BRAVE_SEARCH_KEY",
+    "google_search_key": "GOOGLE_SEARCH_KEY",
+    "google_search_cx": "GOOGLE_SEARCH_CX",
 }
 
 try:  # pragma: no cover - 取決於執行環境

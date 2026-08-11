@@ -570,6 +570,35 @@ class VerifierSection(_Base):
         return [d.strip().lower() for d in domains if d.strip()]
 
 
+class CompletionSection(_Base):
+    """「補齊公司資料」的行為。見 :mod:`crawler.complete`。"""
+
+    #: 搜尋來源。``auto`` 是「有金鑰就用金鑰，沒有就用免金鑰的 DuckDuckGo」。
+    #: ``none`` 完全不搜尋，只靠商業司與檔案裡本來就有的網址。
+    search_provider: Literal["auto", "duckduckgo", "brave", "google", "none"] = "auto"
+
+    #: 一家公司最多試幾個官網候選。每一個候選至少一次請求，而通不過驗證的
+    #: 候選就是純粹浪費——所以這個值調高不會提高準確度，只會拖慢速度。
+    max_candidates: int = Field(default=3, ge=1, le=10)
+
+    #: 要不要走商業司那一關。關掉的話統編、負責人、登記地址都不會補。
+    use_registry: bool = True
+
+    #: 匯入完之後自動接著補齊。
+    #:
+    #: 預設關閉，而且應該保持關閉當作預設：補齊會連網、會花時間，匯入
+    #: 500 筆就是 500 次以上的請求。那件事該由使用者按下去，不是匯入的
+    #: 副作用。匯入頁上那個勾選框會把使用者的選擇存回這裡。
+    auto_after_import: bool = False
+
+    #: 自動補齊一次最多處理幾家。
+    #:
+    #: 這是保護，不是設定：勾了自動補齊之後匯入一份三千筆的檔案，不該變成
+    #: 一個跑好幾個小時、而且使用者不知道自己按下去了的動作。超過的部分留給
+    #: 使用者自己到「爬取」頁按按鈕處理。
+    auto_after_import_limit: int = Field(default=200, ge=1, le=5000)
+
+
 class ExporterSection(_Base):
     output_dir: str = "./output"
     excel_sheet_name: str = "Companies"
@@ -793,6 +822,7 @@ class AppConfig(_Base):
     logging: LoggingSection = Field(default_factory=LoggingSection)
     crawler: CrawlerSection = Field(default_factory=CrawlerSection)
     verifier: VerifierSection = Field(default_factory=VerifierSection)
+    completion: CompletionSection = Field(default_factory=CompletionSection)
     exporter: ExporterSection = Field(default_factory=ExporterSection)
     backup: BackupSection = Field(default_factory=BackupSection)
     gmail: GmailSection = Field(default_factory=GmailSection)

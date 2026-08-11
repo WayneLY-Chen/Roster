@@ -102,6 +102,12 @@ class ImportSummary:
     records_duplicate: int = 0
     records_invalid: int = 0
     unmapped_columns: list[str] = field(default_factory=list)
+    #: 這一次匯入實際碰到的公司編號（新增的與合併進去的都算）。
+    #:
+    #: 「匯入後自動補齊」需要它：補齊只該處理這一批，不該把使用者資料庫裡
+    #: 既有的幾千家一起重跑一遍——那是另一個決定，該由使用者到「爬取」頁
+    #: 自己按下去。
+    company_ids: list[int] = field(default_factory=list)
 
     @property
     def records_stored(self) -> int:
@@ -248,7 +254,9 @@ def import_file(
         summary.records_invalid = rejected
 
         for record in cleaned:
-            _, merged = repo.upsert(record)
+            company, merged = repo.upsert(record)
+            if company.id is not None:
+                summary.company_ids.append(company.id)
             if merged:
                 summary.records_merged += 1
                 summary.records_duplicate += 1

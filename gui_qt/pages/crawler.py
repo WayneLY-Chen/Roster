@@ -42,13 +42,14 @@ from core.errors import CRMError
 from core.legal import OPEN_DATA_ATTRIBUTION as ATTRIBUTION
 from core.schemas import CrawlSummary, VerifySummary
 from controllers.core import (
+    CompletionController,
     CrawlController,
     EnrichController,
     RegistryController,
     VerifyController,
 )
 from controllers.source import SourceWizardController
-from core.i18n import CRAWL_STATUS_LABELS, label
+from core.i18n import CRAWL_STATUS_LABELS, field_label, label
 from gui_qt import theme
 from gui_qt.pages.base import BasePage, bump_data_version
 from gui_qt.source_wizard import SourceWizardDialog
@@ -103,6 +104,7 @@ class CrawlerPage(BasePage):
         self.verify_controller = VerifyController()
         self.enrich_controller = EnrichController()
         self.registry_controller = RegistryController()
+        self.completion_controller = CompletionController()
         self.source_controller = SourceWizardController()
         self.crawl_task: BackgroundTask | None = None
         #: 這一次爬的是哪個來源，以及停下來之後要不要把進度丟掉（按「取消」
@@ -112,6 +114,7 @@ class CrawlerPage(BasePage):
         self.verify_task: BackgroundTask | None = None
         self.enrich_task: BackgroundTask | None = None
         self.registry_task: BackgroundTask | None = None
+        self.completion_task: BackgroundTask | None = None
         #: 網址精靈是一個不擋人、沒有 parent 的視窗，所以要自己抓著一份參考
         #: ——不然 Python 一回收，視窗當場消失。
         self._wizard: Any = None
@@ -211,6 +214,19 @@ class CrawlerPage(BasePage):
         self.registry_button = QPushButton("補公司登記資料")
         self.registry_button.clicked.connect(self._start_registry)
         buttons_row.addWidget(self.registry_button)
+
+        # 上面兩顆各自有前提：「補抓信箱」要先有網址，「補公司登記資料」要先
+        # 有統一編號。使用者自己匯入的名單常常兩個都沒有，只有公司名稱跟一支
+        # 電話——那種名單按哪一顆都會得到「沒有需要處理的公司」，而那句話讀
+        # 起來像是「已經很完整了」。這一顆是給那種名單的：從只有名字開始，
+        # 一路補到能用。
+        self.completion_button = QPushButton("補齊公司資料")
+        self.completion_button.setToolTip(
+            "只有公司名稱也能補：先查經濟部商業司拿統一編號與登記資料，"
+            "再搜尋找出官網，最後到官網上抓公開的信箱、電話、傳真與聯絡人。"
+        )
+        self.completion_button.clicked.connect(self._start_completion)
+        buttons_row.addWidget(self.completion_button)
 
         self.manage_sources_button = QPushButton("管理自訂來源")
         self.manage_sources_button.clicked.connect(self._open_source_manager)
@@ -604,6 +620,107 @@ class CrawlerPage(BasePage):
 
     def _finish_registry(self) -> None:
         self.registry_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        self.app.status_bar.stop_progress()
+
+    # -------------------------------------------------------- 補齊公司資料
+
+    def _start_completion(self) -> None:
+        if self.completion_task is not None and self.completion_task.running:
+            return
+
+        try:
+            pending = self.completion_controller.pending_count()
+            provider = self.completion_controller.search_provider_label()
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+
+        if not pending:
+            self.status("每一家公司的資料都齊了，沒有需要補的", "success")
+            return
+
+        # 一家公司最多是：商業司一次 + 搜尋一次 + 官網兩頁。全部都缺的那種
+        # 名單才會走完整條路，所以這是上限不是平均值，說「最多」而不說「大約」。
+        crawler = self.completion_controller.config.crawler
+        per_company = max(1.0, crawler.delay_seconds + crawler.delay_jitter / 2) * 4
+        minutes = max(1, round(pending * per_company / 60))
+
+        reply = QMessageBox.question(
+            self,
+            "補齊公司資料",
+            f"有 {pending} 家公司缺了至少一個欄位。\n\n"
+            "程式會依序做三件事：\n"
+            "　1. 用公司名稱或統一編號查經濟部商業司，補上統編、"
+            "登記負責人、登記地址與登記狀態\n"
+            "　2. 還是沒有網址的話，搜尋找出它的官網\n"
+            "　3. 到官網上抓公開刊登的信箱、電話、傳真與聯絡人\n\n"
+            f"找官網用的是：{provider}\n\n"
+            "已經有值的欄位一律不會被覆蓋，只補空的。\n"
+            "每個網站都會各自檢查 robots.txt 並遵守請求間隔，"
+            f"因此最多需要 {minutes} 分鐘。\n\n"
+            f"{ATTRIBUTION}\n\n"
+            "要開始嗎？（過程中可以按「取消」停止）",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._append_log(f"開始補齊公司資料，共 {pending} 家公司（找官網：{provider}）...")
+        self._append_log(ATTRIBUTION)
+        self.completion_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.app.status_bar.start_progress()
+        self.status("補齊公司資料中...", "normal")
+
+        self.completion_task = BackgroundTask(
+            self,
+            worker=self.completion_controller.run,
+            on_progress=self._on_enrich_progress,
+            on_done=self._on_completion_done,
+            on_error=self._on_completion_error,
+        )
+        self.completion_task.start()
+
+    def _on_completion_done(self, summary: Any) -> None:
+        self._finish_completion()
+        self._append_log(
+            f"補齊完成 -- 處理 {summary.considered} 家，更新 {summary.updated} 家，"
+            f"補上 {summary.fields_filled} 個欄位"
+        )
+        if summary.filled:
+            self._append_log("　" + "、".join(
+                f"{field_label(name)} {count}"
+                for name, count in sorted(summary.filled.items())
+            ))
+        if summary.rejected_unconfirmed:
+            # 這不是失敗，是刻意留白。不講的話使用者只會看到「找到 0 個官網」，
+            # 以為是搜尋壞了。
+            self._append_log(
+                f"　{summary.rejected_unconfirmed} 家找到了網頁，但頁面內容沒有提到"
+                "該公司，因此沒有採用——寧可留白也不要存錯的網址。"
+            )
+        if summary.skipped_robots:
+            self._append_log(f"　{summary.skipped_robots} 家被 robots.txt 擋下")
+        if summary.registry_busy:
+            self._append_log(
+                f"　{summary.registry_busy} 家因商業司忙線跳過（下次會再試）"
+            )
+        if summary.search_stopped:
+            self._append_log(f"⚠ 搜尋已停止：{summary.search_stopped}")
+            self.status(
+                f"補齊完成（搜尋中途停止），更新 {summary.updated} 家", "warning"
+            )
+        else:
+            self.status(f"補齊完成，更新 {summary.updated} 家", "success")
+        bump_data_version()
+
+    def _on_completion_error(self, exc: Exception) -> None:
+        self._finish_completion()
+        self._append_log(f"錯誤：{exc}")
+        self.report_error(exc)
+
+    def _finish_completion(self) -> None:
+        self.completion_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.app.status_bar.stop_progress()
 

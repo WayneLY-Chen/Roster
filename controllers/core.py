@@ -395,6 +395,66 @@ class RegistryController:
         )
 
 
+class CompletionController:
+    """補齊一份只有公司名稱的名單。
+
+    :class:`EnrichController` 的前提是「已經有網址」，:class:`RegistryController`
+    的前提是「已經有統編」。使用者自己匯入的 Excel 兩者常常都沒有——這一支
+    把缺的那一段接起來：先查商業司拿統編與登記資料，再搜尋找官網，最後到
+    官網上抓信箱、電話、傳真、聯絡人。見 :mod:`crawler.complete`。
+    """
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config or get_config()
+
+    def pending_count(self) -> int:
+        """至少缺一個欄位、值得補的家數。"""
+        from crawler.complete import FILLABLE_FIELDS
+
+        with session_scope() as session:
+            return CompanyRepository(session).count_completable(FILLABLE_FIELDS)
+
+    def search_provider_label(self) -> str:
+        """目前會用哪一個搜尋來源找官網，給畫面顯示。
+
+        設定有問題（指名了某一家但金鑰沒填）時回傳那句錯誤訊息本身——
+        使用者按下去之前就該看到，而不是跑完才發現一個官網都沒找到。
+        """
+        from crawler.websearch import SearchUnavailable, build_search_provider
+
+        try:
+            provider = build_search_provider(self.config, fetcher=None)
+        except SearchUnavailable as exc:
+            return str(exc)
+        if provider is None:
+            return "不搜尋官網（設定為 none）"
+        label = provider.label or provider.name
+        provider.close()
+        return label
+
+    def run(
+        self,
+        limit: int | None = None,
+        fields: list[str] | None = None,
+        company_ids: list[int] | None = None,
+        *,
+        report: Callable[[Any], None],
+        cancel_event,
+    ):
+        from crawler.complete import complete_companies
+
+        return complete_companies(
+            limit=limit,
+            fields=fields,
+            company_ids=company_ids,
+            config=self.config,
+            progress=lambda index, total, name: report(
+                {"done": index, "total": total, "name": name}
+            ),
+            cancel_event=cancel_event,
+        )
+
+
 class ExportController:
     def __init__(self, config: AppConfig | None = None) -> None:
         self.config = config or get_config()
@@ -597,6 +657,25 @@ class SettingsController:
             raise CRMError(f"儲存「{label}」失敗：{exc}") from exc
         except ValueError as exc:
             raise CRMError(f"「{label}」的值不合法：{exc}") from exc
+        self.config = get_config()
+
+    # --------------------------------------------------------- 補齊公司資料
+
+    def save_search_provider(self, name: str) -> None:
+        """存下「補齊公司資料」要用哪個搜尋來源找官網。
+
+        跟排程一樣有自己的存檔方法、而不是掛進 :attr:`EDITABLE_SETTINGS`：
+        那張表是給總覽表格裡「點兩下就地編輯」用的，這一個有自己的下拉選單
+        跟金鑰欄位，放進總覽只會變成兩個地方可以改同一件事。
+        """
+        from core.config import save_user_setting
+
+        try:
+            save_user_setting("completion", "search_provider", name)
+        except CRMError as exc:
+            raise CRMError(f"儲存搜尋來源失敗：{exc}") from exc
+        except ValueError as exc:
+            raise CRMError(f"不合法的搜尋來源「{name}」：{exc}") from exc
         self.config = get_config()
 
     # ------------------------------------------------------------- 排程

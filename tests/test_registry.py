@@ -19,8 +19,12 @@ from crawler.fetcher import FetchResult
 from crawler.registry import (
     RECHECK_AFTER_DAYS,
     RegistryBusy,
+    best_name_match,
     enrich_registrations,
     lookup,
+    lookup_by_name,
+    name_query_url,
+    parse_name_response,
     parse_response,
     query_url,
     roc_to_date,
@@ -120,6 +124,106 @@ def test_the_query_url_encodes_the_filter():
 
     assert "22099131" in url
     assert " " not in url  # OData 的 filter 含空白，沒編碼會被伺服器拒絕
+
+
+# --------------------------------------------------------- 用名稱查詢
+#
+# 統編查詢用的那個資料集不支援名稱查詢（實測回空陣列）。名稱查詢走的是
+# 另一個資料集，而它有一個不寫在文件裡、少了就一定回空陣列的條件。
+
+#: 名稱查詢的回應。比統編查詢多一個 ``Company_Status`` 代碼欄位。
+TSMC_BY_NAME_JSON = """[{"Business_Accounting_NO":"22099131",
+"Company_Name":"台灣積體電路製造股份有限公司","Company_Status":"01",
+"Company_Status_Desc":"核准設立","Capital_Stock_Amount":280500000000,
+"Responsible_Name":"魏哲家","Company_Location":"新竹科學園區新竹市力行六路8號",
+"Company_Setup_Date":"0760221"}]"""
+
+#: 模糊查詢「台積電」實際會回來的東西——沒有一家是台積電。
+NEAR_MISSES_JSON = """[
+{"Business_Accounting_NO":"54900838","Company_Name":"台積電機有限公司",
+ "Company_Status":"01","Company_Status_Desc":"核准設立","Responsible_Name":"王志聰"},
+{"Business_Accounting_NO":"90312187","Company_Name":"台積電梯有限公司",
+ "Company_Status":"01","Company_Status_Desc":"核准設立","Responsible_Name":"余湧筠"}
+]"""
+
+
+def test_the_name_query_url_carries_the_status_condition():
+    """``and Company_Status eq 01`` 不能拿掉。
+
+    少了它對方回的是空陣列，而不是錯誤——所以看起來會像「這家公司沒登記」，
+    而不是「查詢寫錯了」。實測過：帶條件回 1 筆，不帶條件回 0 筆。
+    """
+    url = name_query_url("台灣積體電路製造")
+
+    assert "Company_Status" in url or "Company_Status".replace("_", "%5F") in url
+    assert "eq%2001" in url or "eq+01" in url or "eq%2001" in url
+    assert " " not in url
+
+
+def test_the_name_query_uses_the_other_dataset():
+    """兩個資料集的用途不同，指錯了會安靜地一筆都查不到。"""
+    assert name_query_url("甲") != query_url("22099131")
+    assert "6BBA2268" in name_query_url("甲")
+
+
+def test_a_name_response_is_parsed_into_a_list():
+    results = parse_name_response(NEAR_MISSES_JSON)
+
+    assert [r.company_name for r in results] == ["台積電機有限公司", "台積電梯有限公司"]
+    assert results[0].tax_id == "54900838"
+
+
+def test_an_empty_name_response_is_not_an_error():
+    assert parse_name_response("") == []
+    assert parse_name_response("[]") == []
+
+
+def test_a_busy_response_is_still_detected_on_the_name_path():
+    with pytest.raises(RegistryBusy):
+        parse_name_response(BUSY_HTML)
+
+
+def test_the_legal_suffix_does_not_have_to_match():
+    """名錄上的簡稱跟登記全名常常對不起來。"""
+    candidates = parse_name_response(TSMC_BY_NAME_JSON)
+
+    matched = best_name_match("台灣積體電路製造", candidates)
+
+    assert matched is not None
+    assert matched.tax_id == "22099131"
+
+
+def test_a_near_miss_is_not_a_match():
+    """把統編補到錯的公司上，比留白糟得多——留白至少看得出來是缺的。"""
+    assert best_name_match("台積電", parse_name_response(NEAR_MISSES_JSON)) is None
+
+
+def test_an_empty_name_matches_nothing():
+    assert best_name_match("", parse_name_response(TSMC_BY_NAME_JSON)) is None
+
+
+def test_a_name_lookup_goes_out_and_comes_back():
+    fetcher = _Fetcher(TSMC_BY_NAME_JSON)
+
+    registration = lookup_by_name("台灣積體電路製造股份有限公司", fetcher)
+
+    assert registration is not None
+    assert registration.tax_id == "22099131"
+    assert registration.responsible_name == "魏哲家"
+    assert registration.is_active
+
+
+def test_a_name_lookup_that_only_finds_near_misses_gives_nothing():
+    fetcher = _Fetcher(NEAR_MISSES_JSON)
+
+    assert lookup_by_name("台積電", fetcher) is None
+
+
+def test_a_blank_name_never_sends_a_request():
+    fetcher = _Fetcher(TSMC_BY_NAME_JSON)
+
+    assert lookup_by_name("   ", fetcher) is None
+    assert fetcher.urls == []
 
 
 # ------------------------------------------------------------ 單筆查詢
