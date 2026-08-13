@@ -23,6 +23,10 @@ export VIRTUAL_ENV="$here/.venv"
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 unset PYTHONHOME
 
+# The mascots, from the one file every launcher on every platform shares.
+printf "\n"
+cat "$here/assets/pets.txt" 2>/dev/null
+
 cat <<'EOF'
 
  Roster - virtual environment is active

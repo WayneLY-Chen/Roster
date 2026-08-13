@@ -391,6 +391,22 @@ class CompanyRepository:
                 untried += 1
         return CompletionProgress(pending=pending, untried=untried)
 
+    def known_identities(self) -> tuple[frozenset[str], frozenset[str]]:
+        """``(name_key, tax_id)`` 兩份集合，給爬取時略過已知公司用。
+
+        只選這兩欄，不是整列——這是為了不把幾千筆完整的 ORM 物件（含解密）
+        載進記憶體。這兩欄剛好都是明文的，見
+        :class:`~crawler.base.KnownCompanies` 說明為什麼只能用它們。
+        """
+        rows = self.session.execute(select(Company.name_key, Company.tax_id)).all()
+        names = {key for key, _ in rows if key}
+        tax_ids = {
+            digits
+            for _, tax_id in rows
+            if (digits := "".join(ch for ch in str(tax_id or "") if ch.isdigit()))
+        }
+        return frozenset(names), frozenset(tax_ids)
+
     def distinct_values(self, field: str) -> list[str]:
         """Distinct non-empty values of a column, for GUI filter dropdowns."""
         column = getattr(Company, field, None)

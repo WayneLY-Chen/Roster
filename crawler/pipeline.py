@@ -21,7 +21,7 @@ from core.constants import CrawlStatus, LogCategory
 from core.errors import CrawlError, RobotsDisallowedError
 from core.logging_setup import get_logger
 from core.schemas import CrawlSummary, RawCompany
-from crawler.base import BaseSource
+from crawler.base import BaseSource, KnownCompanies
 from crawler.fetcher import BaseFetcher, build_fetcher
 from crawler.sources import build_source
 from database.models import now
@@ -326,6 +326,21 @@ class CrawlPipeline:
                 )
 
             repo = CompanyRepository(session)
+
+            # 已經在資料庫裡的公司不必再去讀它的明細頁。
+            #
+            # 只撈一次，在開跑之前。跑到一半新增進去的公司刻意**不算**在內：
+            # 一趟裡的判斷基準要固定，否則「這一筆會不會被略過」取決於它排在
+            # 第幾頁，那種行為沒辦法解釋、也沒辦法測。同一趟內的重複本來就有
+            # deduplicate_batch 與 upsert 在處理。
+            if self.config.crawler.skip_known:
+                names, tax_ids = repo.known_identities()
+                source.known = KnownCompanies(name_keys=names, tax_ids=tax_ids)
+                log.info(
+                    "{}：資料庫裡已有 {} 家，這一趟會略過它們的明細頁",
+                    source_config.name, source.known.size,
+                )
+
             mx = MXChecker(self.config, session) if self.config.verifier.check_mx else None
             cleaner = CleaningService(self.config, mx)
 
@@ -341,7 +356,11 @@ class CrawlPipeline:
 
                     _apply_default_industry(batch.records, source_config.default_industry)
                     _keep_only(batch.records, self._fields_for(source_config))
-                    self._store_page(batch.records, repo, cleaner, summary)
+                    # getattr：測試裡的來源替身不是 BaseSource 的子類。
+                    self._store_page(
+                        batch.records, repo, cleaner, summary,
+                        getattr(source, "known", None),
+                    )
                     # 進度跟資料同一個交易寫入。分開寫的話，兩者之間斷電就會
                     # 出現「進度說做完了、資料卻沒存進去」的空洞。
                     if batch.resume_key is not None:
@@ -415,8 +434,19 @@ class CrawlPipeline:
         repo: CompanyRepository,
         cleaner: CleaningService,
         summary: CrawlSummary,
+        known: KnownCompanies | None = None,
     ) -> None:
-        """Dedupe within the page, clean, then upsert each record."""
+        """Dedupe within the page, clean, then upsert each record.
+
+        ``known`` 裡的公司連 upsert 都不做。這不只是省事——**少了這一段會製造
+        重複資料**：來源那邊已經略過了明細頁，於是這一筆手上只剩公司名稱，
+        ``dedupe_key`` 從 ``mail:a@example.test`` 掉回 ``n:<名稱>``，而
+        :meth:`~database.repository.CompanyRepository.find_match` 沒辦法把一個
+        只有名字的新記錄接回一個已經有信箱的舊記錄——它會當成新公司插進去。
+        第二次爬同一個名錄就會把整份資料再存一遍。
+
+        直接不存就沒有這個問題，而且那本來就是使用者要的：已經有了就略過。
+        """
         records = list(records)
         unique, dropped_in_page = deduplicate_batch(records)
         summary.records_duplicate += dropped_in_page
@@ -450,6 +480,9 @@ class CrawlPipeline:
                 )
 
         for record in cleaned:
+            if known is not None and known.has(record.company_name, record.tax_id):
+                summary.records_skipped_known += 1
+                continue
             _, merged = repo.upsert(record)
             if merged:
                 summary.records_updated += 1

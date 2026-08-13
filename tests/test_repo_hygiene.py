@@ -327,3 +327,42 @@ def test_the_git_helpers_report_none_outside_a_repository(tmp_path):
 
     assert git_tracked_files(tmp_path) is None
     assert git_untracked_unignored_files(tmp_path) is None
+
+
+#: 每個平台的三支啟動腳本。每一支都該印貓跟狗。
+LAUNCHERS = (
+    "Windows/安裝.bat", "Windows/啟動.bat", "Windows/命令列.bat",
+    "macOS/安裝.command", "macOS/啟動.command", "macOS/命令列.command",
+    "Linux/install.sh", "Linux/start.sh", "Linux/console.sh",
+)
+
+
+@pytest.mark.parametrize("name", LAUNCHERS)
+def test_every_launcher_prints_the_mascots(name):
+    """九支腳本都要印 assets/pets.txt。
+
+    這一條是使用者回報來的：Windows 開起來沒有貓跟狗，mac 有。當時的真相是
+    「三個平台都只有安裝程式有」，但那個不一致本身就是 bug——同一個程式在
+    不同作業系統上給人不同的第一印象，而且沒有任何理由。
+
+    圖只存在 assets/pets.txt 一份。九個地方各自貼一份的話，改一次要記得改
+    九個地方，而漏掉的那幾個沒有人會發現。
+    """
+    script = ROOT / name
+    assert script.exists(), f"{name} 不見了"
+    text = script.read_text(encoding="utf-8", errors="replace")
+    assert "pets.txt" in text, f"{name} 沒有印貓跟狗"
+
+
+def test_the_mascots_live_in_exactly_one_file():
+    """圖本身不准被複製到腳本裡。
+
+    ``pets.txt`` 用全形字元排版，混進腳本裡每改一次都要重數空白；而且 .bat
+    檔是刻意只用 ASCII 的（cmd.exe 遇到非 ASCII 會把後面整個檔案解析壞）。
+    """
+    art = (ROOT / "assets" / "pets.txt").read_text(encoding="utf-8")
+    signature = art.strip().splitlines()[0].strip()
+    assert signature, "pets.txt 是空的"
+    for name in LAUNCHERS:
+        text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
+        assert signature not in text, f"{name} 把圖複製進去了，應該 type/cat 那個檔案"

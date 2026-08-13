@@ -164,6 +164,15 @@ class CrawlerPage(BasePage):
         page_note.setWordWrap(True)
         controls.body_layout.addWidget(page_note)
 
+        # 兩排，不是一排。
+        #
+        # 這一頁的按鈕擠成一排會在視窗變窄時把最後幾顆的字切掉——按鈕不會
+        # 自己換行，QHBoxLayout 只會把每一顆壓到比它的文字還窄。實際看到的
+        # 是「補公司登記資料」變成半個字、「管理自訂來源」整顆消失在視窗外。
+        #
+        # 分排的依據不是「排得下就好」，是這兩件事本來就不同：上排是對**外面
+        # 的網站**動作（爬、驗證、管理來源），下排是對**已經在資料庫裡的公司**
+        # 補資料。使用者要找哪一顆，先想的就是這個分別。
         buttons_row = QHBoxLayout()
         self.start_button = QPushButton("開始爬取")
         self.start_button.clicked.connect(self._start_crawl)
@@ -185,8 +194,19 @@ class CrawlerPage(BasePage):
         self.cancel_button = QPushButton("取消")
         self.cancel_button.setToolTip("停下來，並且丟掉進度。下一次會從頭開始。")
         self.cancel_button.setEnabled(False)
+        # 停用時要看起來像停用的。
+        #
+        # 這裡原本只有一行 ``background-color: DANGER``，沒有分狀態——而
+        # ``setEnabled(False)`` 不會覆蓋自訂的 stylesheet，所以沒在爬取的時候
+        # 「取消」仍然是一顆鮮紅、看起來完全可以按的按鈕，旁邊的「暫停」卻
+        # 正常地變灰。使用者按下去沒有反應，而畫面上沒有任何線索說明為什麼。
+        # 只改顏色，**不要**在這裡設 border 或 padding：對 QPushButton 指定
+        # 邊框會讓 Qt 放棄原生外觀改用 CSS 的方塊模型，內距整個消失，兩個字
+        # 的「取消」會縮成一顆 26px 寬、字被切掉的小方塊。
         self.cancel_button.setStyleSheet(
-            f"background-color: {theme.pick(theme.DANGER)}; color: white;"
+            f"QPushButton {{ background-color: {theme.pick(theme.DANGER)}; color: white; }}"
+            f"QPushButton:disabled {{ background-color: {theme.pick(theme.BORDER)};"
+            f" color: {theme.pick(theme.MUTED)}; }}"
         )
         self.cancel_button.clicked.connect(lambda: self._stop_crawl(keep_progress=False))
         buttons_row.addWidget(self.cancel_button)
@@ -204,18 +224,28 @@ class CrawlerPage(BasePage):
         self.custom_source_button.clicked.connect(lambda: self._open_source_wizard())
         buttons_row.addWidget(self.custom_source_button)
 
+        self.manage_sources_button = QPushButton("管理自訂來源")
+        self.manage_sources_button.clicked.connect(self._open_source_manager)
+        buttons_row.addWidget(self.manage_sources_button)
+        buttons_row.addStretch(1)
+        controls.body_layout.addLayout(buttons_row)
+
+        # 下排：對已經在資料庫裡的公司補資料。
+        fill_row = QHBoxLayout()
+        fill_row.addWidget(caption("補資料："))
+
         # 名錄類網站通常只公開電話跟連結、沒有信箱——信箱要點進公司自己的
         # 網站才看得到。沒有這個按鈕，使用者根本不會知道程式有這個能力。
         self.enrich_button = QPushButton("補抓信箱")
         self.enrich_button.clicked.connect(self._start_enrich)
-        buttons_row.addWidget(self.enrich_button)
+        fill_row.addWidget(self.enrich_button)
 
         # 名錄不會把倒掉的會員刪掉。這顆按鈕去經濟部商業司對統一編號，把
         # 解散、撤銷、廢止的挑出來，順便補上資本額——寄開發信之前先知道
         # 哪幾家已經不在了，省下來的是實際的時間。
         self.registry_button = QPushButton("補公司登記資料")
         self.registry_button.clicked.connect(self._start_registry)
-        buttons_row.addWidget(self.registry_button)
+        fill_row.addWidget(self.registry_button)
 
         # 上面兩顆各自有前提：「補抓信箱」要先有網址，「補公司登記資料」要先
         # 有統一編號。使用者自己匯入的名單常常兩個都沒有，只有公司名稱跟一支
@@ -228,7 +258,7 @@ class CrawlerPage(BasePage):
             "再搜尋找出官網，最後到官網上抓公開的信箱、電話、傳真與聯絡人。"
         )
         self.completion_button.clicked.connect(self._start_completion)
-        buttons_row.addWidget(self.completion_button)
+        fill_row.addWidget(self.completion_button)
 
         # 「這次補幾家」。
         #
@@ -237,7 +267,7 @@ class CrawlerPage(BasePage):
         # 問題，但前提是**程式自己記得上次跑到哪**——所以這裡只問「幾家」，
         # 不問「從第幾家開始」。從第幾家開始由 completion_checked_at 決定，
         # 見 crawler/complete.py 的 queue_position()。
-        buttons_row.addWidget(caption("這次補"))
+        fill_row.addWidget(caption("這次補"))
         self.completion_count = QSpinBox()
         self.completion_count.setRange(1, 100_000)
         self.completion_count.setSuffix(" 家")
@@ -247,13 +277,9 @@ class CrawlerPage(BasePage):
             "所以不需要輸入「從第幾家開始」。\n"
             "沒補到東西的公司也會被記成跑過了，下一批才不會又是同一批。"
         )
-        buttons_row.addWidget(self.completion_count)
-
-        self.manage_sources_button = QPushButton("管理自訂來源")
-        self.manage_sources_button.clicked.connect(self._open_source_manager)
-        buttons_row.addWidget(self.manage_sources_button)
-        buttons_row.addStretch(1)
-        controls.body_layout.addLayout(buttons_row)
+        fill_row.addWidget(self.completion_count)
+        fill_row.addStretch(1)
+        controls.body_layout.addLayout(fill_row)
 
         notice = QLabel(
             "爬取會遵守各來源的 robots.txt 規則，以及設定中的請求間隔延遲，"
@@ -280,6 +306,9 @@ class CrawlerPage(BasePage):
                 ("new", "新增", 60),
                 ("merged", "合併", 70),
                 ("dupes", "重複", 70),
+                # 「重複」是存進去才發現已經有了——請求早就送出去了。「已略過」
+                # 是連問都沒問，也就是省下來的請求數。兩個是不同的事。
+                ("skipped", "已略過", 80),
                 ("rejected", "拒絕", 80),
                 # 網站改版之後選擇器會失效，爬取「成功」地抓到 0 筆而畫面寫著
                 # 完成。這一欄就是為了讓那件事看得見。
@@ -400,6 +429,7 @@ class CrawlerPage(BasePage):
                     "new": summary.records_new,
                     "merged": summary.records_updated,
                     "dupes": summary.records_duplicate,
+                    "skipped": getattr(summary, "records_skipped_known", 0),
                     "rejected": summary.records_invalid,
                     "warning": getattr(summary, "warning", None) or "",
                 }

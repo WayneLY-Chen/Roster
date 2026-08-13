@@ -17,7 +17,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton  # noqa: E402
 
 import core.config as config_module  # noqa: E402
 from core.config import SourceConfig, save_custom_source  # noqa: E402
@@ -300,6 +300,41 @@ def test_completion_done_reports_the_rejected_sites_rather_than_hiding_them(
     assert "沒有提到" in log_text
     assert "統一編號 1" in log_text  # 欄位名要翻成中文，不是印 tax_id
     assert page.app.messages[-1][1] == "success"
+
+
+def test_no_button_gets_its_label_cut_off_in_a_normal_window(qt_app, patch_config):
+    """按鈕的字被切掉是使用者看得到、但測試看不到的那種壞掉。
+
+    QHBoxLayout 不會換行，它會把每一顆按鈕壓到比它的文字還窄。這一頁的按鈕
+    多到一排放不下時，實際畫面上是「補公司登記資料」只剩半個字、「管理自訂
+    來源」整顆跑到視窗外面——而所有測試照樣全綠，因為 widget 都還在、文字
+    屬性也還在，只是畫不出來。
+
+    這條測試量的是**畫得出來嗎**：每一顆按鈕的寬度要放得下它自己的文字，而且
+    右緣不能超出視窗。真的踩過一次（v1.16.0 加了「這次補 N 家」之後）。
+    """
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    # 800 是內容區在一個一般筆電視窗、扣掉側邊導覽之後的寬度。
+    width = 800
+    page.resize(width, 700)
+    page.show()
+    qt_app.processEvents()
+
+    too_narrow = []
+    for button in page.findChildren(QPushButton):
+        if not button.isVisible():
+            continue
+        needed = button.fontMetrics().horizontalAdvance(button.text())
+        if button.width() < needed + 8:
+            too_narrow.append(f"{button.text()!r} 只有 {button.width()}px，字要 {needed}px")
+        right_edge = button.mapTo(page, button.rect().topRight()).x()
+        if right_edge > width:
+            too_narrow.append(f"{button.text()!r} 右緣 {right_edge}px 超出視窗 {width}px")
+
+    page.hide()
+    assert not too_narrow, "有按鈕的字被切掉：\n  " + "\n  ".join(too_narrow)
 
 
 def test_the_batch_size_box_asks_how_many_not_where_to_start(qt_app, patch_config):

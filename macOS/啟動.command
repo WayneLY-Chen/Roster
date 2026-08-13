@@ -29,6 +29,12 @@ EOF
     exit 1
 fi
 
+# 貓跟狗。跟安裝程式印的是同一份圖（assets/pets.txt），三個平台、每一支
+# 啟動腳本都印同一份——分開放的話改一次要記得改六個地方。
+printf "\n"
+cat "$root/assets/pets.txt" 2>/dev/null
+
+echo
 echo "啟動名單匠…"
 echo "（關掉應用程式視窗即可結束）"
 echo

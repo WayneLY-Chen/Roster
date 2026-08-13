@@ -41,6 +41,18 @@ crawler:
   retry_backoff: 2.0       # exponential base, seconds
   max_pages: 10            # global page cap per source
   stop_on_empty_page: true
+
+  # 已經在資料庫裡的公司就略過，不再去讀它的明細頁。
+  #
+  # 名錄的細節（信箱、傳真、負責人）在每一筆各自的明細頁上，所以重爬一個
+  # 2000 家的名錄＝2000 次幾乎確定拿回同樣內容的請求。比對用的是公司名稱與
+  # 統一編號。
+  #
+  # 代價：已經存在但缺欄位的公司不會被補上。要補那個缺口用「補抓信箱」與
+  # 「補齊公司資料」，它們只挑真的缺的公司，比整批重爬精準也便宜得多。
+  # 真的要靠重爬刷新全部資料時，把這一項設成 false。
+  skip_known: true
+
   playwright:
     headless: true
     wait_until: "networkidle"

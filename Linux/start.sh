@@ -22,6 +22,12 @@ EOF
     exit 1
 fi
 
+# The mascots -- the same drawing the installer prints, from a single file
+# shared by every launcher on every platform.
+printf "\n"
+cat "$here/assets/pets.txt" 2>/dev/null
+
+echo
 echo "Starting Roster..."
 echo "(Close the application window to quit.)"
 echo

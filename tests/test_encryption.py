@@ -686,13 +686,21 @@ def test_crawling_twice_does_not_duplicate_under_encryption(
 
     這是加密最可能造成的災難：等值查詢一旦失效，重複執行的爬蟲會把整個目錄
     再寫一遍，而且症狀要到資料變兩倍才會被發現。
+
+    這裡刻意把 ``skip_known`` 關掉。開著的話第二趟根本不會走到 ``upsert``
+    ——它會在更前面就整筆略過，於是這條測試會通過，卻**什麼都沒測到**：
+    加密欄位的等值比對那條路一次都沒被執行。要守住的東西是那條路。
     """
     from crawler.pipeline import crawl
 
-    first = crawl(source="sample", config=encryption_on)[0]
+    config = encryption_on.model_copy(
+        update={"crawler": encryption_on.crawler.model_copy(update={"skip_known": False})}
+    )
+
+    first = crawl(source="sample", config=config)[0]
     assert first.records_new > 0
 
-    second = crawl(source="sample", config=encryption_on)[0]
+    second = crawl(source="sample", config=config)[0]
     assert second.records_new == 0
     assert second.records_updated == second.records_found
 

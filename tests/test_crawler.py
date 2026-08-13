@@ -1305,3 +1305,164 @@ def test_build_source_builds_sample_and_generic_html(tmp_config):
         config=tmp_config,
     )
     assert isinstance(generic, GenericHtmlSource)
+
+
+# ------------------------------------------------- 已經在資料庫裡的就不要再爬
+#
+# 名錄的細節（信箱、傳真、負責人）在每一筆各自的明細頁上，所以真正花時間的
+# 不是「幾頁」，是每一筆一次請求。重爬一個 2000 家的名錄＝2000 次幾乎確定
+# 拿回同樣內容的請求。
+
+
+def _detail_source(tmp_config, requested: list[str]):
+    """一個列表頁兩筆、各自有明細頁的來源。``requested`` 記下真的送出的網址。"""
+    from core.config import PaginationRule, SourceConfig
+    from crawler.sources.generic_html import GenericHtmlSource
+
+    pages = {
+        "https://example.test/list?page=1": (
+            "<div class='item'><h3 class='n'>大安精密股份有限公司</h3>"
+            "<a class='more' href='/c/1'>詳細</a></div>"
+            "<div class='item'><h3 class='n'>信義工業股份有限公司</h3>"
+            "<a class='more' href='/c/2'>詳細</a></div>"
+        ),
+        "https://example.test/c/1": "<html><body>信箱：a@example.test</body></html>",
+        "https://example.test/c/2": "<html><body>信箱：b@example.test</body></html>",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(200, text=pages.get(str(request.url), ""))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    fetcher = HttpxFetcher(
+        config=tmp_config, robots=RobotsPolicy("ua", enabled=False), client=client
+    )
+    config = SourceConfig(
+        name="generic",
+        type="generic_html",
+        start_url="https://example.test/list?page={page}",
+        list_selector="div.item",
+        fields={"company_name": {"selector": "h3.n"}},
+        detail_link={"selector": "a.more", "attr": "href"},
+        pagination=PaginationRule(type="query"),
+        max_pages=1,
+    )
+    return GenericHtmlSource(config, fetcher=fetcher, config=tmp_config)
+
+
+def test_a_company_already_in_the_database_costs_no_detail_request(tmp_config):
+    from crawler.base import KnownCompanies
+    from verifier.normalize import company_name_key
+
+    requested: list[str] = []
+    source = _detail_source(tmp_config, requested)
+    source.known = KnownCompanies(
+        name_keys=frozenset({company_name_key("大安精密股份有限公司")})
+    )
+
+    batches = list(source.iter_pages())
+
+    # 兩筆都還是收下來了——列表頁的欄位不花額外的請求，而 upsert 合併時只填
+    # 空欄位，所以留著它沒有壞處。
+    assert len(batches[0].records) == 2
+    # 但已知的那一家連問都沒問。
+    assert "https://example.test/c/1" not in requested
+    assert "https://example.test/c/2" in requested
+    assert source.skipped_known == 1
+
+
+def test_without_the_known_set_every_detail_page_is_still_fetched(tmp_config):
+    """預設路徑不變：沒給已知清單就照舊全部抓。"""
+    requested: list[str] = []
+    source = _detail_source(tmp_config, requested)
+
+    list(source.iter_pages())
+
+    assert "https://example.test/c/1" in requested
+    assert "https://example.test/c/2" in requested
+    assert source.skipped_known == 0
+
+
+def test_the_tax_id_also_counts_as_already_known():
+    """統編對上就算已知，就算名字被對方改過。
+
+    「大安精密」改叫「大安精密科技」時名稱鍵對不上，但統編是同一個——這種
+    情況該略過，否則名錄每改一次名字就等於整批重爬一次。
+    """
+    from crawler.base import KnownCompanies
+
+    known = KnownCompanies(tax_ids=frozenset({"22099131"}))
+    assert known.has("隨便什麼公司", "22099131")
+    assert known.has("隨便什麼公司", "22-099131")   # 有分隔符號也要認得
+    assert not known.has("隨便什麼公司", "22099132")
+    assert not known.has("隨便什麼公司")
+
+
+def test_a_name_too_short_to_identify_never_counts_as_known():
+    """一兩個字的鍵在幾千家裡撞到別人是遲早的事。
+
+    撞到的代價不是多送一次請求，是**那一筆永遠不會被爬到**——比多送一次
+    請求糟得多，而且完全看不出來。
+    """
+    from crawler.base import KnownCompanies
+    from verifier.normalize import company_name_key
+
+    assert len(company_name_key("大有限公司")) < 2      # 後綴被拿掉之後只剩一個字
+    known = KnownCompanies(name_keys=frozenset({company_name_key("大有限公司")}))
+    assert not known.has("大有限公司")
+
+
+def test_crawling_the_same_directory_twice_sends_no_detail_requests_the_second_time(
+    db_session, patch_config
+):
+    """這一條量的是這個功能存在的唯一理由：**第二趟省下多少次請求。**
+
+    整條路都要走過才算數——管線要去資料庫撈已知清單、設進來源、來源要照做、
+    數字還要回到 summary 上。少了任何一環，單元測試都還是綠的，而使用者第二
+    次爬 2000 家的名錄仍然要等兩個小時。
+    """
+    from crawler.pipeline import CrawlPipeline
+
+    requested: list[str] = []
+    source = _detail_source(patch_config, requested)
+
+    with CrawlPipeline(patch_config, fetcher=source.fetcher) as pipeline:
+        first = pipeline.run_source_config(source.source_config)
+
+    assert first.records_new == 2
+    assert first.records_skipped_known == 0
+    details_first = [u for u in requested if "/c/" in u]
+    assert sorted(details_first) == [
+        "https://example.test/c/1", "https://example.test/c/2",
+    ]
+
+    # 第二趟：同樣的名錄，同樣的兩家，但它們已經在資料庫裡了。
+    requested.clear()
+    with CrawlPipeline(patch_config, fetcher=source.fetcher) as pipeline:
+        second = pipeline.run_source_config(source.source_config)
+
+    assert second.records_new == 0
+    assert second.records_skipped_known == 2
+    assert [u for u in requested if "/c/" in u] == []   # 一次明細頁都沒送
+
+
+def test_turning_skip_known_off_crawls_everything_again(db_session, patch_config):
+    """要用重爬刷新全部資料的人得有辦法把它關掉。"""
+    from crawler.pipeline import CrawlPipeline
+
+    requested: list[str] = []
+    source = _detail_source(patch_config, requested)
+
+    with CrawlPipeline(patch_config, fetcher=source.fetcher) as pipeline:
+        pipeline.run_source_config(source.source_config)
+
+    off = patch_config.model_copy(
+        update={"crawler": patch_config.crawler.model_copy(update={"skip_known": False})}
+    )
+    requested.clear()
+    with CrawlPipeline(off, fetcher=source.fetcher) as pipeline:
+        second = pipeline.run_source_config(source.source_config)
+
+    assert second.records_skipped_known == 0
+    assert len([u for u in requested if "/c/" in u]) == 2

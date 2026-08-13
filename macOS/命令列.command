@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# （貓跟狗印在下面，跟安裝與啟動用的是同一份 assets/pets.txt。）
 # 名單匠的命令列 —— macOS 使用者雙擊這一個。
 #
 # 這裡刻意不 source .venv/bin/activate。
@@ -25,6 +26,9 @@ fi
 export VIRTUAL_ENV="$root/.venv"
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 unset PYTHONHOME
+
+printf "\n"
+cat "$root/assets/pets.txt" 2>/dev/null
 
 cat <<'HELP'
 

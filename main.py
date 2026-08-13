@@ -220,7 +220,10 @@ def crawl(
         _fail(str(exc))
 
     table = Table(title="Crawl results")
-    for column in ("Source", "Status", "Pages", "Found", "New", "Merged", "Dupes", "Rejected"):
+    for column in (
+        "Source", "Status", "Pages", "Found", "New", "Merged", "Dupes", "Skipped",
+        "Rejected",
+    ):
         table.add_column(column)
     for summary in summaries:
         colour = {"Success": "green", "Partial": "yellow"}.get(summary.status, "red")
@@ -232,6 +235,7 @@ def crawl(
             str(summary.records_new),
             str(summary.records_updated),
             str(summary.records_duplicate),
+            str(summary.records_skipped_known),
             str(summary.records_invalid),
         )
     console.print(table)

@@ -439,6 +439,18 @@ class GenericHtmlSource(BaseSource):
 
         extra_fields: dict[str, str] = {}
         detail_url = self._detail_url(item, page_url)
+        # 已經在資料庫裡的公司就不去讀它的明細頁。
+        #
+        # 這是整個爬取裡唯一「每一筆各一次請求」的地方，所以也是重爬一個
+        # 2000 家的名錄時絕大部分的時間。列表頁的欄位照樣收，upsert 合併時
+        # 只填空的，所以略過明細頁不會弄壞既有資料。理由與代價見
+        # :class:`~crawler.base.KnownCompanies`。
+        if detail_url and self.known is not None and self.known.has(
+            name, extracted.get("tax_id")
+        ):
+            self.skipped_known += 1
+            log.debug("{} 已在資料庫，略過明細頁 {}", name, detail_url)
+            detail_url = None
         if detail_url:
             self._merge_detail(extracted, detail_url, extra_fields)
         if modal_html:

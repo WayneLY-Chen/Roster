@@ -216,6 +216,12 @@ class CrawlSummary(BaseModel):
     records_updated: int = 0
     records_duplicate: int = 0
     records_invalid: int = 0
+    #: 因為「已經在資料庫裡」而沒有去讀明細頁的筆數。
+    #:
+    #: 跟 :attr:`records_duplicate` 不一樣，兩個都要有。重複講的是「存進去的
+    #: 時候發現已經有了」——請求已經送出去了，時間已經花掉了。這一個講的是
+    #: 「連問都沒問」，也就是**省下來的請求數**。使用者想知道的是後者。
+    records_skipped_known: int = 0
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None

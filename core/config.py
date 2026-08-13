@@ -524,6 +524,19 @@ class CrawlerSection(_Base):
     retry_backoff: float = Field(default=2.0, gt=0)
     max_pages: int = Field(default=10, ge=1)
     stop_on_empty_page: bool = True
+
+    #: 已經在資料庫裡的公司，就不要再去讀它的明細頁。
+    #:
+    #: 名錄的細節（信箱、傳真、負責人）在每一筆各自的明細頁上，所以重爬一個
+    #: 2000 家的名錄＝2000 次幾乎確定拿回同樣內容的請求。而 upsert 合併時只
+    #: 填空欄位，那些請求對已存在的公司幾乎不會改到任何東西。
+    #:
+    #: 代價：**已經存在但缺欄位的公司不會被補上**。要補那個缺口用「補抓信箱」
+    #: 與「補齊公司資料」，它們只挑真的缺的公司，比整批重爬精準也便宜得多。
+    #: 真的要用重爬來刷新全部資料時，把這一項設成 false。
+    #:
+    #: 見 :class:`~crawler.base.KnownCompanies`。
+    skip_known: bool = True
     playwright: PlaywrightSection = Field(default_factory=PlaywrightSection)
     sources: list[SourceConfig] = Field(default_factory=list)
 
