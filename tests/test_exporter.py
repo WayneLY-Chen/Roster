@@ -543,3 +543,181 @@ def test_the_error_says_what_columns_the_file_actually_has():
     message = str(caught.value)
     assert "編號" in message and "統一編號" in message   # 檔案裡實際有的欄位
     assert "公司名稱" in message                          # 該改成什麼
+
+
+# ------------------------------------------- 「隨便一個 Excel」都要讀得進來
+#
+# 使用者拿到的名冊不是程式匯出的乾淨檔案。公協會與政府網站的檔案上面幾乎
+# 一定壓著東西：一整列的大標題、製表日期、空白列、合併儲存格的說明；而且
+# 真正的名冊不一定在第一張工作表。pandas 預設把第一列當欄名，於是欄名變成
+# 「XX公會會員名冊」跟一串 Unnamed，接著就報「找不到公司名稱欄」。
+
+
+def test_a_title_row_above_the_header_does_not_break_the_import(tmp_path):
+    """名冊上面壓著大標題與空白列——這是最常見的一種。"""
+    from exporter.importer import read_table
+
+    path = tmp_path / "會員名冊.xlsx"
+    pd.DataFrame(
+        [
+            ["台灣機械工業同業公會 114 年度會員名冊", None, None],
+            ["製表日期：114/08/13", None, None],
+            [None, None, None],
+            ["公司名稱", "統一編號", "電話"],
+            ["東台精機股份有限公司", "22099131", "07-9761588"],
+            ["程泰機械股份有限公司", "84149961", "04-25325151"],
+        ]
+    ).to_excel(path, index=False, header=False)
+
+    frame = read_table(path)
+
+    assert list(frame.columns)[:3] == ["公司名稱", "統一編號", "電話"]
+    assert frame["公司名稱"].tolist() == [
+        "東台精機股份有限公司", "程泰機械股份有限公司",
+    ]
+
+
+def test_the_roster_is_found_even_when_it_is_not_the_first_sheet(tmp_path):
+    """活頁簿裡常常「說明」在前面，真正的名冊在後面。"""
+    from exporter.importer import read_table
+
+    path = tmp_path / "多張工作表.xlsx"
+    with pd.ExcelWriter(path) as writer:
+        pd.DataFrame({"說明": ["本檔案僅供會員使用", "請勿外流"]}).to_excel(
+            writer, sheet_name="說明", index=False
+        )
+        pd.DataFrame(
+            {"廠商名稱": ["東台精機股份有限公司"], "聯絡電話": ["07-9761588"]}
+        ).to_excel(writer, sheet_name="會員名冊", index=False)
+
+    frame = read_table(path)
+
+    assert "廠商名稱" in frame.columns
+    assert frame["廠商名稱"].tolist() == ["東台精機股份有限公司"]
+
+
+def test_a_messy_file_imports_end_to_end(tmp_path, db_session, patch_config):
+    """整條路走完：亂七八糟的 Excel 進去，資料庫裡出來的是公司。"""
+    from database.repository import CompanyRepository
+    from exporter.importer import import_file
+
+    path = tmp_path / "亂七八糟.xlsx"
+    pd.DataFrame(
+        [
+            ["★ 114 年度會員通訊錄 ★", None, None, None],
+            [None, None, None, None],
+            ["編號", "工廠名稱", "負責人", "E-mail"],
+            ["1", "東台精機股份有限公司", "嚴瑞雄", "sales@tongtai.example"],
+            ["2", "程泰機械股份有限公司", "楊德華", "info@goodway.example"],
+        ]
+    ).to_excel(path, index=False, header=False)
+
+    summary = import_file(path, config=patch_config)
+
+    assert summary.rows_read == 2
+    assert summary.records_new == 2
+    stored = {c.company_name for c in CompanyRepository(db_session).all()}
+    assert stored == {"東台精機股份有限公司", "程泰機械股份有限公司"}
+
+
+def test_a_normal_file_still_uses_its_first_row(tmp_path):
+    """乾淨的檔案不能因為多了這層猜測而變糟。"""
+    from exporter.importer import read_table
+
+    path = tmp_path / "乾淨.xlsx"
+    pd.DataFrame({"company_name": ["A股份有限公司"], "email": ["a@b.com"]}).to_excel(
+        path, index=False
+    )
+
+    frame = read_table(path)
+
+    assert list(frame.columns) == ["company_name", "email"]
+    assert len(frame) == 1
+
+
+def test_a_csv_with_junk_above_the_header_also_works(tmp_path):
+    from exporter.importer import read_table
+
+    path = tmp_path / "名冊.csv"
+    path.write_text(
+        "本表僅供內部使用\n"
+        "\n"
+        "公司名稱,電話\n"
+        "東台精機股份有限公司,07-9761588\n",
+        encoding="utf-8",
+    )
+
+    frame = read_table(path)
+
+    assert list(frame.columns) == ["公司名稱", "電話"]
+    assert frame["公司名稱"].tolist() == ["東台精機股份有限公司"]
+
+
+def test_a_file_with_no_header_row_says_so_instead_of_eating_a_row(tmp_path):
+    """沒有標題列時**不可以**把第一筆資料當標題升上去。
+
+    升上去的話那一家公司會安靜地消失，而畫面上寫著匯入成功——少一筆比報錯
+    糟得多，因為沒有人會發現。實測踩過：第一列「東台精機股份有限公司」因為
+    含有「公司」兩個字被當成標題。
+    """
+    from core.errors import ExportError
+    from exporter.importer import read_table, rows_to_records
+
+    path = tmp_path / "沒有標題.xlsx"
+    pd.DataFrame(
+        [
+            ["東台精機股份有限公司", "22099131"],
+            ["程泰機械股份有限公司", "84149961"],
+        ]
+    ).to_excel(path, index=False, header=False)
+
+    with pytest.raises(ExportError) as caught:
+        rows_to_records(read_table(path), "test")
+
+    assert "沒有標題列" in str(caught.value)
+
+
+def test_an_english_name_column_never_steals_the_company_name_column(tmp_path):
+    """中英混排的名冊要拿中文全名，不是英文簡稱。
+
+    「Company Name (English)」拆開之後第一個認得的字是 company，逐字比對會
+    讓它搶走公司名稱那一欄——實測踩過，整份名單的公司名都變成英文簡稱。
+    """
+    from exporter.importer import read_table, rows_to_records
+
+    path = tmp_path / "中英混排.xlsx"
+    pd.DataFrame(
+        [
+            ["廠商全名(中文)", "Company Name (English)", "E-mail"],
+            ["東台精機股份有限公司", "Tongtai", "sales@tongtai.example"],
+        ]
+    ).to_excel(path, index=False, header=False)
+
+    records, _ = rows_to_records(read_table(path), "test")
+
+    assert [r.company_name for r in records] == ["東台精機股份有限公司"]
+    assert [r.english_name for r in records] == ["Tongtai"]
+
+
+def test_a_summary_row_at_the_bottom_is_not_imported_as_a_company(
+    tmp_path, db_session, patch_config
+):
+    """名冊底下那一行「合計」不是公司，不該跟著寄信名單出去。"""
+    from database.repository import CompanyRepository
+    from exporter.importer import import_file
+
+    path = tmp_path / "有合計列.xlsx"
+    pd.DataFrame(
+        [
+            ["公司名稱", "電話"],
+            ["東台精機股份有限公司", "07-9761588"],
+            ["合計", "1 家"],
+        ]
+    ).to_excel(path, index=False, header=False)
+
+    summary = import_file(path, config=patch_config)
+
+    assert summary.records_new == 1
+    assert summary.records_invalid == 1
+    stored = {c.company_name for c in CompanyRepository(db_session).all()}
+    assert stored == {"東台精機股份有限公司"}

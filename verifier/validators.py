@@ -128,11 +128,29 @@ def is_valid_tax_id(value: str | None) -> bool:
     return digits[6] == 7 and (total - 9) % 5 == 0
 
 
+#: 這些**整格就是它**的時候不是公司，是表格的零件。
+#:
+#: 兩個來源：試算表的合計列與說明列（名冊底下那一行「合計 216 家」），以及
+#: 標題列漏進資料裡（欄名變成一筆公司，名字叫「公司名稱」）。兩種都會安靜地
+#: 變成一家假公司，然後跟著寄信名單一起出去。
+#:
+#: 只比對**完全相同**的字串，所以「合計企業有限公司」不受影響。
+_NOT_A_COMPANY = frozenset({
+    "合計", "總計", "小計", "總和", "總數", "累計", "共計",
+    "以上", "備註", "說明", "附註", "註", "其他",
+    "無", "未填", "從缺", "n/a", "na", "-", "--", "null", "none",
+    "公司名稱", "廠商名稱", "工廠名稱", "企業名稱", "名稱", "公司", "廠商",
+    "company", "company name", "name", "total", "subtotal", "remark", "note",
+})
+
+
 def is_valid_company_name(value: str | None) -> bool:
     """Reject obvious non-names: empty, numeric-only, or a single character."""
     if not value:
         return False
     stripped = value.strip()
     if len(stripped) < 2 or len(stripped) > 255:
+        return False
+    if stripped.lower() in _NOT_A_COMPANY:
         return False
     return bool(re.search(r"[\w一-鿿]", stripped)) and not stripped.isdigit()
