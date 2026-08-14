@@ -18,6 +18,16 @@ printf "名單匠 Roster — 診斷\n"
 line "系統"
 sw_vers 2>/dev/null || echo "(取不到 macOS 版本)"
 echo "CPU：$(uname -m)"
+echo "位置：$root"
+
+line "macOS 隱私權（桌面／文件／下載）"
+# 這一項要排在最前面：被擋住的話後面每一項都會以看不懂的方式失敗，
+# 而真正的原因只有這一行講得出來。
+if blocked_by_macos_privacy "$root"; then
+    echo "(上面那段就是原因，後面的檢查結果都會受它影響)"
+else
+    echo "讀得到這個資料夾的內容（正常）"
+fi
 
 line "Python"
 for candidate in python3.14 python3.13 python3.12 python3; do

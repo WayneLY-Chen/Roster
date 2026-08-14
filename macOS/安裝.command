@@ -28,6 +28,13 @@ cat "$here/assets/pets.txt" 2>/dev/null
 printf "\n名單匠 Roster — 安裝程式\n"
 printf "安裝位置：%s\n" "$here"
 
+# 桌面／文件／下載被 macOS 的隱私權保護擋住的話，安裝會在半路以一句看不懂的
+# 「Operation not permitted」失敗。在動任何東西之前先問清楚。
+if blocked_by_macos_privacy "$here"; then
+    wait_then_close
+    exit 1
+fi
+
 # ---------------------------------------------------------------- Python
 say "1/5  檢查 Python"
 

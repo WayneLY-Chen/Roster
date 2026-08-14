@@ -17,6 +17,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 . "$root/macOS/_共用.sh"
 
+if blocked_by_macos_privacy "$root"; then
+    wait_then_close
+    exit 1
+fi
+
 if [ ! -x "$root/.venv/bin/python" ]; then
     echo "[錯誤] 還沒安裝。請先雙擊同一個資料夾裡的「安裝.command」。"
     wait_then_close

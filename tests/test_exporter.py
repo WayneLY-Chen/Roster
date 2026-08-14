@@ -485,3 +485,61 @@ def test_import_file_creates_new_records(db_session, tmp_config, tmp_path):
     assert summary.records_new == 1
     assert summary.records_merged == 0
     assert CompanyRepository(db_session).count() == 1
+
+
+# ---------------------------------------------- 匯入時認出公司名稱那一欄
+#
+# 使用者實際踩到的：匯入一份政府網站下載的名冊，得到「no company-name column
+# found. Expected one of: company_name, company, name, 公司名稱, 廠商名稱」，
+# 而他的檔案裡明明就有公司名字那一欄，只是標題叫別的。
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "工廠名稱",          # 經濟部工廠登記查詢
+        "廠商全名(中文)",     # 公協會名冊很常見的寫法
+        "事業單位名稱",
+        "企業名稱",
+        "會員公司",
+        "Company Name",
+        "名稱",
+    ],
+)
+def test_a_company_name_column_is_recognised_however_it_is_labelled(header):
+    """標題列不完，所以精確比對之外一定要有「看起來像不像」那一層。"""
+    from exporter.importer import rows_to_records
+
+    frame = pd.DataFrame({header: ["台灣積體電路製造股份有限公司"]})
+    records, _ = rows_to_records(frame, "test")
+
+    assert [r.company_name for r in records] == ["台灣積體電路製造股份有限公司"]
+
+
+@pytest.mark.parametrize("header", ["負責人姓名", "聯絡人名稱", "英文名稱"])
+def test_a_person_column_is_never_mistaken_for_the_company_name(header):
+    """猜錯比認不出來糟得多——它不會報錯，只會讓整份名單的公司名變成人名。"""
+    from core.errors import ExportError
+    from exporter.importer import rows_to_records
+
+    frame = pd.DataFrame({header: ["王小明"]})
+    with pytest.raises(ExportError):
+        rows_to_records(frame, "test")
+
+
+def test_the_error_says_what_columns_the_file_actually_has():
+    """讀的人要知道該去改哪一欄，光講我們期待什麼沒有用。
+
+    原本的訊息只列出五個接受的名稱。使用者的標題常常長得像「廠商全名(中文)」，
+    看起來明明就對，卻不知道為什麼不行。
+    """
+    from core.errors import ExportError
+    from exporter.importer import rows_to_records
+
+    frame = pd.DataFrame({"編號": ["1"], "統一編號": ["22099131"]})
+    with pytest.raises(ExportError) as caught:
+        rows_to_records(frame, "test")
+
+    message = str(caught.value)
+    assert "編號" in message and "統一編號" in message   # 檔案裡實際有的欄位
+    assert "公司名稱" in message                          # 該改成什麼

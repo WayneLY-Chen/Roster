@@ -17,6 +17,14 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 . "$root/macOS/_共用.sh"
 
+# 這一關要排在「還沒安裝」前面。被 TCC 擋住時 .venv 其實是好好的，只是讀不到
+# 內容——先問「安裝了沒」會得到一句「請先執行安裝」，而使用者照做之後安裝也會
+# 因為同一個原因失敗，然後就卡在那裡了。
+if blocked_by_macos_privacy "$root"; then
+    wait_then_close
+    exit 1
+fi
+
 if [ ! -x "$root/.venv/bin/python" ]; then
     cat <<EOF
 

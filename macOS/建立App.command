@@ -107,6 +107,25 @@ $project
 這個 App 只是一層外殼，它要用專案資料夾裡的環境。
 資料夾搬過位置的話，請重新執行一次 macOS/建立App.command。"
 
+# macOS 的隱私權保護（TCC）擋住桌面／文件／下載時，這個檔案讀得到名字、
+# 讀不到內容，所以上面的 -d 與下面的 -x 都會過，然後 Python 在啟動途中以
+# 「Operation not permitted: .../pyvenv.cfg」死掉——那個訊息使用者看不懂。
+# 在這裡先問，才能講人話。
+if [ -f "$project/.venv/pyvenv.cfg" ] && ! head -c 1 "$project/.venv/pyvenv.cfg" >/dev/null 2>&1; then
+    fail "macOS 擋住了這個資料夾的讀取權限。
+
+不是程式壞掉——桌面、文件、下載這三個資料夾受系統保護，
+Roster 沒有被授權的話讀不到裡面的內容。
+
+解法一：系統設定 → 隱私權與安全性 → 檔案與資料夾 → Roster
+　　　　→ 打開「桌面資料夾」，然後重新開啟 Roster。
+　　　　清單裡沒有 Roster 的話，改用「完整取得磁碟權限」→ ＋ → 選 Roster。
+
+解法二：把整個 Roster 資料夾從桌面移到你的「使用者主目錄」
+　　　　（訪達側邊欄上有你名字的那一個），再執行一次
+　　　　macOS/建立App.command。"
+fi
+
 [ -x "$project/.venv/bin/python" ] || fail "找不到 Python 環境：
 $project/.venv/bin/python
 

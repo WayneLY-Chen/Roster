@@ -36,8 +36,23 @@ _COLUMN_ALIASES: dict[str, str] = {
     "companyname": "company_name",
     "name": "company_name",
     "公司": "company_name",
+    "公司名": "company_name",
     "公司名稱": "company_name",
+    "公司全名": "company_name",
+    "公司行號": "company_name",
+    "廠商": "company_name",
+    "廠商名": "company_name",
     "廠商名稱": "company_name",
+    "廠商全名": "company_name",
+    "工廠名稱": "company_name",
+    "企業名稱": "company_name",
+    "事業名稱": "company_name",
+    "機構名稱": "company_name",
+    "單位名稱": "company_name",
+    "商號名稱": "company_name",
+    "會員名稱": "company_name",
+    "客戶名稱": "company_name",
+    "名稱": "company_name",
     "tax_id": "tax_id",
     "taxid": "tax_id",
     "統一編號": "tax_id",
@@ -114,6 +129,40 @@ class ImportSummary:
         return self.records_new + self.records_merged
 
 
+#: 標題裡出現這些字，就**不要**把它當成公司名稱，即使它含有「名稱」。
+#:
+#: 「負責人姓名」「聯絡人名稱」都含有名字類的字眼，猜錯的代價是整份名單的
+#: 公司名稱欄變成一堆人名——比「認不出來」糟得多，因為它不會報錯。
+_NOT_A_COMPANY_NAME = (
+    "負責人", "代表人", "聯絡人", "窗口", "人員", "姓名", "承辦",
+    "英文", "english", "產品", "地址", "電話", "傳真", "信箱", "備註",
+)
+
+#: 認不出確切標題時，照這個順序找「看起來像公司名稱」的欄位。
+#:
+#: 排序就是特異度：「公司名稱」一定是，「名稱」只是可能是。實際的名錄標題
+#: 千奇百怪（「工廠名稱」「事業單位名稱」「廠商全名(中文)」），列不完，所以
+#: 精確比對之外一定要有這一層——否則使用者拿到的是一句「找不到公司名稱欄」，
+#: 而他的檔案裡明明就有。
+_COMPANY_NAME_HINTS = (
+    "公司名稱", "廠商名稱", "工廠名稱", "企業名稱", "事業名稱", "機構名稱",
+    "單位名稱", "商號名稱", "會員名稱", "客戶名稱",
+    "company name", "company_name", "companyname",
+    "公司", "廠商", "工廠", "企業", "事業", "商號", "名稱",
+    "company", "name",
+)
+
+
+def _looks_like_a_company_name(header: object) -> bool:
+    """這個標題看起來是公司名稱那一欄嗎？（精確比對失敗之後才問。）"""
+    text = str(header).strip().lower()
+    if not text or text.startswith("unnamed:"):
+        return False
+    if any(bad in text for bad in _NOT_A_COMPANY_NAME):
+        return False
+    return any(hint in text for hint in _COMPANY_NAME_HINTS)
+
+
 def _canonical(header: object) -> str | None:
     """Map one spreadsheet header to a RawCompany field, if we recognise it."""
     text = str(header).strip().lower()
@@ -183,9 +232,32 @@ def rows_to_records(frame: pd.DataFrame, source_label: str) -> tuple[list[RawCom
             unmapped.append(str(column))
 
     if "company_name" not in mapping.values():
+        # 精確比對認不出來，再用「看起來像不像」找一次。
+        #
+        # 名錄的標題列不完：「工廠名稱」「事業單位名稱」「廠商全名(中文)」都
+        # 是真的遇過的。少了這一層，使用者得到的是「找不到公司名稱欄」，而他
+        # 的檔案裡明明就有一欄叫那個名字。
+        for column in list(unmapped):
+            if _looks_like_a_company_name(column):
+                mapping[str(column)] = "company_name"
+                unmapped.remove(column)
+                log.info("把「{}」當成公司名稱那一欄", column)
+                break
+
+    if "company_name" not in mapping.values():
+        # 錯誤訊息要講**使用者的檔案裡有什麼**，不是只講我們期待什麼。
+        #
+        # 原本這句只列出五個接受的名稱，讀的人沒辦法從它知道該去改哪一欄——
+        # 尤其標題常常長得像「廠商全名(中文)」，看起來明明就對。
+        found = "、".join(
+            str(c).strip() for c in frame.columns if str(c).strip()
+        ) or "（這個檔案沒有標題列）"
         raise ExportError(
-            "no company-name column found. Expected one of: "
-            "company_name, company, name, 公司名稱, 廠商名稱"
+            "找不到公司名稱那一欄。\n"
+            f"你的檔案裡有這些欄位：{found}\n"
+            "認得的名稱有：公司名稱、公司、廠商名稱、工廠名稱、企業名稱、"
+            "名稱、company_name、company、name（含有這些字的也認得）。\n"
+            "把公司名稱那一欄的標題改成上面任何一個就可以匯入了。"
         )
 
     # 對應不到的欄位不再丟掉，改成原樣保留為自由欄位。匯出時每個自由欄位
