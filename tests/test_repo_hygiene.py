@@ -329,24 +329,24 @@ def test_the_git_helpers_report_none_outside_a_repository(tmp_path):
     assert git_untracked_unignored_files(tmp_path) is None
 
 
-#: 每個平台的三支啟動腳本。每一支都該印貓跟狗。
+#: 每個平台的四支啟動腳本。每一支都該印貓跟狗。
 LAUNCHERS = (
-    "Windows/安裝.bat", "Windows/啟動.bat", "Windows/命令列.bat",
-    "macOS/安裝.command", "macOS/啟動.command", "macOS/命令列.command",
-    "Linux/install.sh", "Linux/start.sh", "Linux/console.sh",
+    "Windows/安裝.bat", "Windows/啟動.bat", "Windows/命令列.bat", "Windows/更新.bat",
+    "macOS/安裝.command", "macOS/啟動.command", "macOS/命令列.command", "macOS/更新.command",
+    "Linux/install.sh", "Linux/start.sh", "Linux/console.sh", "Linux/update.sh",
 )
 
 
 @pytest.mark.parametrize("name", LAUNCHERS)
 def test_every_launcher_prints_the_mascots(name):
-    """九支腳本都要印 assets/pets.txt。
+    """每一支腳本都要印 assets/pets.txt。
 
     這一條是使用者回報來的：Windows 開起來沒有貓跟狗，mac 有。當時的真相是
     「三個平台都只有安裝程式有」，但那個不一致本身就是 bug——同一個程式在
     不同作業系統上給人不同的第一印象，而且沒有任何理由。
 
-    圖只存在 assets/pets.txt 一份。九個地方各自貼一份的話，改一次要記得改
-    九個地方，而漏掉的那幾個沒有人會發現。
+    圖只存在 assets/pets.txt 一份。每個地方各自貼一份的話，改一次要記得改
+    十幾個地方，而漏掉的那幾個沒有人會發現。
     """
     script = ROOT / name
     assert script.exists(), f"{name} 不見了"
@@ -366,3 +366,27 @@ def test_the_mascots_live_in_exactly_one_file():
     for name in LAUNCHERS:
         text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
         assert signature not in text, f"{name} 把圖複製進去了，應該 type/cat 那個檔案"
+
+
+def test_batch_files_contain_no_non_ascii_bytes(tracked_files):
+    """.bat 的內容只能是 ASCII。
+
+    每一支 .bat 的開頭都寫著這條規則，但沒有任何東西在檢查它——直到有人在
+    訊息裡打了一個中文字為止。cmd.exe 讀到非 ASCII 位元組時不會報錯，它會把
+    **那一行之後的整個檔案**解析壞，症狀是腳本安靜地跑掉一半就結束，或是跳出
+    一句跟內容毫無關係的「命令語法不正確」。
+
+    檔名可以是中文（Finder 與檔案總管都正常顯示），受限的只有內容。
+    """
+    offenders: list[str] = []
+    for name in tracked_files:
+        if not name.endswith((".bat", ".cmd")):
+            continue
+        data = (ROOT / name).read_bytes()
+        for number, line in enumerate(data.splitlines(), start=1):
+            if any(byte > 127 for byte in line):
+                offenders.append(f"{name}:{number}")
+                break
+    assert not offenders, (
+        ".bat 只能用 ASCII，中文請放進程式本身：\n  " + "\n  ".join(offenders)
+    )
