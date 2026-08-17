@@ -29,6 +29,67 @@ _ROLE_LOCAL_PARTS = frozenset(
     }
 )
 
+#: 錯誤追蹤與遙測服務的網域。
+#:
+#: 這些位址是**網頁原始碼裡的機器識別碼**，不是給人收信的信箱。最常見的是
+#: Sentry 的 DSN，它會原樣出現在頁面的 JavaScript 裡，長得跟信箱一模一樣：
+#:
+#:     8eb368c655b84e029ed79ad7a5c1718e@sentry.wixpress.com
+#:
+#: 用 Wix 架的網站幾乎每一個都有一個，所以抓到的機率很高——而且它會排在
+#: 真正的信箱前面被選走（同網域優先那條規則對它沒用，它就是不同網域）。
+#: 寄過去不會有人收到，只會累積退信。
+_TRACKING_DOMAINS = (
+    "sentry.io", "sentry.wixpress.com", "wixpress.com", "sentry-next.wixpress.com",
+    "bugsnag.com", "rollbar.com", "newrelic.com", "datadoghq.com",
+    "sentry.local", "logrocket.com", "raygun.io",
+)
+
+#: 一定不是給人收信的網域：文件範例、規格書、開發用的預留位置。
+_PLACEHOLDER_DOMAINS = (
+    "example.com", "example.org", "example.net", "example.tw",
+    "domain.com", "yourdomain.com", "yourcompany.com", "mydomain.com",
+    "email.com", "test.com", "sample.com",
+    "schema.org", "w3.org", "localhost", "sentry.local",
+)
+
+#: 純十六進位、又長到這個地步的帳號名不是人取的，是程式產生的識別碼。
+#: Sentry 的 DSN 公鑰正好是 32 個十六進位字元。
+_MACHINE_LOCAL_RE = re.compile(r"^[0-9a-f]{24,}$", re.IGNORECASE)
+_UUID_LOCAL_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+#: 圖檔名稱常被誤認成信箱（``logo@2x.png``）。
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp")
+
+
+def is_tracking_address(value: str | None) -> bool:
+    """這個位址是機器產生的識別碼，不是給人收信的信箱嗎？
+
+    語法上它們完全合法，所以 :func:`is_valid_email` 攔不住——擋它們要看的是
+    「這個網域是做什麼的」和「這個帳號名像不像人取的」。
+
+    這一支放在共用的地方，是因為每一條進資料庫的路（爬取、匯入、補齊、Gmail
+    收信）都會經過 :class:`~verifier.service.CleaningService`，而重新驗證那條
+    路也用它把已經存進去的清掉。
+    """
+    if not value or "@" not in value:
+        return False
+    local, _, domain = value.strip().lower().rpartition("@")
+    if not local or not domain:
+        return False
+
+    if domain.endswith(_IMAGE_SUFFIXES):
+        return True
+    # 用結尾比對，``o4507.ingest.sentry.io`` 這種子網域才擋得到。
+    if any(domain == bad or domain.endswith("." + bad) for bad in _TRACKING_DOMAINS):
+        return True
+    if any(domain == bad or domain.endswith("." + bad) for bad in _PLACEHOLDER_DOMAINS):
+        return True
+    return bool(_MACHINE_LOCAL_RE.match(local) or _UUID_LOCAL_RE.match(local))
+
+
 _URL_RE = re.compile(
     r"^https?://"
     r"(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}"

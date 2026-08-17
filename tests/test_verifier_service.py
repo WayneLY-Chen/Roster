@@ -415,3 +415,37 @@ def test_mx_checker_uses_the_persistent_db_cache_across_instances(db_session, tm
 
     second._resolver = ExplodingResolver()
     assert second.has_mx("example.com") is True
+
+
+def test_verifying_clears_machine_generated_addresses_already_stored(
+    db_session, patch_config
+):
+    """規則只擋新資料的話，使用者手上那份名單永遠是髒的。
+
+    這是唯一能把**已經存進資料庫**的那些洗掉的地方——使用者按「驗證所有紀錄」
+    （或 `python main.py verify`）就會清乾淨。清掉幾個要回報，不然他只會看到
+    「信箱數變少了」而找不出原因。
+    """
+    from database.models import Company
+    from verifier.service import VerificationService
+
+    junk = Company(
+        company_name="千鴻電子股份有限公司",
+        dedupe_key="mail:8eb368c655b84e029ed79ad7a5c1718e@sentry.wixpress.com",
+        email="8eb368c655b84e029ed79ad7a5c1718e@sentry.wixpress.com",
+    )
+    real = Company(
+        company_name="東台精機股份有限公司",
+        dedupe_key="mail:sales@tongtai.example",
+        email="sales@tongtai.example",
+    )
+    db_session.add_all([junk, real])
+    db_session.commit()
+
+    summary = VerificationService(db_session, patch_config).run()
+    db_session.commit()
+
+    assert summary.tracking_removed == 1
+    db_session.expire_all()
+    assert junk.email is None
+    assert real.email == "sales@tongtai.example"   # 真的信箱不能被牽連

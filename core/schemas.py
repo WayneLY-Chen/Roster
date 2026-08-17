@@ -253,6 +253,12 @@ class VerifySummary(BaseModel):
     disposable: int = 0
     empty: int = 0
     updated: int = 0
+    #: 清掉的機器產生位址（Sentry 之類的識別碼）。
+    #:
+    #: 跟 :attr:`invalid_syntax` 分開：那些是壞掉的位址，這些語法完全正確，
+    #: 只是收信的不是人。使用者看到「清掉 37 個」才知道剛剛那批名單裡混了
+    #: 什麼、以及為什麼信箱數變少了。
+    tracking_removed: int = 0
 
 
 class DashboardStats(BaseModel):

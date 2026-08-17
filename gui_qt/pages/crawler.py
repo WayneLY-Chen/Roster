@@ -496,6 +496,12 @@ class CrawlerPage(BasePage):
             f"驗證完成 -- 已檢查 {summary.checked} 筆，有效 {summary.valid} 筆，"
             f"已更新 {summary.updated} 筆。"
         )
+        if getattr(summary, "tracking_removed", 0):
+            # 不講的話使用者只會看到「信箱數變少了」，而且找不出原因。
+            self._append_log(
+                f"　清掉 {summary.tracking_removed} 個機器產生的位址"
+                "（網頁原始碼裡的錯誤追蹤識別碼，長得像信箱但沒有人收信）。"
+            )
         self.status("驗證完成", "success")
         bump_data_version()
 

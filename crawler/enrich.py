@@ -53,7 +53,12 @@ from verifier.normalize import (
     normalize_person_name,
     normalize_phone,
 )
-from verifier.validators import is_role_address, is_valid_email, is_valid_phone
+from verifier.validators import (
+    is_role_address,
+    is_tracking_address,
+    is_valid_email,
+    is_valid_phone,
+)
 
 log = get_logger(LogCategory.CRAWL)
 
@@ -145,8 +150,10 @@ def _usable(email: str | None) -> bool:
     local = email.partition("@")[0].lower()
     if local in _JUNK_LOCAL_PARTS:
         return False
-    # 圖片檔名常被誤判成信箱，例如 logo@2x.png
-    return not email.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"))
+    # 機器產生的識別碼（Sentry 的 DSN、圖檔名）。這裡就要擋掉，不能只靠存進
+    # 資料庫前那一關：擋在這裡它才不會**排在真正的信箱前面被選走**——用 Wix
+    # 架的網站幾乎每一個都有一個 Sentry DSN 埋在 JavaScript 裡。
+    return not is_tracking_address(email)
 
 
 def _contact_links(html: str, base_url: str, limit: int = 3) -> list[str]:

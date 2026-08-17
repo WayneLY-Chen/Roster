@@ -37,6 +37,7 @@ from verifier.normalize import (
 )
 from verifier.validators import (
     is_disposable_email,
+    is_tracking_address,
     is_valid_company_name,
     is_valid_email,
     is_valid_phone,
@@ -107,6 +108,10 @@ class CleaningService:
         email = normalize_email(raw.email)
         if email and not is_valid_email(email):
             log.debug("discarding malformed email {!r} for {}", raw.email, name)
+            email = None
+        if email and is_tracking_address(email):
+            # 語法完全合法，所以上面那一關放它過。見 is_tracking_address()。
+            log.info("略過機器產生的位址 {!r}（{}）", email, name[:30])
             email = None
 
         phone = normalize_phone(raw.phone)
@@ -200,6 +205,8 @@ class VerificationService:
         self.repo = CompanyRepository(session)
         self.mx = MXChecker(self.config, session) if self.config.verifier.check_mx else None
         self.cleaner = CleaningService(self.config, self.mx)
+        #: 這一趟清掉了幾個機器產生的位址。由 :meth:`_renormalize` 累加。
+        self._tracking_removed = 0
 
     def run(
         self,
@@ -216,6 +223,7 @@ class VerificationService:
         targets = list(companies) if companies is not None else self.repo.all()
         summary = VerifySummary()
         total = len(targets)
+        self._tracking_removed = 0
 
         for index, company in enumerate(targets, start=1):
             summary.checked += 1
@@ -252,19 +260,35 @@ class VerificationService:
             if progress is not None and (index % 25 == 0 or index == total):
                 progress(index, total)
 
+        summary.tracking_removed = self._tracking_removed
         self.session.flush()
         log.info(
-            "verified {} companies: {} valid, {} no-mx, {} bad syntax, {} empty",
+            "verified {} companies: {} valid, {} no-mx, {} bad syntax, {} empty,"
+            " {} machine-generated addresses removed",
             summary.checked,
             summary.valid,
             summary.no_mx,
             summary.invalid_syntax,
             summary.empty,
+            summary.tracking_removed,
         )
         return summary
 
     def _renormalize(self, company: Company) -> bool:
-        """Re-apply normalization in place. True when anything changed."""
+        """Re-apply normalization in place. True when anything changed.
+
+        機器產生的位址（Sentry 之類的識別碼）在這裡會被清掉。這是唯一能把
+        **已經存進資料庫**的那些洗掉的地方——收集端的規則只管新資料，而使用者
+        手上那份名單是規則存在之前匯入的。清掉的筆數會回報，不是安靜地改。
+        """
+        if company.email and is_tracking_address(company.email):
+            log.info(
+                "清掉機器產生的位址 {!r}（{}）",
+                company.email, (company.company_name or "")[:30],
+            )
+            company.email = None
+            self._tracking_removed += 1
+
         updates = {
             "company_name": normalize_company_name(company.company_name)
             or company.company_name,

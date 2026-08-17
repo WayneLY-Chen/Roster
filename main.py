@@ -287,6 +287,7 @@ def verify(
         ("No MX record", summary.no_mx),
         ("Invalid syntax", summary.invalid_syntax),
         ("Disposable", summary.disposable),
+        ("Machine-generated (removed)", summary.tracking_removed),
         ("No email", summary.empty),
         ("Records updated", summary.updated),
     ):

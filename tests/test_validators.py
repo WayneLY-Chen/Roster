@@ -8,6 +8,7 @@ from verifier.validators import (
     email_domain,
     is_disposable_email,
     is_role_address,
+    is_tracking_address,
     is_valid_company_name,
     is_valid_email,
     is_valid_phone,
@@ -204,3 +205,46 @@ def test_is_valid_tax_id_checksum_arithmetic():
 )
 def test_is_valid_company_name(value, expected):
     assert is_valid_company_name(value) is expected
+
+
+# ------------------------------------- 網頁裡長得像信箱、但不是信箱的東西
+#
+# 使用者實際回報的：補齊之後名單裡出現
+#     8eb368c655b84e029ed79ad7a5c1718e@sentry.wixpress.com
+# 那是 Sentry 的錯誤追蹤 DSN，原樣寫在頁面的 JavaScript 裡。語法完全合法，
+# 所以 is_valid_email 放它過；用 Wix 架的網站幾乎每一個都有一個。
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "8eb368c655b84e029ed79ad7a5c1718e@sentry.wixpress.com",   # 使用者回報的那一個
+        "abc123@o4507.ingest.sentry.io",                          # 子網域形式
+        "key@sentry.io",
+        "3f2504e0-4f89-11d3-9a0c-0305e82c3301@somewhere.com",     # UUID 帳號名
+        "0123456789abcdef0123456789abcdef@anything.com",          # 32 位十六進位
+        "logo@2x.png",                                            # 圖檔名
+        "info@example.com",
+        "someone@yourdomain.com",
+        "a@schema.org",
+    ],
+)
+def test_machine_generated_addresses_are_recognised(address):
+    assert is_tracking_address(address)
+    # 這正是重點：它們在語法上完全合法，所以只靠 is_valid_email 擋不住。
+    if address != "logo@2x.png":
+        assert is_valid_email(address)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "sales@tongtai.com.tw",
+        "info@abc.com.tw",
+        "a1b2c3@company.tw",              # 短的十六進位是人取得出來的帳號
+        "service@sentry-inc.com.tw",      # 網域只是「開頭像」，不算
+        "deadbeef@example.com.tw",        # 8 個十六進位，還不到機器碼的長度
+    ],
+)
+def test_a_real_address_is_left_alone(address):
+    assert not is_tracking_address(address)
