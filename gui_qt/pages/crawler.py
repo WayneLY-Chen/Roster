@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -135,8 +136,21 @@ class CrawlerPage(BasePage):
         title_label.setFont(title_font)
         outer.addWidget(title_label)
 
+        # 跟匯入頁同樣的理由：三張卡片疊起來的最小高度會超過可用空間，而
+        # QVBoxLayout 遇到放不下時是壓縮加溢出，不是變出捲軸——結果就是元件
+        # 互相重疊、下面的卡片被擠到視窗外而且捲不到。包一層 QScrollArea。
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body = QWidget()
+        body_column = QVBoxLayout(body)
+        body_column.setContentsMargins(0, 0, 6, 0)
+        body_column.setSpacing(12)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
         controls = Section("執行爬取")
-        outer.addWidget(controls)
+        body_column.addWidget(controls)
 
         try:
             source_names = self.crawl_controller.source_names()
@@ -294,7 +308,7 @@ class CrawlerPage(BasePage):
         self.log_box.setReadOnly(True)
         self.log_box.setMaximumBlockCount(2000)
         log_section.body_layout.addWidget(self.log_box)
-        outer.addWidget(log_section, 1)
+        body_column.addWidget(log_section, 1)
 
         results_section = Section("結果")
         self.results_table = DataTable(
@@ -316,7 +330,7 @@ class CrawlerPage(BasePage):
             ]
         )
         results_section.body_layout.addWidget(self.results_table)
-        outer.addWidget(results_section, 1)
+        body_column.addWidget(results_section, 1)
 
     # ------------------------------------------------------------- crawling
 

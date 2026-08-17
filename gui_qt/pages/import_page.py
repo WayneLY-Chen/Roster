@@ -33,7 +33,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
 )
 
 from core.config import get_config, save_user_setting
@@ -106,8 +108,26 @@ class ImportPage(BasePage):
         title_label.setFont(title_font)
         outer.addWidget(title_label)
 
+        # 三張卡片疊起來的最小高度，在一般視窗大小下就可能超過可用空間——
+        # 「上次匯入結果」那張會隨著匯入的檔案愈長愈高（對應不到的欄位是一欄
+        # 一欄列出來的），補齊進行中時上面那張又會多一行進度。
+        #
+        # 超過的時候 QVBoxLayout 不會變出空間，它會壓縮還能壓的、然後把剩下的
+        # 擠出視窗，元件之間就開始互相重疊——「來源標籤」那行說明會蓋到底下的
+        # 輸入框上緣。郵件頁先前是一模一樣的症狀（見 pages/mail.py），修法也
+        # 一樣：包一層 QScrollArea，放不下時只是多一條捲軸。
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body = QWidget()
+        body_column = QVBoxLayout(body)
+        body_column.setContentsMargins(0, 0, 6, 0)
+        body_column.setSpacing(12)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
         choose_section = Section("選擇檔案")
-        outer.addWidget(choose_section)
+        body_column.addWidget(choose_section)
 
         pick_row = QHBoxLayout()
         self.choose_button = QPushButton("選擇檔案...")
@@ -169,13 +189,13 @@ class ImportPage(BasePage):
         self.total_rows_label = QLabel("")
         self.total_rows_label.setObjectName("MutedLabel")
         mapping_section.body_layout.addWidget(self.total_rows_label)
-        outer.addWidget(mapping_section, 1)
+        body_column.addWidget(mapping_section, 1)
 
         summary_section = Section("上次匯入結果")
         self.summary_label = QLabel("尚未執行匯入。")
         self.summary_label.setWordWrap(True)
         summary_section.body_layout.addWidget(self.summary_label)
-        outer.addWidget(summary_section)
+        body_column.addWidget(summary_section)
 
     # ------------------------------------------------------------- 範例檔
 

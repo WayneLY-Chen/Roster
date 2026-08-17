@@ -5,7 +5,7 @@
 
 Python 3.12+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / macOS / Linux ｜ 也可用命令列操作
 
-最新版本 **v1.19.0** — 這一版改了什麼見 [`CHANGELOG.md`](CHANGELOG.md)
+最新版本 **v1.19.1** — 這一版改了什麼見 [`CHANGELOG.md`](CHANGELOG.md)
 
 > **使用前請先閱讀本文件最後的[免責聲明](#免責聲明)。**
 > 本工具僅供蒐集網站公開顯示的商業聯絡資訊，使用者須自行確認每一個爬取目標的合法性並自負全部責任。
