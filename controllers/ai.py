@@ -37,7 +37,8 @@ from core.logging_setup import get_logger
 from core.schemas import RawCompany
 
 if TYPE_CHECKING:      # 只為了型別；ai.sites 會拉進 httpx 與 bs4，不值得在
-    from ai.sites import SiteSearchResult      # import 這個模組時就付那個成本
+    from ai.query import Answer               # import 這個模組時就付那個成本
+    from ai.sites import SiteSearchResult
 
 log = get_logger(LogCategory.GUI)
 
@@ -509,6 +510,63 @@ class AIController:
                 continue
             batch.results.append((url, result))
         return batch
+
+    # ------------------------------------------------------------ 問資料庫
+
+    def ask_database(
+        self,
+        question: str,
+        *,
+        model: str | None = None,
+        provider_name: str | None = None,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Answer:
+        """用中文問一個關於自己名單的問題。**唯讀。**
+
+        模型只做一件事：把問題翻成一組條件。查資料、算數量、寫出答案全部是
+        程式做的——所以答案裡的數字不可能是編的，它從來沒有經過模型。
+
+        新增／修改／刪除**沒有對應的工具**，所以「叫它刪資料」的結果不是它
+        拒絕，是它做不到。要改資料到「公司資訊」頁，那裡有確認、有紀錄、有
+        備份。
+        """
+        from ai.query import QUERY_MAX_TOKENS, ask, run
+        from database.repository import CompanyRepository
+        from database.session import session_scope
+
+        text = (question or "").strip()
+        if not text:
+            raise AIError("先打一個問題，例如「哪些台中的公司還沒聯絡過？」")
+
+        provider = get_provider(provider_name or self.config.ai.provider, self.config)
+        chosen = (model or self.config.ai.model or "").strip()
+        if not chosen:
+            raise AIError("還沒有選模型。到「設定」頁的「AI 模型」選一個。")
+
+        _stop_if_cancelled(cancel_event)
+        _tick(report, "正在請模型把問題翻成查詢條件…")
+
+        def chat(messages: Sequence[ChatMessage]) -> str:
+            def on_chunk(_piece: str) -> None:
+                _stop_if_cancelled(cancel_event)
+
+            return provider.chat(
+                messages, chosen, on_chunk=on_chunk, max_tokens=QUERY_MAX_TOKENS
+            )
+
+        def run_query(query):
+            # 交易開在**模型回完之後**：那一通可能要好幾分鐘（本機模型第一次
+            # 還要載權重），整段包在交易裡的話 SQLite 會被佔著，同時間背景在
+            # 跑的爬取就寫不進去。
+            _stop_if_cancelled(cancel_event)
+            _tick(report, "條件有了，正在查資料庫…")
+            with session_scope() as session:
+                return run(query, CompanyRepository(session))
+
+        answer = ask(text, chat, run_query)
+        _tick(report, "查完了。")
+        return answer
 
     def save_records(
         self,

@@ -189,6 +189,12 @@ class CompanyFilter(BaseModel):
     sources: list[str] = Field(default_factory=list)
     email_verdicts: list[str] = Field(default_factory=list)
     has_email: bool | None = None
+    #: 有沒有寄過信給它。``False`` 就是「還沒聯絡過」。
+    #:
+    #: 跟 ``stages`` 分開是刻意的：業務階段是使用者手動標的，而這一欄是程式
+    #: 自己蓋的章（``Company.last_emailed_at``）。問「哪些還沒聯絡過」時要的是
+    #: 後者——前者很常整批停在「New」，因為沒有人回頭去改它。
+    emailed: bool | None = None
     created_after: datetime | None = None
     created_before: datetime | None = None
     follow_up_before: date | None = None

@@ -26,6 +26,7 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from ai.extract import DroppedValue, ExtractResult  # noqa: E402
+from ai.query import Answer, Query  # noqa: E402
 from ai.sites import COMPANY, DIRECTORY, UNRELATED, Candidate, SiteSearchResult  # noqa: E402
 from controllers.ai import (  # noqa: E402
     BatchExtractResult,
@@ -33,7 +34,7 @@ from controllers.ai import (  # noqa: E402
     SaveResult,
 )
 from core.errors import RobotsDisallowedError  # noqa: E402
-from core.schemas import RawCompany  # noqa: E402
+from core.schemas import CompanyView, RawCompany  # noqa: E402
 from gui_qt.pages.ai_chat import AIChatPage  # noqa: E402
 from gui_qt.widgets import CHECK_KEY  # noqa: E402
 
@@ -468,3 +469,124 @@ def test_a_site_that_could_not_be_fetched_is_named(qt_app, db_session):
 
     assert "https://blocked.test/" in page.dropped_label.text()
     assert page.preview.row_count() == 1
+
+# ------------------------------------------------------------- 問你自己的資料庫
+#
+# 守的是「答案要附依據」：數字由程式算、由程式印，而且畫面上一定看得到條件。
+
+
+def _view(company_id: int, name: str, **fields) -> CompanyView:
+    return CompanyView(id=company_id, company_name=name, **fields)
+
+
+def test_a_blank_question_does_not_start_a_query(qt_app, db_session):
+    page = _page(qt_app)
+    page.question_input.setText("   ")
+    page._ask_question()
+
+    assert not page.ask_task.running
+    assert page.app.messages[-1][1] == "warning"
+
+
+def test_the_answer_shows_the_number_and_the_conditions_behind_it(qt_app, db_session):
+    """只顯示「有 2 家」是不夠的——使用者要看得到那 2 家是怎麼篩出來的。"""
+    page = _page(qt_app)
+    page._on_answered(
+        Answer(
+            question="哪些台中的公司還沒聯絡過？",
+            query=Query(arguments={"city": "台中", "never_emailed": True}),
+            total=2,
+            companies=[
+                _view(1, "台中甲公司", address="台中市西屯區", industry="金屬加工"),
+                _view(2, "臺中乙公司", address="臺中市南屯區"),
+            ],
+        )
+    )
+
+    assert "2 家" in page.answer_label.text()
+    basis = page.basis_label.text()
+    assert "地址包含 = 台中" in basis
+    assert "還沒聯絡過" in basis
+    assert page.answer_table.row_count() == 2
+    assert page.answer_table.model.row_at(0)["company_name"] == "台中甲公司"
+
+
+def test_a_truncated_list_says_how_many_there_really_are(qt_app, db_session):
+    """列出 50 家但總共有 300 家時，「有 50 家」是錯的答案。"""
+    page = _page(qt_app)
+    page._on_answered(
+        Answer(
+            query=Query(arguments={"city": "台中"}),
+            total=300,
+            companies=[_view(i, f"公司{i}") for i in range(50)],
+        )
+    )
+
+    headline = page.answer_label.text()
+    assert "300 家" in headline
+    assert "前 50 家" in headline
+
+
+def test_a_question_it_cannot_answer_says_so_instead_of_showing_a_number(
+    qt_app, db_session
+):
+    """查出來的東西跟他問的不是同一件事，比誠實說不知道糟得多。"""
+    page = _page(qt_app)
+    page._on_answered(Answer(question="哪一家員工最多？", cannot="資料庫裡沒有存員工人數"))
+
+    assert "沒有存員工人數" in page.answer_label.text()
+    assert page.answer_table.row_count() == 0
+    assert page.basis_label.text() == ""
+
+
+def test_conditions_the_model_made_up_are_shown_as_ignored(qt_app, db_session):
+    page = _page(qt_app)
+    page._on_answered(
+        Answer(
+            query=Query(arguments={"city": "台中"}, ignored=("employee_count",)),
+            total=0,
+        )
+    )
+
+    assert "employee_count" in page.basis_label.text()
+
+
+def test_a_new_question_clears_the_previous_answer(qt_app, db_session, monkeypatch):
+    """上一個問題的清單留在畫面上、而新的問題失敗，使用者會把舊的當成答案。"""
+    page = _page(qt_app)
+    page._on_answered(
+        Answer(query=Query(), total=1, companies=[_view(1, "甲公司")])
+    )
+
+    monkeypatch.setattr(page.ask_task, "start", lambda *a: None)
+    page.question_input.setText("換一個問題")
+    page._ask_question()
+
+    assert page.answer_table.row_count() == 0
+    assert page.basis_label.text() == ""
+
+
+def test_the_whole_ask_wiring_runs_off_the_ui_thread(qt_app, db_session, monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_ask(question, *, model=None, report=None, cancel_event=None):
+        seen["question"] = question
+        seen["model"] = model
+        report("正在查資料庫…")
+        return Answer(query=Query(arguments={"city": "台中"}), total=1,
+                      companies=[_view(1, "台中甲公司")])
+
+    page = _page(qt_app)
+    monkeypatch.setattr(page.controller, "ask_database", fake_ask)
+
+    page.question_input.setText("台中有幾家？")
+    page.model_combo.setCurrentText("some-model")
+    page._ask_question()
+
+    assert not page.ask_button.isEnabled()
+    _wait_for(qt_app, page.ask_task)
+
+    assert seen["question"] == "台中有幾家？"
+    assert seen["model"] == "some-model"
+    assert page.answer_table.row_count() == 1
+    assert page.ask_button.isEnabled()

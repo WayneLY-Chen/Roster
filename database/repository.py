@@ -316,6 +316,11 @@ class CompanyRepository:
         elif criteria.has_email is False:
             stmt = stmt.where(or_(Company.email.is_(None), Company.email == ""))
 
+        if criteria.emailed is True:
+            stmt = stmt.where(Company.last_emailed_at.is_not(None))
+        elif criteria.emailed is False:
+            stmt = stmt.where(Company.last_emailed_at.is_(None))
+
         if criteria.created_after:
             stmt = stmt.where(Company.created_at >= criteria.created_after)
         if criteria.created_before:

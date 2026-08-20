@@ -499,3 +499,69 @@ def test_cancelling_after_the_first_site_leaves_the_rest_untouched(
         )
 
     assert fetcher.asked == ["https://a.test/"]
+
+# ---------------------------------------------------------------- 問資料庫
+#
+# 守的是藍圖裡不能妥協的兩條：唯讀，而且答案要附依據。
+
+
+def test_asking_the_database_never_writes_to_it(provider, tmp_config, db_session):
+    """這一版的 AI 不能新增、修改、刪除任何一筆。
+
+    這條測的方式很直接：問完之後資料庫裡的東西一個字都沒變。
+    """
+    from database.repository import CompanyRepository
+
+    repo = CompanyRepository(db_session)
+    repo.create(company_name="台中甲公司", address="台中市西屯區", dedupe_key="a")
+    repo.create(company_name="高雄乙公司", address="高雄市前鎮區", dedupe_key="b")
+    db_session.commit()
+    before = {(c.id, c.company_name, c.address) for c in repo.all()}
+
+    provider.reply = json.dumps(
+        {"tool": "find_companies", "mode": "count", "arguments": {"city": "台中"}}
+    )
+    answer = AIController().ask_database("台中有幾家？", model="m")
+
+    assert answer.total == 1
+    db_session.expire_all()
+    assert {(c.id, c.company_name, c.address) for c in repo.all()} == before
+
+
+def test_the_answer_carries_the_conditions_it_used(provider, tmp_config, db_session):
+    """一句沒有依據的數字，使用者沒有辦法判斷它是查出來的還是編出來的。"""
+    provider.reply = json.dumps(
+        {
+            "tool": "find_companies",
+            "arguments": {"city": "台中", "never_emailed": True},
+        }
+    )
+    answer = AIController().ask_database("哪些台中的公司還沒聯絡過？", model="m")
+
+    assert "地址包含 = 台中" in " ".join(answer.notes())
+
+
+def test_a_delete_request_finds_no_such_tool(provider, tmp_config, db_session):
+    """「叫它刪資料時，它做不到」——不是它拒絕，是沒有那個工具。"""
+    provider.reply = json.dumps(
+        {"tool": "delete_companies", "arguments": {"city": "台中"}}
+    )
+
+    with pytest.raises(AIError) as caught:
+        AIController().ask_database("把台中的公司全部刪掉", model="m")
+
+    assert "不存在" in str(caught.value)
+
+
+def test_an_empty_question_does_not_call_the_model(provider, tmp_config):
+    with pytest.raises(AIError):
+        AIController().ask_database("   ", model="m")
+    assert provider.sent == []
+
+
+def test_cancelling_a_question_raises_its_own_error(provider, tmp_config, db_session):
+    event = threading.Event()
+    event.set()
+
+    with pytest.raises(ExtractCancelled):
+        AIController().ask_database("台中有幾家？", model="m", cancel_event=event)

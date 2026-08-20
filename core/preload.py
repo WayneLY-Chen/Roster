@@ -48,6 +48,7 @@ WORKER_MODULES: tuple[str, ...] = (
     # AI 抽取與找網站（「AI 助手」頁按下去時才會用到 bs4／lxml／httpx）
     "ai.extract",
     "ai.sites",
+    "ai.query",
     "crawler.websearch",
     # 爬取
     "crawler.pipeline",

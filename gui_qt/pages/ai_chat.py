@@ -1,12 +1,15 @@
 """「AI 助手」頁：從關鍵字或網址把公司抓進名單，或單純跟模型對話。
 
-## 這一頁做三件事
+## 這一頁做四件事
 
 **用關鍵字找網站**：打「台中 CNC 加工」→ 搜一次（**一個**請求）→ 模型替每一筆
 搜尋結果貼標籤（名錄／單一公司／不相關）→ 列給使用者勾 → 勾完按下去才真的去抓。
 
 **從網址抓資料**：貼上網址 → 程式（不是模型）去抓那一頁 → 模型讀完 → 跳出一張
 預覽表格 → 使用者把不要的勾掉 → 存進名單。
+
+**問你自己的資料庫**：打「哪些台中的公司還沒聯絡過？」→ 模型只負責把問題翻成
+一組條件 → **程式**去查、算數量、寫出答案。模型連那個數字都不經手。
 
 **聊天**：確認自己的模型設定是通的。金鑰打錯一個字、Ollama 沒在跑、模型代號
 拉錯，這幾件事全都會在「抓一個網站」的當下才爆炸，而那時候畫面上同時有網路
@@ -24,6 +27,15 @@
 表格底下會**誠實地寫出丟掉了什麼**（哪幾個值在原始頁面上找不到、頁面文字有沒有
 被截短、哪一個網站抓不到），而且點得開看細節。那份清單就是「這個模型在這個網站
 上可不可信」的證據——沒有它，使用者只能憑感覺猜。
+
+## 為什麼問答的答案不是模型寫的
+
+「有 12 家」這種答案，使用者沒有任何辦法分辨它是查出來的還是編出來的——編出來
+的數字看起來跟真的一模一樣，而他會拿它去做決定。
+
+所以數字由程式從資料庫算出來、由程式印出來，模型只負責挑條件。畫面上一定會寫
+出用了哪些條件，而符合的公司就列在下面，點兩下打得開。他要自己驗證的話，去
+「公司資訊」頁篩同樣的條件應該得到同一個數字。
 
 ## 串流
 
@@ -51,6 +63,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ai.query import Answer
 from controllers.ai import (
     AIController,
     AIStatus,
@@ -61,6 +74,7 @@ from controllers.ai import (
 )
 from core.errors import AINotConfigured, RobotsDisallowedError
 from gui_qt import theme
+from gui_qt.company_detail import CompanyDetailDialog
 from gui_qt.pages.base import BasePage, bump_data_version
 from gui_qt.tasks import BackgroundTask
 from gui_qt.widgets import CHECK_KEY, DataTable, Section, WideComboBox, inline_caption
@@ -96,6 +110,20 @@ SITE_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("reason", "模型為什麼這樣說", 280),
 )
 
+#: 問答結果的欄位。
+#:
+#: 這張表就是答案的「依據」——只給一個數字的話，使用者沒有辦法判斷那是查出來的
+#: 還是編出來的。列出來、而且點兩下打得開，他才驗證得了。
+ANSWER_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("company_name", "公司名稱", 240),
+    ("industry", "產業", 120),
+    ("address", "地址", 250),
+    ("email", "電子信箱", 190),
+    ("phone", "電話", 120),
+    ("pipeline_stage", "階段", 90),
+    ("lead_score", "名單品質", 80),
+)
+
 
 class AIChatPage(BasePage):
     """跟語言模型對話，以及請它讀一頁網頁。"""
@@ -116,6 +144,8 @@ class AIChatPage(BasePage):
         self._dropped: list = []
         #: 上一次「用關鍵字找網站」的候選清單。
         self._candidates: list = []
+        #: 上一次問答查到的那幾家，表格的每一列都對應這裡面的一筆。
+        self._answered: list = []
 
         self.chat_task = BackgroundTask(
             self,
@@ -153,6 +183,13 @@ class AIChatPage(BasePage):
             self._save,
             on_done=self._on_saved,
             on_error=self._on_save_error,
+        )
+        self.ask_task = BackgroundTask(
+            self,
+            self._ask_database,
+            on_progress=self._on_ask_progress,
+            on_done=self._on_answered,
+            on_error=self._on_ask_error,
         )
         # 「有沒有可用的模型」對 Ollama 來說要真的連一次線，最久兩秒。放在
         # 畫面執行緒上做的話，每次切到這一頁介面就凍住——實測 refresh() 花了
@@ -193,6 +230,7 @@ class AIChatPage(BasePage):
         self._build_status_row(body_column)
         self._build_sites(body_column)
         self._build_extract(body_column)
+        self._build_ask(body_column)
         self._build_conversation(body_column)
         self._build_composer(body_column)
 
@@ -341,6 +379,53 @@ class AIChatPage(BasePage):
         buttons.addWidget(self.dropped_button)
         buttons.addStretch(1)
         section.body_layout.addLayout(buttons)
+
+        column.addWidget(section, 1)
+
+    def _build_ask(self, column: QVBoxLayout) -> None:
+        section = Section("問你自己的資料庫")
+
+        row = QHBoxLayout()
+        row.addWidget(inline_caption("問題"), 0)
+        self.question_input = QLineEdit()
+        self.question_input.setPlaceholderText("哪些台中的公司還沒聯絡過？")
+        self.question_input.returnPressed.connect(self._ask_question)
+        row.addWidget(self.question_input, 1)
+        self.ask_button = QPushButton("問")
+        self.ask_button.clicked.connect(self._ask_question)
+        row.addWidget(self.ask_button, 0, Qt.AlignmentFlag.AlignBottom)
+        section.body_layout.addLayout(row)
+
+        hint = QLabel(
+            "只查得了資料，改不了資料——新增、修改、刪除沒有對應的工具，"
+            "那些請到「公司資訊」頁做。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        section.body_layout.addWidget(hint)
+
+        # 答案的第一句由程式寫，不是模型寫的。粗體是因為它就是答案本身。
+        self.answer_label = QLabel("")
+        self.answer_label.setWordWrap(True)
+        answer_font = self.answer_label.font()
+        answer_font.setBold(True)
+        self.answer_label.setFont(answer_font)
+        section.body_layout.addWidget(self.answer_label)
+
+        # 「依據」永遠跟答案一起出現。少了它，一個數字沒有辦法被驗證。
+        self.basis_label = QLabel("")
+        self.basis_label.setObjectName("MutedLabel")
+        self.basis_label.setWordWrap(True)
+        section.body_layout.addWidget(self.basis_label)
+
+        self.answer_table = DataTable(
+            ANSWER_COLUMNS, min_rows=4, on_activate=self._open_answered
+        )
+        section.body_layout.addWidget(self.answer_table)
+
+        note = QLabel("點兩下任何一列可以打開那家公司的詳細資料。")
+        note.setObjectName("MutedLabel")
+        section.body_layout.addWidget(note)
 
         column.addWidget(section, 1)
 
@@ -766,6 +851,89 @@ class AIChatPage(BasePage):
         self.save_button.setEnabled(True)
         self.extract_status.setText(f"存不進去：{exc}")
         self.report_error(exc)
+
+    # ------------------------------------------------------------ 問資料庫
+
+    def _ask_question(self) -> None:
+        if self.ask_task.running:
+            self.status("上一個問題還在查，等它結束", "warning")
+            return
+        question = self.question_input.text().strip()
+        if not question:
+            self.status("先打一個問題", "warning")
+            return
+
+        self.answer_table.clear()
+        self._answered = []
+        self.basis_label.setText("")
+        self.ask_button.setEnabled(False)
+        self.answer_label.setText("正在查…")
+        self.ask_task.start(question, self.model_combo.currentText().strip() or None)
+
+    def _ask_database(self, question: str, model: str | None, *, report, cancel_event):
+        """在背景執行緒裡跑：模型挑條件 → 程式去查。"""
+        return self.controller.ask_database(
+            question, model=model, report=report, cancel_event=cancel_event
+        )
+
+    def _on_ask_progress(self, message: object) -> None:
+        self.answer_label.setText(str(message))
+
+    def _on_answered(self, answer: Answer) -> None:
+        self.ask_button.setEnabled(True)
+        self._answered = list(answer.companies)
+        # headline() 是程式寫的字，裡面的數字直接來自資料庫——模型沒有經手過它。
+        self.answer_label.setText(answer.headline())
+        self.basis_label.setText("　".join(answer.notes()))
+
+        self.answer_table.set_rows(
+            [
+                {
+                    "company_name": company.company_name,
+                    "industry": company.industry or "",
+                    "address": company.address or "",
+                    "email": company.email or "",
+                    "phone": company.phone or "",
+                    "pipeline_stage": company.pipeline_stage,
+                    "lead_score": company.lead_score,
+                    "_id": company.id,
+                }
+                for company in self._answered
+            ]
+        )
+        if answer.cannot:
+            self.status("這個問題答不出來", "warning")
+        else:
+            self.status(f"查到 {answer.total} 家", "success")
+
+    def _on_ask_error(self, exc: Exception) -> None:
+        self.ask_button.setEnabled(True)
+        if isinstance(exc, ExtractCancelled):
+            self.answer_label.setText("已取消。")
+            self.status("已取消", "warning")
+            return
+        if isinstance(exc, AINotConfigured):
+            self.answer_label.setText("")
+            QMessageBox.information(self, "還沒設定好 AI", str(exc))
+            self.refresh()
+            return
+        self.answer_label.setText(f"查不出來：{exc}")
+        self.report_error(exc)
+
+    def _open_answered(self, row: dict) -> None:
+        """點兩下打開那家公司的詳細資料。
+
+        直接開既有的那個對話框，而不是自己再畫一份——修改資料的入口只該有一個，
+        而那個入口有確認、有紀錄、有備份。
+        """
+        company_id = row.get("_id")
+        if company_id is None:
+            return
+        from controllers.core import CompanyController
+
+        dialog = CompanyDetailDialog(self, CompanyController(), int(company_id))
+        dialog.exec()
+        bump_data_version()
 
     # ------------------------------------------------------------------ 送出
 
