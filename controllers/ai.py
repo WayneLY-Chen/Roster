@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from ai.prompts import build_system_prompt
 from ai.provider import (
     ChatMessage,
+    forget_probes,
     Model,
     ProviderStatus,
     available_providers,
@@ -40,6 +41,22 @@ class ChatTurn:
     content: str
 
 
+@dataclass(frozen=True, slots=True)
+class AIStatus:
+    """畫面要顯示的一切，一次算好。
+
+    分開成一個快照物件，是因為「現在可以用嗎」這件事對 Ollama 來說要真的連一
+    次線。畫面上有三個地方要知道答案（送出鈕、目前用哪一個、要不要顯示隱私
+    警告），各問各的就是三次連線——實測讓一次頁面刷新卡了 7 秒。
+    """
+
+    ready: bool
+    provider_label: str
+    sends_data_off_device: bool
+    #: 每個供應商的逐項狀態，設定頁用。
+    providers: tuple[ProviderStatus, ...] = ()
+
+
 class AIController:
     """聊天與模型清單。"""
 
@@ -55,8 +72,45 @@ class AIController:
     def statuses(self) -> list[ProviderStatus]:
         return provider_status(self.config)
 
+    def status(
+        self,
+        *,
+        report: Callable[[object], None] | None = None,
+        cancel_event: object | None = None,
+    ) -> AIStatus:
+        """一次算完畫面要的所有狀態，只探測一次。
+
+        **會連網**（Ollama 的探測），所以呼叫端要放在
+        :class:`~gui_qt.tasks.BackgroundTask` 裡。``report``／``cancel_event``
+        是為了符合那個介面而收下的，這裡用不到。
+        """
+        ready = bool(configured_providers(self.config))
+        if not ready:
+            return AIStatus(
+                ready=False,
+                provider_label="",
+                sends_data_off_device=True,
+                providers=tuple(provider_status(self.config)),
+            )
+        provider = get_provider(self.config.ai.provider, self.config)
+        return AIStatus(
+            ready=True,
+            provider_label=provider.label,
+            sends_data_off_device=provider.sends_data_off_device,
+            providers=tuple(provider_status(self.config)),
+        )
+
+    @staticmethod
+    def forget_probes() -> None:
+        """使用者改了設定，下一次重新探測而不要吃快取。"""
+        forget_probes()
+
     def ready(self) -> bool:
-        """有沒有任何一個供應商現在就能用。"""
+        """有沒有任何一個供應商現在就能用。
+
+        單獨問這一件事時用它。畫面要同時知道好幾件事的話用 :meth:`status`，
+        那樣只會探測一次。
+        """
         return bool(configured_providers(self.config))
 
     def active_provider_label(self) -> str:

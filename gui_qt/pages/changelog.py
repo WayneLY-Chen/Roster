@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QTextBrowser, QVBoxLayout
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTextBrowser,
+    QVBoxLayout,
+)
 
 from core.config import RESOURCE_ROOT
 from core.constants import DISPLAY_NAME, PROJECT_NAME, VERSION
@@ -57,6 +63,12 @@ class ChangelogPage(BasePage):
         version_label = QLabel(f"{DISPLAY_NAME} {PROJECT_NAME} v{VERSION}")
         version_label.setObjectName("MutedLabel")
         header.addWidget(version_label)
+
+        # 手動檢查。自動檢查一天只做一次、而且沒有新版時不出聲，所以需要一個
+        # 「我現在就想知道」的入口——否則使用者沒有辦法確認這個功能是活的。
+        self.check_button = QPushButton("檢查更新")
+        self.check_button.clicked.connect(self._check_for_updates)
+        header.addWidget(self.check_button)
         outer.addLayout(header)
 
         # QTextBrowser 而不是 QLabel：內容是 Markdown，而且會長到需要捲動。
@@ -65,3 +77,17 @@ class ChangelogPage(BasePage):
         self.view.setOpenExternalLinks(True)
         self.view.setMarkdown(load_changelog())
         outer.addWidget(self.view, 1)
+
+    def _check_for_updates(self) -> None:
+        """去問一次 GitHub。手動按的，所以「已經最新」也會回話。"""
+        from gui_qt.updater import UpdateHelper
+
+        if getattr(self, "_updater", None) is None:
+            self._updater = UpdateHelper(self)
+        self.check_button.setEnabled(False)
+        self.check_button.setText("檢查中…")
+        self._updater.check_now(on_finished=self._check_done)
+
+    def _check_done(self) -> None:
+        self.check_button.setEnabled(True)
+        self.check_button.setText("檢查更新")

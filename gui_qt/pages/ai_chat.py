@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from controllers.ai import AIController, ChatTurn
+from controllers.ai import AIController, AIStatus, ChatTurn
 from core.errors import AINotConfigured
 from gui_qt import theme
 from gui_qt.pages.base import BasePage
@@ -61,6 +61,15 @@ class AIChatPage(BasePage):
             on_progress=self._on_chunk,
             on_done=self._on_reply,
             on_error=self._on_error,
+        )
+        # 「有沒有可用的模型」對 Ollama 來說要真的連一次線，最久兩秒。放在
+        # 畫面執行緒上做的話，每次切到這一頁介面就凍住——實測 refresh() 花了
+        # 7 秒（三個地方各探測一次）。
+        self.status_task = BackgroundTask(
+            self,
+            self.controller.status,
+            on_done=self._apply_status,
+            on_error=self._on_status_error,
         )
 
     # ------------------------------------------------------------- 建立元件
@@ -166,10 +175,15 @@ class AIChatPage(BasePage):
 
     def refresh(self) -> None:
         self.controller = AIController()
-        self._refresh_status()
+        # 設定可能剛改過，丟掉快取重新探測一次。
+        self.controller.forget_probes()
+        self.status_label.setText("檢查可用的模型…")
+        if not self.status_task.running:
+            self.status_task.start()
 
-    def _refresh_status(self) -> None:
-        if not self.controller.ready():
+    def _apply_status(self, status: AIStatus) -> None:
+        """狀態查回來了。這個方法跑在畫面執行緒上，探測本身不是。"""
+        if not status.ready:
             self.status_label.setText(
                 "還沒有可用的 AI 模型。到「設定」頁的「AI 模型」設定：\n"
                 "本機執行（資料不出門）裝 Ollama，或填一把 OpenRouter 金鑰。"
@@ -181,9 +195,9 @@ class AIChatPage(BasePage):
         self.send_button.setEnabled(True)
         model = self.controller.config.ai.model or "（還沒選模型）"
         self.status_label.setText(
-            f"目前使用：{self.controller.active_provider_label()}　｜　模型：{model}"
+            f"目前使用：{status.provider_label}　｜　模型：{model}"
         )
-        if self.controller.sends_data_off_device():
+        if status.sends_data_off_device:
             self.privacy_label.setText(
                 "⚠ 這個來源會把你打的內容送到你的電腦以外。不要在這裡貼客戶名單或密碼。"
             )
@@ -196,6 +210,11 @@ class AIChatPage(BasePage):
             if current:
                 self.model_combo.addItem(current)
                 self.model_combo.setCurrentText(current)
+
+    def _on_status_error(self, exc: Exception) -> None:
+        # 探測失敗不該擋住整頁：使用者還是可以自己打模型代號送出去試。
+        self.status_label.setText(f"檢查模型狀態時出錯：{exc}")
+        self.send_button.setEnabled(True)
 
     # --------------------------------------------------------------- 模型清單
 

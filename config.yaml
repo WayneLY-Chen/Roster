@@ -14,6 +14,11 @@ app:
   feedback_email: "qweasd226410@gmail.com"
   issue_url: "https://github.com/WayneLY-Chen/Roster/issues"
 
+  # 開程式時順便看一下 GitHub 上有沒有新版本。一天最多查一次。
+  # 查到新版只會跳一個視窗**問**你要不要更新，按了才會動任何檔案。
+  # 關掉的話「更新資訊」頁還是有一顆手動的「檢查更新」。
+  check_for_updates: true
+
 database:
   url: "sqlite:///./data/crm.db"
   echo: false

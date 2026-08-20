@@ -78,6 +78,26 @@ class _Signals(QObject):
     failed = Signal(object)
 
 
+def _emit(signal: Any, payload: Any) -> None:
+    """發送訊號，但接住「接收端已經被刪掉了」。
+
+    背景工作跑在 QThreadPool 借來的執行緒上，而它的訊號物件掛在發起它的那個
+    widget 底下。使用者在工作跑完之前關掉程式（或那一頁被銷毀）時，C++ 那邊
+    的物件已經不在了，``emit`` 會丟 ``RuntimeError: Signal source has been
+    deleted``。
+
+    那個例外是從 :meth:`_Runnable.run` 裡逃出去的——它發生在「回報上一個例外」
+    的那一行，所以連原本的錯誤也一起不見了。而讓例外逃出 ``run()`` 正是這個
+    專案在 QThreadPool 執行緒上踩過的那一類問題（見本檔案開頭的說明）。
+
+    接收端不在了就代表沒有人需要這個結果，安靜地丟掉是正確的行為。
+    """
+    try:
+        signal.emit(payload)
+    except RuntimeError:
+        pass
+
+
 class _Runnable(QRunnable):
     """實際執行 worker 的工作單元，丟進 ``QThreadPool`` 借來的執行緒裡跑。"""
 
@@ -98,7 +118,7 @@ class _Runnable(QRunnable):
 
     def run(self) -> None:  # noqa: D102 - QRunnable 的入口點，跑在借來的執行緒上
         def report(payload: Any) -> None:
-            self._signals.progress.emit(payload)
+            _emit(self._signals.progress, payload)
 
         try:
             result = self._worker(
@@ -107,7 +127,7 @@ class _Runnable(QRunnable):
                 cancel_event=self._cancel_event,
                 **self._kwargs,
             )
-            self._signals.succeeded.emit(result)
+            _emit(self._signals.succeeded, result)
         except Exception as exc:  # noqa: BLE001 - 背景工作的例外一律回報，不能讓執行緒吞掉
             # 特意不在這裡呼叫 log.error()：這個執行緒是 QThreadPool 借出來
             # 的、不是 Python 標準的 threading.Thread，實測跟 loguru 這支
@@ -117,7 +137,7 @@ class _Runnable(QRunnable):
             # 接住。把記錄動作留到 _on_failed()（UI 執行緒，一個普通的
             # Python 執行緒）處理，例外物件本身連同 ``__traceback__`` 會原封
             # 不動地跟著 emit 過去，不會漏掉任何診斷資訊。
-            self._signals.failed.emit(exc)
+            _emit(self._signals.failed, exc)
 
 
 class BackgroundTask(QObject):

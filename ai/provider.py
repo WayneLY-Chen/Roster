@@ -35,6 +35,7 @@ Ollama 沒有這個問題，代價是要自己裝、而且吃自己的記憶體�
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -68,6 +69,39 @@ OPENROUTER_TITLE = "Roster"
 
 #: 列模型清單用的短逾時。這一步只是拿一份列表，卡住就該早點放棄。
 LIST_TIMEOUT = 15.0
+
+#: 「這個供應商現在可用嗎」的探測結果要快取幾秒。
+#:
+#: Ollama 沒有金鑰可以查，判斷它在不在只能真的連一次線。而畫面上問這件事的
+#: 地方不只一個——「現在會用哪一個」「要不要顯示隱私警告」「送出鈕要不要
+#: 啟用」全都要知道答案。沒有快取的話一次刷新就是三四次連線，實測讓「AI 助
+#: 手」頁的 refresh() 花了 7 秒、設定頁的 build() 花了 9 秒，整個介面卡住。
+#:
+#: 十秒足夠讓一次畫面刷新裡的所有查詢共用同一個答案，又短到使用者剛把 Ollama
+#: 開起來時不會等太久。設定改變時呼叫 :func:`forget_probes` 立刻失效。
+PROBE_TTL = 10.0
+
+_probe_cache: dict[str, tuple[float, bool]] = {}
+
+
+def forget_probes() -> None:
+    """丟掉快取的探測結果，下一次查詢重新連線。
+
+    使用者剛裝好 Ollama、剛存了金鑰、或按了「重新整理」時要呼叫——那幾個時
+    間點他就是在說「我改了東西，再看一次」。
+    """
+    _probe_cache.clear()
+
+
+def _cached_probe(key: str, probe: Callable[[], bool]) -> bool:
+    now = time.monotonic()
+    hit = _probe_cache.get(key)
+    if hit is not None and now - hit[0] < PROBE_TTL:
+        return hit[1]
+    value = probe()
+    _probe_cache[key] = (now, value)
+    return value
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,14 +397,22 @@ class OllamaProvider(BaseProvider):
     def is_configured(self) -> bool:
         """Ollama 沒有金鑰可以檢查，只能問它在不在。
 
-        所以這裡真的會連一次線——但只連本機、逾時兩秒。跟連外的供應商不同，
-        「有沒有裝」這件事沒有別的判斷依據。
+        所以這裡真的會連一次線——但只連本機、逾時兩秒，而且結果會快取
+        :data:`PROBE_TTL` 秒（見那裡的說明：沒有快取時畫面會卡好幾秒）。
+        跟連外的供應商不同，「有沒有裝」這件事沒有別的判斷依據。
+
+        **這個方法仍然可能花上兩秒**，所以呼叫端不該在畫面執行緒上直接叫它——
+        第一次探測一定會付那個代價。用 BackgroundTask 包起來。
         """
-        try:
-            response = httpx.get(f"{self.base_url}/api/tags", timeout=2.0)
-            return response.status_code == 200
-        except httpx.HTTPError:
-            return False
+
+        def probe() -> bool:
+            try:
+                response = httpx.get(f"{self.base_url}/api/tags", timeout=2.0)
+                return response.status_code == 200
+            except httpx.HTTPError:
+                return False
+
+        return _cached_probe(f"ollama:{self.base_url}", probe)
 
     def list_models(self) -> list[Model]:
         try:

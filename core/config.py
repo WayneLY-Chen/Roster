@@ -133,6 +133,12 @@ class AppSection(_Base):
     #: 回報用的 GitHub issue 頁面。``feedback_email`` 留空時會用這個。
     issue_url: str = "https://github.com/WayneLY-Chen/Roster/issues"
 
+    #: 開程式時要不要順便看一下有沒有新版本。
+    #:
+    #: 一天最多一次，而且只是**問**——查到新版只會跳一個視窗問你要不要更新，
+    #: 按了才會動任何檔案。關掉的話「更新資訊」頁還是有手動的「檢查更新」。
+    check_for_updates: bool = True
+
 
 class DatabaseSection(_Base):
     url: str = "sqlite:///./data/crm.db"

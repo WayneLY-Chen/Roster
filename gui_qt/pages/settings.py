@@ -59,7 +59,7 @@ from core import legal
 from core.credentials import SecretSource, SecretStatus
 from core.errors import CRMError
 from core.i18n import ALL_OPTION, STAGE_LABELS, stage_labels, to_value
-from controllers.ai import AIController
+from controllers.ai import AIController, AIStatus
 from controllers.core import SettingsController
 
 # gui.controllers_mail.MailController 是跟 gui.controllers 同一種東西：純資料層
@@ -160,6 +160,12 @@ class SettingsPage(BasePage):
             self.ai_controller.models,
             on_done=self._on_ai_models_done,
             on_error=self._on_ai_models_error,
+        )
+        self.ai_status_task = BackgroundTask(
+            self,
+            self.ai_controller.status,
+            on_done=self._apply_ai_status,
+            on_error=self._on_ai_status_error,
         )
 
     # ------------------------------------------------------------- 建立元件
@@ -669,18 +675,37 @@ class SettingsPage(BasePage):
         self._body_layout.addWidget(section)
 
     def _refresh_ai_status(self) -> None:
-        """哪幾個來源現在可用，以及實際會走哪一個。"""
-        # 每一個來源各佔一行，而不是全部串成一長條：三個來源接起來會超過欄寬
-        # 而換行，換行的位置又不會落在分隔符號上，讀起來像亂碼。
+        """去問一次「哪幾個來源可用」。
+
+        探測 Ollama 在不在會真的連線，最久兩秒。以前這是同步做的，而且問了
+        四次（每個來源一次、再加上「現在用哪個」「要不要示警」），結果是光
+        打開設定頁就要等九秒。改成背景執行緒 + 一次探測。
+        """
+        self.ai_status_label.setText("檢查中…")
+        self.ai_controller.forget_probes()
+        if not self.ai_status_task.running:
+            self.ai_status_task.start()
+
+    def _apply_ai_status(self, status: AIStatus) -> None:
+        """查回來了（這個方法跑在畫面執行緒上）。
+
+        每一個來源各佔一行，而不是全部串成一長條：三個來源接起來會超過欄寬
+        而換行，換行的位置又不會落在分隔符號上，讀起來像亂碼。
+        """
         lines = [
-            f"{status.label}：{'可用' if status.configured else '未設定'}"
-            f"（{status.detail}）"
-            for status in self.ai_controller.statuses()
+            f"{item.label}：{'可用' if item.configured else '未設定'}（{item.detail}）"
+            for item in status.providers
         ]
-        lines.append(f"目前會使用：{self.ai_controller.active_provider_label()}")
-        if self.ai_controller.ready() and self.ai_controller.sends_data_off_device():
-            lines.append("⚠ 這個來源會把內容送到你的電腦以外。")
+        if status.ready:
+            lines.append(f"目前會使用：{status.provider_label}")
+            if status.sends_data_off_device:
+                lines.append("⚠ 這個來源會把內容送到你的電腦以外。")
+        else:
+            lines.append("目前沒有可用的來源。")
         self.ai_status_label.setText("\n".join(lines))
+
+    def _on_ai_status_error(self, exc: Exception) -> None:
+        self.ai_status_label.setText(f"檢查 AI 來源時出錯：{exc}")
 
     def _on_ai_provider_changed(self, text: str) -> None:
         name = next(

@@ -206,3 +206,56 @@ def test_duplicate_start_while_running_is_ignored(qt_app):
     loop.exec()
 
     assert call_count["n"] == 1
+
+
+# --------------------------------------------- worker 真的有被執行嗎
+
+def test_runnable_defines_its_own_run(qt_app):
+    """``_Runnable`` 必須自己定義 ``run()``。
+
+    這條看起來很蠢，但它擋的是一個**安靜到極點**的災難：``QRunnable`` 基底
+    類別本身就有一個什麼都不做的 ``run()``。有人不小心把我們的 ``run()``
+    縮排錯（變成別的函式裡的巢狀函式）時，``hasattr(_Runnable, "run")``
+    仍然是 True、``import`` 仍然成功、整套測試裡任何「檢查有沒有這個方法」
+    的斷言也都會過——但每一個背景工作都會變成什麼都不做就結束，畫面上是
+    永遠轉不完的圈圈。實際發生過一次。
+
+    所以這裡問的是「``run`` 是不是**這個類別自己的**」，不是「找不找得到」。
+    """
+    from gui_qt.tasks import _Runnable
+
+    assert "run" in vars(_Runnable), (
+        "_Runnable 沒有自己的 run()，會退回 QRunnable 那個什麼都不做的版本"
+    )
+
+
+def test_a_task_actually_calls_its_worker(qt_app):
+    """端到端：start() 之後 worker 真的被呼叫、on_done 真的收到結果。"""
+    from gui_qt.tasks import BackgroundTask
+    from PySide6.QtCore import QObject
+
+    seen = {}
+
+    def worker(*, report, cancel_event):
+        report("跑到一半")
+        return "做完了"
+
+    holder = QObject()
+    task = BackgroundTask(
+        holder,
+        worker,
+        on_progress=lambda p: seen.setdefault("progress", p),
+        on_done=lambda r: seen.setdefault("done", r),
+        on_error=lambda e: seen.setdefault("error", e),
+    )
+    task.start()
+
+    deadline = time.time() + 5
+    while task.running and time.time() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.005)
+    qt_app.processEvents()
+
+    assert seen.get("done") == "做完了", f"worker 沒有真的跑起來：{seen}"
+    assert seen.get("progress") == "跑到一半"
+    assert "error" not in seen

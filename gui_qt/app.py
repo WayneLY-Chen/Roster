@@ -60,6 +60,7 @@ log = get_logger(LogCategory.GUI)
 #:
 #:     頁面（gui_qt/pages/*.py）  title   icon
 #:     -------------------------  ------  ----
+#:     ai_chat.AIChatPage         AI 助手 🤖
 #:     dashboard.DashboardPage    儀表板  📊
 #:     companies.CompaniesPage    公司    🏢
 #:     contacts.ContactsPage      聯絡人  👤
@@ -68,7 +69,6 @@ log = get_logger(LogCategory.GUI)
 #:     export_page.ExportPage     匯出    📤
 #:     mail.MailPage              郵件    ✉
 #:     logs.LogsPage              日誌    📜
-#:     ai_chat.AIChatPage         AI 助手 🤖
 #:     settings.SettingsPage      設定    ⚙️
 #:     feedback.FeedbackPage      反饋    💬
 #:     changelog.ChangelogPage    更新資訊 🆕
@@ -80,6 +80,7 @@ log = get_logger(LogCategory.GUI)
 #: 那個當下要找的是「哪裡可以講」。它不是一種設定，所以是獨立的一頁而不是
 #: 設定頁裡的一個區塊——藏在設定頁最下面等於沒有。
 PAGE_CLASSES: tuple[type[BasePage], ...] = (
+    AIChatPage,
     DashboardPage,
     CompaniesPage,
     ContactsPage,
@@ -88,7 +89,6 @@ PAGE_CLASSES: tuple[type[BasePage], ...] = (
     ExportPage,
     MailPage,
     LogsPage,
-    AIChatPage,
     SettingsPage,
     FeedbackPage,
     ChangelogPage,
@@ -153,6 +153,21 @@ class MainWindow(QMainWindow):
 
         self.show_page(DashboardPage.title)
         self._start_scheduler()
+        self._start_update_check()
+
+    # ------------------------------------------------------------- 更新
+
+    def _start_update_check(self) -> None:
+        """開程式時順便看一下有沒有新版。
+
+        整段都在背景執行緒上，而且一天最多一次；沒有新版時完全不出聲。
+        連不上網路也不出聲——那太常見了（沒開網路、公司防火牆），為了它跳
+        視窗是騷擾。設定 ``app.check_for_updates`` 可以整個關掉。
+        """
+        from gui_qt.updater import UpdateHelper
+
+        self.updater = UpdateHelper(self)
+        self.updater.check_on_startup()
 
     # ------------------------------------------------------------- 排程
 

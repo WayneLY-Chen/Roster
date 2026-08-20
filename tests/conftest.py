@@ -392,3 +392,21 @@ def sample_companies() -> list[CleanCompany]:
             status=RecordStatus.ACTIVE,
         ),
     ]
+
+
+@pytest.fixture(autouse=True)
+def _forget_ai_probes():
+    """每個測試都從「還沒探測過任何 AI 供應商」開始。
+
+    ``ai.provider`` 會把「Ollama 在不在」的探測結果快取十秒（沒有快取的話畫面
+    會卡好幾秒，見那裡的說明）。那份快取是模組層級的，所以會跨測試留下來——
+    一個「假裝 Ollama 有在跑」的測試跑完之後，下一個「假裝它沒在跑」的測試會
+    讀到上一個留下的答案而失敗。
+
+    失敗的方式還特別討厭：單獨跑那個檔案會過，跑整套才會壞。
+    """
+    from ai.provider import forget_probes
+
+    forget_probes()
+    yield
+    forget_probes()
