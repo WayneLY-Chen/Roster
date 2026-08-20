@@ -82,3 +82,7 @@ Thumbs.db
 # 說明，整個擋掉的話 README 上的連結對每一個 clone 下來的人都是 404。
 docs/taiwan.md
 crash.log
+
+# 本機工作用的說明，不進版控
+CLAUDE.md
+docs/藍圖.md
