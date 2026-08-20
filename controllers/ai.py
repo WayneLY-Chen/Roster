@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from ai.extract import AI_SOURCE, ExtractResult
@@ -30,8 +31,15 @@ from ai.provider import (
     provider_status,
 )
 from core.config import AppConfig, get_config, save_user_settings
-from core.errors import AIError
+from core.constants import LogCategory
+from core.errors import AIError, CRMError
+from core.logging_setup import get_logger
 from core.schemas import RawCompany
+
+if TYPE_CHECKING:      # 只為了型別；ai.sites 會拉進 httpx 與 bs4，不值得在
+    from ai.sites import SiteSearchResult      # import 這個模組時就付那個成本
+
+log = get_logger(LogCategory.GUI)
 
 #: 一次帶幾則歷史訊息給模型。
 #:
@@ -118,6 +126,49 @@ class AIStatus:
     sends_data_off_device: bool
     #: 每個供應商的逐項狀態，設定頁用。
     providers: tuple[ProviderStatus, ...] = ()
+
+
+@dataclass(slots=True)
+class BatchExtractResult:
+    """一次抓好幾個網址的結果。
+
+    失敗的那幾個要跟成功的一起交出來，不能只回成功的。五個網站裡有一個被
+    robots.txt 擋掉，使用者需要知道**是哪一個**——否則他只會看到「抓到 40 筆」
+    然後以為那五個網站都抓過了。
+    """
+
+    #: ``(網址, 那一頁的抽取結果)``，成功的。
+    results: list[tuple[str, ExtractResult]] = field(default_factory=list)
+    #: ``(網址, 錯誤訊息第一行)``，失敗的。
+    failures: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def records(self) -> list[RawCompany]:
+        return [record for _url, result in self.results for record in result.records]
+
+    @property
+    def dropped(self) -> list:
+        return [item for _url, result in self.results for item in result.dropped]
+
+    def notes(self) -> list[str]:
+        """畫面上要照實寫出來的每一句話，含每一個失敗的網站。"""
+        lines: list[str] = []
+        if len(self.results) > 1:
+            lines.append(
+                f"抓了 {len(self.results)} 個網站，共 {len(self.records)} 筆。"
+            )
+        truncated = sum(1 for _u, r in self.results if r.truncated)
+        if truncated:
+            lines.append(f"其中 {truncated} 個網站的頁面文字太長，後半段沒有讀到。")
+        dropped_records = sum(r.dropped_records for _u, r in self.results)
+        dropped_values = sum(r.dropped_values for _u, r in self.results)
+        if dropped_records:
+            lines.append(f"有 {dropped_records} 筆的公司名稱在頁面上找不到，整筆丟棄。")
+        if dropped_values:
+            lines.append(f"有 {dropped_values} 個值在原始頁面上找不到，已經丟棄。")
+        for url, reason in self.failures:
+            lines.append(f"抓不到 {url}：{reason}")
+        return lines
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +403,112 @@ class AIController:
         result = extract_from_html(html, page.url or target, chat)
         _tick(report, f"讀完了，抽到 {len(result.records)} 筆。")
         return result
+
+    # ---------------------------------------------------------- 從關鍵字找網站
+
+    def find_sites(
+        self,
+        query: str,
+        *,
+        model: str | None = None,
+        provider_name: str | None = None,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SiteSearchResult:
+        """搜一次關鍵字，請模型替每一筆結果貼標籤。**不抓任何候選網站。**
+
+        這裡總共只會發出**一次**網路請求（那次搜尋）。候選網站一個都不會被
+        碰到——那是使用者勾選之後按下去才發生的事，見 :meth:`extract_urls`。
+        一個關鍵字展開成幾十個網站、每個網站幾十頁，那是他要承擔的，他得先
+        看到清單。
+        """
+        from ai.sites import MAX_HITS, SITES_MAX_TOKENS, find_sites
+        from crawler.fetcher import build_fetcher
+        from crawler.websearch import build_search_provider
+
+        text = (query or "").strip()
+        if not text:
+            raise AIError("先打一個關鍵字，例如「台中 CNC 加工」。")
+
+        provider = get_provider(provider_name or self.config.ai.provider, self.config)
+        chosen = (model or self.config.ai.model or "").strip()
+        if not chosen:
+            raise AIError("還沒有選模型。到「設定」頁的「AI 模型」選一個。")
+
+        _stop_if_cancelled(cancel_event)
+        _tick(report, f"正在搜尋「{text}」…")
+
+        # 免金鑰那條走 html.duckduckgo.com，而它是用這個 fetcher 去抓的——
+        # robots.txt 檢查與請求間隔跟爬名錄時完全同一套，不會因為「這是搜尋
+        # 引擎」就鬆一格。理由見 crawler/websearch.py 開頭。
+        with build_fetcher(self.config) as fetcher:
+            search = build_search_provider(self.config, fetcher)
+            if search is None:
+                raise AIError(
+                    "搜尋來源被設成「不搜尋」。到「設定」頁把它改回「自動」，"
+                    "或直接在上面貼一個網址。"
+                )
+            try:
+                hits = search.search(text, limit=MAX_HITS)
+            finally:
+                search.close()
+
+        _stop_if_cancelled(cancel_event)
+        if not hits:
+            _tick(report, "搜不到東西。")
+            return find_sites(text, [], lambda _messages: "[]")
+
+        _tick(report, f"搜到 {len(hits)} 筆，正在請模型判斷哪些值得抓…")
+
+        def chat(messages: Sequence[ChatMessage]) -> str:
+            def on_chunk(_piece: str) -> None:
+                _stop_if_cancelled(cancel_event)
+
+            return provider.chat(
+                messages, chosen, on_chunk=on_chunk, max_tokens=SITES_MAX_TOKENS
+            )
+
+        result = find_sites(text, hits, chat)
+        _tick(report, f"判斷完了，{len(result.worth_crawling)} 筆值得抓。")
+        return result
+
+    def extract_urls(
+        self,
+        urls: Sequence[str],
+        *,
+        model: str | None = None,
+        provider_name: str | None = None,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> BatchExtractResult:
+        """對使用者勾起來的每一個網址各跑一次 :meth:`extract_url`。
+
+        一個網站失敗不會讓其餘的一起停——被 robots.txt 擋掉的、連不上的、
+        模型讀不懂的，各自記進 :attr:`BatchExtractResult.failures` 讓使用者
+        看得到是哪一個、為什麼。五個網站裡有一個被擋，另外四個的資料還是他
+        要的東西。
+        """
+        targets = [url for url in urls if (url or "").strip()]
+        batch = BatchExtractResult()
+        for position, url in enumerate(targets, start=1):
+            _stop_if_cancelled(cancel_event)
+            _tick(report, f"（{position}/{len(targets)}）{url}")
+            try:
+                result = self.extract_url(
+                    url,
+                    model=model,
+                    provider_name=provider_name,
+                    report=None,     # 逐站的細節會把「第幾個網站」洗掉
+                    cancel_event=cancel_event,
+                )
+            except ExtractCancelled:
+                raise
+            except CRMError as exc:
+                batch.failures.append((url, str(exc).splitlines()[0]))
+                log.warning("抓 {} 失敗：{}", url, exc)
+                continue
+            batch.results.append((url, result))
+        return batch
 
     def save_records(
         self,

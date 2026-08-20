@@ -24,6 +24,7 @@ from controllers.ai import (
 )
 from core.errors import AIError, RobotsDisallowedError
 from core.schemas import CompanyFilter, RawCompany
+from crawler.websearch import SearchHit, SearchUnavailable
 
 
 class _RecordingProvider:
@@ -297,3 +298,204 @@ def test_saving_goes_through_the_one_shared_write_path(tmp_config, db_session):
 
 def test_saving_nothing_does_not_touch_the_database(tmp_config):
     assert AIController().save_records([]) == SaveResult()
+
+# --------------------------------------------------------- 從關鍵字找網站
+#
+# 守的是藍圖裡不能妥協的那兩條：
+#
+#   1. 搜尋只走 crawler.websearch 那一條路（免金鑰的是 html.duckduckgo.com，
+#      它的 robots.txt 明文 Allow: /）。這裡不另外開一條。
+#   2. AI 不能自己決定就開始大量請求。候選清單出來的當下，候選網站一個都
+#      還沒有被碰到。
+
+
+class _FakeSearch:
+    """假的搜尋來源。記下查了什麼，回一份固定的結果。"""
+
+    name = "fake-search"
+    label = "假的搜尋"
+
+    def __init__(self, hits=None) -> None:
+        self.hits = hits if hits is not None else list(SEARCH_HITS)
+        self.queries: list[str] = []
+        self.closed = False
+
+    def search(self, query, limit=10):
+        self.queries.append(query)
+        return self.hits[:limit]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+SEARCH_HITS = [
+    SearchHit(
+        url="https://directory.test/members",
+        title="某某公會 會員名錄",
+        snippet="會員廠商一覽",
+    ),
+    SearchHit(
+        url="https://news.test/story",
+        title="產業新聞",
+        snippet="記者報導",
+    ),
+]
+
+
+@pytest.fixture
+def search(monkeypatch):
+    fake = _FakeSearch()
+    monkeypatch.setattr("crawler.websearch.build_search_provider", lambda *a, **k: fake)
+    return fake
+
+
+def test_finding_sites_does_not_touch_a_single_candidate(
+    provider, fetcher, search, tmp_config
+):
+    """**這一條是藍圖裡不能妥協的那一條。**
+
+    一個關鍵字可以展開成幾十個網站、每個網站幾十頁。那是使用者要承擔的頻寬
+    與時間，他得先看到清單、自己勾。所以候選清單交出來的當下，候選網站一個
+    都還沒有被請求過——擷取層完全沒有被呼叫。
+    """
+    provider.reply = json.dumps(
+        [
+            {"index": 0, "kind": "directory", "reason": "會員名冊"},
+            {"index": 1, "kind": "unrelated", "reason": "新聞"},
+        ]
+    )
+    result = AIController().find_sites("台中 CNC 加工", model="m")
+
+    assert search.queries == ["台中 CNC 加工"]
+    assert [c.url for c in result.worth_crawling] == ["https://directory.test/members"]
+    # 這一行才是重點：一個候選網站都沒有被抓。
+    assert fetcher.asked == []
+
+
+def test_the_search_source_is_closed_even_when_it_blows_up(
+    provider, fetcher, search, tmp_config, monkeypatch
+):
+    """API 型的來源會開自己的 httpx client，漏掉就是漏一條連線。"""
+
+    def boom(*_a, **_k):
+        raise SearchUnavailable("對方限流了")
+
+    monkeypatch.setattr(search, "search", boom)
+
+    with pytest.raises(SearchUnavailable):
+        AIController().find_sites("台中 CNC 加工", model="m")
+
+    assert search.closed is True
+
+
+def test_no_search_results_means_no_model_call_either(
+    provider, fetcher, search, tmp_config, monkeypatch
+):
+    """搜不到東西時連問都不必問——那是一次白花的錢。"""
+    monkeypatch.setattr(search, "hits", [])
+
+    result = AIController().find_sites("找不到的東西", model="m")
+
+    assert result.candidates == []
+    assert provider.sent == []
+
+
+def test_cancelling_before_the_search_sends_nothing_at_all(
+    provider, fetcher, search, tmp_config
+):
+    """按取消，一個請求都不會發出去。"""
+    event = threading.Event()
+    event.set()
+
+    with pytest.raises(ExtractCancelled):
+        AIController().find_sites("台中 CNC 加工", model="m", cancel_event=event)
+
+    assert search.queries == []
+    assert fetcher.asked == []
+
+
+def test_search_turned_off_says_what_to_do_about_it(provider, fetcher, tmp_config, monkeypatch):
+    monkeypatch.setattr("crawler.websearch.build_search_provider", lambda *a, **k: None)
+
+    with pytest.raises(AIError) as caught:
+        AIController().find_sites("台中 CNC 加工", model="m")
+
+    assert "設定" in str(caught.value)
+
+
+# ------------------------------------------------------ 一次抓好幾個網站
+
+
+def test_one_blocked_site_does_not_stop_the_others(provider, tmp_config, monkeypatch):
+    """五個網站裡有一個被 robots.txt 擋掉，另外四個的資料還是使用者要的。
+
+    而且他要知道**是哪一個**被擋了——否則他只會看到「抓到 40 筆」，然後以為
+    那五個網站都抓過了。
+    """
+    blocked = "https://blocked.test/members"
+
+    class _PickyFetcher(_FakeFetcher):
+        def fetch(self, url, **kwargs):
+            if url == blocked:
+                raise RobotsDisallowedError(url, "Roster/1.0")
+            return super().fetch(url, **kwargs)
+
+    picky = _PickyFetcher()
+    monkeypatch.setattr("crawler.fetcher.build_fetcher", lambda *a, **k: picky)
+    provider.reply = json.dumps([{"company_name": "甲公司", "phone": "02-1111"}])
+
+    batch = AIController().extract_urls(
+        ["https://ok-a.test/", blocked, "https://ok-b.test/"], model="m"
+    )
+
+    assert [url for url, _ in batch.results] == ["https://ok-a.test/", "https://ok-b.test/"]
+    assert len(batch.records) == 2
+    assert [url for url, _ in batch.failures] == [blocked]
+    assert "robots.txt" in batch.failures[0][1]
+    # 使用者看得到那一行，不是只有日誌裡有。
+    assert any(blocked in note for note in batch.notes())
+
+
+def test_cancelling_a_batch_stops_it_rather_than_recording_a_failure(
+    provider, fetcher, tmp_config
+):
+    """取消不是「這個網站失敗了」，它要整批停下來。"""
+    event = threading.Event()
+    event.set()
+
+    with pytest.raises(ExtractCancelled):
+        AIController().extract_urls(
+            ["https://a.test/", "https://b.test/"], model="m", cancel_event=event
+        )
+
+    assert fetcher.asked == []
+
+
+def test_cancelling_after_the_first_site_leaves_the_rest_untouched(
+    provider, tmp_config, monkeypatch
+):
+    """按下取消之後，還沒輪到的那些網站一個都不會被請求。
+
+    這一條要用「抓完第一個才按下去」的方式驗，不能只驗「按了才開始」——真正
+    會被使用者按到的時機就是抓到一半，而那時候清單上還有五六個網站等著。
+    """
+    event = threading.Event()
+
+    class _CancelAfterFirst(_FakeFetcher):
+        def fetch(self, url, **kwargs):
+            result = super().fetch(url, **kwargs)
+            event.set()          # 第一個抓完的當下，使用者按了取消
+            return result
+
+    fetcher = _CancelAfterFirst()
+    monkeypatch.setattr("crawler.fetcher.build_fetcher", lambda *a, **k: fetcher)
+    provider.reply = "[]"
+
+    with pytest.raises(ExtractCancelled):
+        AIController().extract_urls(
+            ["https://a.test/", "https://b.test/", "https://c.test/"],
+            model="m",
+            cancel_event=event,
+        )
+
+    assert fetcher.asked == ["https://a.test/"]

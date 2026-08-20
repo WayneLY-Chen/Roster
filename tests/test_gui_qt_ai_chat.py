@@ -1,8 +1,11 @@
-"""Tests for gui_qt/pages/ai_chat.py 的「從網址抓資料」那一半。
+"""Tests for gui_qt/pages/ai_chat.py 的「找網站」與「抓資料」兩半。
 
-守的是**中間那一步不能消失**：抽出來的東西要先變成一張看得見的預覽表格，使用
-者勾掉不要的之後才進得了資料庫。少了它，一個把整排導覽選單當成公司名稱的模型
-可以在三秒內灌兩百筆垃圾進名單。
+守的是**中間那兩道確認不能消失**：
+
+* 搜到的候選網站要先變成一張看得見的清單，使用者勾完按下去才真的去抓。少了
+  它，一個關鍵字會安靜地展開成幾十個網站、幾百次請求。
+* 抽出來的資料要先變成一張看得見的預覽表格，勾掉不要的之後才進得了資料庫。
+  少了它，一個把整排導覽選單當成公司名稱的模型可以在三秒內灌兩百筆垃圾進名單。
 
 跟 ``test_gui_qt_import_page.py`` 一樣，資料庫那一段刻意**不**經過真的
 ``QThreadPool`` 執行緒——理由寫在那個檔案的模組說明裡（Python 3.14 + PySide6
@@ -23,7 +26,12 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from ai.extract import DroppedValue, ExtractResult  # noqa: E402
-from controllers.ai import ExtractCancelled, SaveResult  # noqa: E402
+from ai.sites import COMPANY, DIRECTORY, UNRELATED, Candidate, SiteSearchResult  # noqa: E402
+from controllers.ai import (  # noqa: E402
+    BatchExtractResult,
+    ExtractCancelled,
+    SaveResult,
+)
 from core.errors import RobotsDisallowedError  # noqa: E402
 from core.schemas import RawCompany  # noqa: E402
 from gui_qt.pages.ai_chat import AIChatPage  # noqa: E402
@@ -275,3 +283,188 @@ def test_saving_bumps_the_data_version_so_the_companies_page_sees_it(qt_app, db_
 
     assert current_data_version() != before
     assert "新增 2 筆" in page.extract_status.text()
+
+# ------------------------------------------------------------ 用關鍵字找網站
+#
+# 守的是藍圖裡那一條：**AI 不能自己決定就開始大量請求。** 候選清單一定要
+# 使用者確認過才動手——所以這一段測的都是「按下去之前什麼都沒發生」。
+
+
+CANDIDATES = (
+    Candidate(
+        url="https://directory.test/members",
+        title="某某公會 會員名錄",
+        kind=DIRECTORY,
+        reason="公會的會員名冊，一頁很多家",
+    ),
+    Candidate(
+        url="https://example-cnc.test/",
+        title="精展機械股份有限公司",
+        kind=COMPANY,
+        reason="看起來是單一公司官網",
+    ),
+    Candidate(
+        url="https://news.test/story",
+        title="產業新聞",
+        kind=UNRELATED,
+        reason="新聞報導，沒有名單",
+    ),
+)
+
+
+def _sites(*candidates: Candidate, **kwargs) -> SiteSearchResult:
+    items = list(candidates) or list(CANDIDATES)
+    kwargs.setdefault("found", len(items))
+    return SiteSearchResult(query="台中 CNC 加工", candidates=items, **kwargs)
+
+
+def test_a_blank_keyword_does_not_start_a_search(qt_app, db_session):
+    page = _page(qt_app)
+    page.query_input.setText("   ")
+    page._find()
+
+    assert not page.sites_task.running
+    assert page.app.messages[-1][1] == "warning"
+
+
+def test_only_the_useful_kinds_are_ticked_by_default(qt_app, db_session):
+    """預設全勾的話，模型判斷失準的那幾筆會安靜地變成真的請求。
+
+    「不相關」那一筆仍然列出來、仍然勾得動——只是要使用者自己動手。
+    """
+    page = _page(qt_app)
+    page._on_sites_found(_sites())
+
+    assert page.sites_table.row_count() == 3
+    ticked = [row["url"] for row in page.sites_table.checked_rows()]
+    assert ticked == ["https://directory.test/members", "https://example-cnc.test/"]
+    assert page.crawl_button.isEnabled()
+
+
+def test_the_model_reason_is_shown_next_to_each_site(qt_app, db_session):
+    """那是模型的說法，不是查證過的事實——所以它要擺在使用者眼前。"""
+    page = _page(qt_app)
+    page._on_sites_found(_sites())
+
+    assert page.sites_table.model.row_at(0)["reason"] == "公會的會員名冊，一頁很多家"
+    assert page.sites_table.model.row_at(0)["kind"] == "名錄"
+
+
+def test_finding_sites_does_not_start_crawling_by_itself(qt_app, db_session, monkeypatch):
+    """**這一條是藍圖裡不能妥協的那一條。**
+
+    候選清單出來之後，程式停在這裡等使用者。它不會順手把勾起來的網站抓下去。
+    """
+    started = []
+    page = _page(qt_app)
+    monkeypatch.setattr(page.crawl_task, "start", lambda *a: started.append(a))
+
+    page._on_sites_found(_sites())
+
+    assert started == []
+    assert page.preview.row_count() == 0
+
+
+def test_only_the_ticked_sites_get_crawled(qt_app, db_session, monkeypatch):
+    page = _page(qt_app)
+    page._on_sites_found(_sites())
+    page.sites_table.model.row_at(1)[CHECK_KEY] = False   # 取消那家單一公司
+
+    started = []
+    monkeypatch.setattr(page.crawl_task, "start", lambda urls, model: started.append(urls))
+    page._crawl_checked()
+
+    assert started == [["https://directory.test/members"]]
+
+
+def test_unticking_everything_says_so_instead_of_crawling(qt_app, db_session, monkeypatch):
+    page = _page(qt_app)
+    page._on_sites_found(_sites())
+    page.sites_table.set_all_checked(False)
+
+    started = []
+    monkeypatch.setattr(page.crawl_task, "start", lambda *a: started.append(a))
+    page._crawl_checked()
+
+    assert started == []
+    assert page.app.messages[-1] == ("一個網站都沒有勾", "warning")
+
+
+def test_cancelling_the_search_says_nothing_was_crawled(qt_app, db_session):
+    """使用者要看得出「按取消之後，那些網站一個都沒有被碰到」。"""
+    page = _page(qt_app)
+    page._on_sites_error(ExtractCancelled("已取消。"))
+
+    assert "沒有抓任何網站" in page.sites_status.text()
+    assert page.find_button.isEnabled()
+    assert not page.sites_cancel_button.isEnabled()
+
+
+def test_no_search_results_suggests_what_to_do(qt_app, db_session):
+    page = _page(qt_app)
+    page._on_sites_found(SiteSearchResult(query="找不到的東西", found=0))
+
+    assert page.sites_table.row_count() == 0
+    assert not page.crawl_button.isEnabled()
+    assert "搜不到東西" in page.sites_status.text()
+
+
+# ------------------------------------------------- 一次抓好幾個網站的結果
+
+
+def test_records_from_several_sites_land_in_one_preview_with_their_source(
+    qt_app, db_session
+):
+    """一次抓好幾個網站時，「這一筆是哪個網站來的」是判斷對錯唯一的線索。"""
+    page = _page(qt_app)
+    batch = BatchExtractResult(
+        results=[
+            (
+                "https://directory.test/members",
+                ExtractResult(records=[
+                    RawCompany(
+                        company_name="甲公司",
+                        source="ai",
+                        source_url="https://directory.test/members",
+                    )
+                ]),
+            ),
+            (
+                "https://example-cnc.test/",
+                ExtractResult(records=[
+                    RawCompany(
+                        company_name="乙公司",
+                        source="ai",
+                        source_url="https://www.example-cnc.test/about",
+                    )
+                ]),
+            ),
+        ]
+    )
+    page._on_batch_extracted(batch)
+
+    assert page.preview.row_count() == 2
+    hosts = [page.preview.model.row_at(i)["_host"] for i in range(2)]
+    assert hosts == ["directory.test", "example-cnc.test"]
+    assert page.save_button.isEnabled()
+
+
+def test_a_site_that_could_not_be_fetched_is_named(qt_app, db_session):
+    """五個網站裡有一個被擋，使用者需要知道是哪一個。
+
+    只說「抓到 40 筆」的話，他會以為那五個網站都抓過了。
+    """
+    page = _page(qt_app)
+    batch = BatchExtractResult(
+        results=[
+            (
+                "https://ok.test/",
+                ExtractResult(records=[RawCompany(company_name="甲公司", source="ai")]),
+            )
+        ],
+        failures=[("https://blocked.test/", "robots.txt disallows …")],
+    )
+    page._on_batch_extracted(batch)
+
+    assert "https://blocked.test/" in page.dropped_label.text()
+    assert page.preview.row_count() == 1

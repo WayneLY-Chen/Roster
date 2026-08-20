@@ -1,6 +1,9 @@
-"""「AI 助手」頁：貼一個網址讓模型讀，或單純跟它對話。
+"""「AI 助手」頁：從關鍵字或網址把公司抓進名單，或單純跟模型對話。
 
-## 這一頁做兩件事
+## 這一頁做三件事
+
+**用關鍵字找網站**：打「台中 CNC 加工」→ 搜一次（**一個**請求）→ 模型替每一筆
+搜尋結果貼標籤（名錄／單一公司／不相關）→ 列給使用者勾 → 勾完按下去才真的去抓。
 
 **從網址抓資料**：貼上網址 → 程式（不是模型）去抓那一頁 → 模型讀完 → 跳出一張
 預覽表格 → 使用者把不要的勾掉 → 存進名單。
@@ -10,14 +13,17 @@
 請求、模型、比對原文、寫入資料庫好幾層，錯誤訊息會指向錯的地方。有一個「打
 一句話看它回不回」的地方，這一類問題三秒就分辨得出來。
 
-## 為什麼中間一定要有預覽這一步
+## 為什麼中間有兩道確認
 
-模型抽完可以直接寫進資料庫——三秒的事。但一個把整排導覽選單當成公司名稱的
-模型，那三秒會灌進兩百筆垃圾，而清掉它們要花的時間遠比看一眼多。
+**候選清單**：一個關鍵字可以展開成幾十個網站、每個網站幾十頁。那是使用者要
+承擔的頻寬與時間，他得先看到清單、自己勾。模型判斷完之後**不會**自己開始抓。
+
+**預覽表格**：模型抽完可以直接寫進資料庫——三秒的事。但一個把整排導覽選單當成
+公司名稱的模型，那三秒會灌進兩百筆垃圾，而清掉它們要花的時間遠比看一眼多。
 
 表格底下會**誠實地寫出丟掉了什麼**（哪幾個值在原始頁面上找不到、頁面文字有沒有
-被截短），而且點得開看細節。那份清單就是「這個模型在這個網站上可不可信」的證據
-——沒有它，使用者只能憑感覺猜。
+被截短、哪一個網站抓不到），而且點得開看細節。那份清單就是「這個模型在這個網站
+上可不可信」的證據——沒有它，使用者只能憑感覺猜。
 
 ## 串流
 
@@ -27,6 +33,8 @@
 """
 
 from __future__ import annotations
+
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
@@ -46,6 +54,7 @@ from PySide6.QtWidgets import (
 from controllers.ai import (
     AIController,
     AIStatus,
+    BatchExtractResult,
     ChatTurn,
     ExtractCancelled,
     SaveResult,
@@ -54,13 +63,16 @@ from core.errors import AINotConfigured, RobotsDisallowedError
 from gui_qt import theme
 from gui_qt.pages.base import BasePage, bump_data_version
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, Section, WideComboBox, inline_caption
+from gui_qt.widgets import CHECK_KEY, DataTable, Section, WideComboBox, inline_caption
 
-#: 預覽表格的欄位。跟 :data:`ai.extract.EXTRACT_FIELDS` 一對一。
+#: 預覽表格的欄位。前七欄跟 :data:`ai.extract.EXTRACT_FIELDS` 一對一。
 #:
-#: 七欄全部列出來、不挑幾個重要的顯示，是因為這張表的用途就是「讓使用者在存
-#: 進去之前看到即將被存進去的東西」。藏起來的那一欄正好是抽錯的那一欄時，
+#: 七個欄位全部列出來、不挑幾個重要的顯示，是因為這張表的用途就是「讓使用者在
+#: 存進去之前看到即將被存進去的東西」。藏起來的那一欄正好是抽錯的那一欄時，
 #: 他要到「公司資訊」頁才會發現。
+#:
+#: 最後多一欄「來自」：一次抓好幾個網站時，「這一筆是哪個網站來的」是判斷
+#: 「這個網站抓得對不對」唯一的線索。只抓一個網址時它每一列都一樣，那不礙事。
 PREVIEW_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("company_name", "公司名稱", 210),
     ("tax_id", "統一編號", 90),
@@ -69,6 +81,19 @@ PREVIEW_COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("email", "電子信箱", 190),
     ("website", "網址", 160),
     ("address", "地址", 220),
+    ("_host", "來自", 150),
+)
+
+#: 候選網站表格的欄位。
+#:
+#: 「為什麼」那一欄是模型的說法，不是查證過的事實——所以它擺在使用者眼前讓他
+#: 自己判斷，而不是拿來自動篩掉東西。被判定成「不相關」的仍然列出來、仍然勾
+#: 得動，只是預設不勾。
+SITE_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("kind", "類型", 80),
+    ("title", "標題", 250),
+    ("url", "網址", 300),
+    ("reason", "模型為什麼這樣說", 280),
 )
 
 
@@ -89,6 +114,8 @@ class AIChatPage(BasePage):
         #: 上一次抽取的結果。表格上的每一列都對應這裡面的一筆。
         self._extracted: list = []
         self._dropped: list = []
+        #: 上一次「用關鍵字找網站」的候選清單。
+        self._candidates: list = []
 
         self.chat_task = BackgroundTask(
             self,
@@ -102,6 +129,23 @@ class AIChatPage(BasePage):
             self._extract,
             on_progress=self._on_extract_progress,
             on_done=self._on_extracted,
+            on_error=self._on_extract_error,
+        )
+        self.sites_task = BackgroundTask(
+            self,
+            self._find_sites,
+            on_progress=self._on_sites_progress,
+            on_done=self._on_sites_found,
+            on_error=self._on_sites_error,
+        )
+        # 抓候選網站跟抓單一網址走的是同一條抽取流程，但結果不一樣（一個是
+        # BatchExtractResult），而 BackgroundTask 的 worker 是建立時就綁死的，
+        # 所以分成兩個工作而不是同一個。
+        self.crawl_task = BackgroundTask(
+            self,
+            self._crawl_sites,
+            on_progress=self._on_extract_progress,
+            on_done=self._on_batch_extracted,
             on_error=self._on_extract_error,
         )
         self.save_task = BackgroundTask(
@@ -147,6 +191,7 @@ class AIChatPage(BasePage):
         outer.addWidget(scroll, 1)
 
         self._build_status_row(body_column)
+        self._build_sites(body_column)
         self._build_extract(body_column)
         self._build_conversation(body_column)
         self._build_composer(body_column)
@@ -180,6 +225,60 @@ class AIChatPage(BasePage):
         section.body_layout.addWidget(self.privacy_label)
 
         column.addWidget(section)
+
+    def _build_sites(self, column: QVBoxLayout) -> None:
+        section = Section("用關鍵字找網站")
+
+        row = QHBoxLayout()
+        row.addWidget(inline_caption("關鍵字"), 0)
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText("台中 CNC 加工")
+        self.query_input.returnPressed.connect(self._find)
+        row.addWidget(self.query_input, 1)
+        self.find_button = QPushButton("找網站")
+        self.find_button.clicked.connect(self._find)
+        row.addWidget(self.find_button, 0, Qt.AlignmentFlag.AlignBottom)
+        self.sites_cancel_button = QPushButton("取消")
+        self.sites_cancel_button.clicked.connect(self._cancel_sites)
+        self.sites_cancel_button.setEnabled(False)
+        row.addWidget(self.sites_cancel_button, 0, Qt.AlignmentFlag.AlignBottom)
+        section.body_layout.addLayout(row)
+
+        hint = QLabel(
+            "這一步只會送出一次搜尋請求。模型判斷完之後不會自己開始抓——"
+            "候選網站一個都不會被碰到，直到你勾選並按下面那顆按鈕。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        section.body_layout.addWidget(hint)
+
+        self.sites_status = QLabel("")
+        self.sites_status.setObjectName("MutedLabel")
+        self.sites_status.setWordWrap(True)
+        section.body_layout.addWidget(self.sites_status)
+
+        self.sites_table = DataTable(SITE_COLUMNS, min_rows=4, checkable=True)
+        section.body_layout.addWidget(self.sites_table)
+
+        buttons = QHBoxLayout()
+        self.crawl_button = QPushButton("抓勾起來的網站")
+        self.crawl_button.clicked.connect(self._crawl_checked)
+        self.crawl_button.setEnabled(False)
+        buttons.addWidget(self.crawl_button)
+        self.sites_check_all_button = QPushButton("全部勾選")
+        self.sites_check_all_button.clicked.connect(
+            lambda: self.sites_table.set_all_checked(True)
+        )
+        buttons.addWidget(self.sites_check_all_button)
+        self.sites_uncheck_all_button = QPushButton("全部取消")
+        self.sites_uncheck_all_button.clicked.connect(
+            lambda: self.sites_table.set_all_checked(False)
+        )
+        buttons.addWidget(self.sites_uncheck_all_button)
+        buttons.addStretch(1)
+        section.body_layout.addLayout(buttons)
+
+        column.addWidget(section, 1)
 
     def _build_extract(self, column: QVBoxLayout) -> None:
         section = Section("從網址抓資料")
@@ -357,6 +456,139 @@ class AIChatPage(BasePage):
         self.reload_button.setEnabled(True)
         self.report_error(exc)
 
+    # ------------------------------------------------------------ 找網站
+
+    def _find(self) -> None:
+        if self.sites_task.running or self.crawl_task.running:
+            self.status("還在忙，等它結束", "warning")
+            return
+        query = self.query_input.text().strip()
+        if not query:
+            self.status("先打一個關鍵字，例如「台中 CNC 加工」", "warning")
+            return
+
+        self.sites_table.clear()
+        self._candidates = []
+        self.crawl_button.setEnabled(False)
+        self.find_button.setEnabled(False)
+        self.sites_cancel_button.setEnabled(True)
+        self.sites_status.setText("準備搜尋…")
+        self.sites_task.start(query, self.model_combo.currentText().strip() or None)
+
+    def _cancel_sites(self) -> None:
+        """一顆取消管兩件事：搜尋中就停搜尋，抓取中就停抓取。
+
+        使用者不在乎現在跑的是哪一個工作，他按的是「停」。
+        """
+        self.sites_task.cancel()
+        self.crawl_task.cancel()
+        self.sites_status.setText("正在停下來…")
+
+    def _find_sites(self, query: str, model: str | None, *, report, cancel_event):
+        """在背景執行緒裡跑：搜一次 → 交給模型貼標籤。不抓任何候選網站。"""
+        return self.controller.find_sites(
+            query, model=model, report=report, cancel_event=cancel_event
+        )
+
+    def _on_sites_progress(self, message: object) -> None:
+        self.sites_status.setText(str(message))
+
+    def _on_sites_found(self, result) -> None:
+        self.find_button.setEnabled(True)
+        self.sites_cancel_button.setEnabled(False)
+        self._candidates = list(result.candidates)
+
+        rows = [
+            {
+                "kind": candidate.kind_label,
+                "title": candidate.title,
+                "url": candidate.url,
+                "reason": candidate.reason,
+                "_index": index,
+                # 只有模型說「名錄」或「單一公司」的預設勾起來。判斷失準的
+                # 那幾筆要他自己動手勾，才不會安靜地變成真的請求。
+                CHECK_KEY: candidate.worth_crawling,
+            }
+            for index, candidate in enumerate(self._candidates)
+        ]
+        self.sites_table.set_rows(rows)
+        self.crawl_button.setEnabled(bool(rows))
+
+        if not rows:
+            self.sites_status.setText(
+                "搜不到東西。換個關鍵字試試，或直接在下面貼一個網址。"
+            )
+            self.status("搜不到東西", "warning")
+            return
+
+        self.sites_status.setText(
+            "　".join(result.notes()) + "　勾好之後按「抓勾起來的網站」。"
+        )
+        self.status(f"找到 {len(result.worth_crawling)} 個值得抓的網站", "success")
+
+    def _on_sites_error(self, exc: Exception) -> None:
+        self.find_button.setEnabled(True)
+        self.sites_cancel_button.setEnabled(False)
+
+        if isinstance(exc, ExtractCancelled):
+            # 重點在後半句：候選網站一個都沒有被碰到。
+            self.sites_status.setText("已取消，沒有抓任何網站。")
+            self.status("已取消", "warning")
+            return
+        if isinstance(exc, AINotConfigured):
+            self.sites_status.setText("")
+            QMessageBox.information(self, "還沒設定好 AI", str(exc))
+            self.refresh()
+            return
+
+        self.sites_status.setText(f"搜尋失敗：{exc}")
+        self.report_error(exc)
+
+    def _crawl_checked(self) -> None:
+        if self.crawl_task.running or self.extract_task.running:
+            self.status("還在抓，等它結束", "warning")
+            return
+        urls = [
+            self._candidates[row["_index"]].url
+            for row in self.sites_table.checked_rows()
+            if "_index" in row
+        ]
+        if not urls:
+            self.status("一個網站都沒有勾", "warning")
+            return
+
+        self.preview.clear()
+        self._extracted = []
+        self._dropped = []
+        self.dropped_label.hide()
+        self.dropped_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.crawl_button.setEnabled(False)
+        self.find_button.setEnabled(False)
+        self.sites_cancel_button.setEnabled(True)
+        self.extract_status.setText(f"準備抓 {len(urls)} 個網站…")
+        self.crawl_task.start(urls, self.model_combo.currentText().strip() or None)
+
+    def _crawl_sites(self, urls, model: str | None, *, report, cancel_event):
+        """在背景執行緒裡跑：勾起來的每一個網址各抓一次。"""
+        return self.controller.extract_urls(
+            urls, model=model, report=report, cancel_event=cancel_event
+        )
+
+    def _on_batch_extracted(self, batch: BatchExtractResult) -> None:
+        self.find_button.setEnabled(True)
+        self.crawl_button.setEnabled(bool(self._candidates))
+        self.sites_cancel_button.setEnabled(False)
+        self._show_records(
+            batch.records,
+            batch.dropped,
+            batch.notes(),
+            empty_hint=(
+                "這幾個網站上都沒有抓到公司。可能是頁面內容要 JavaScript 才長"
+                "出來，或它們本來就不是名錄。"
+            ),
+        )
+
     # --------------------------------------------------------------- 抓與抽取
 
     def _fetch(self) -> None:
@@ -397,19 +629,38 @@ class AIChatPage(BasePage):
     def _on_extracted(self, result) -> None:
         self.fetch_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
-        self._extracted = list(result.records)
-        self._dropped = list(result.dropped)
+        self._show_records(
+            result.records,
+            result.dropped,
+            result.notes(),
+            empty_hint=(
+                "這一頁上沒有抓到任何公司。可能是頁面內容要 JavaScript 才長出來，"
+                "或這一頁本來就不是名錄。"
+            ),
+        )
+
+    def _show_records(self, records, dropped, notes, *, empty_hint: str) -> None:
+        """把抽出來的東西填進預覽表格。單一網址與一次抓好幾個網站共用。
+
+        兩條路唯一的差別是那幾句「丟掉了什麼」，其餘完全一樣——分成兩份寫的話，
+        改了一邊忘記另一邊，使用者會看到兩種不一樣的行為。
+        """
+        self._extracted = list(records)
+        self._dropped = list(dropped)
 
         keys = {key for key, _, _ in PREVIEW_COLUMNS}
         rows = [
-            {**record.model_dump(include=keys), "_index": index}
+            {
+                **record.model_dump(include=keys),
+                "_host": _host_of(record.source_url),
+                "_index": index,
+            }
             for index, record in enumerate(self._extracted)
         ]
         self.preview.set_rows(rows)
         self.save_button.setEnabled(bool(rows))
-
-        notes = result.notes()
         self.dropped_button.setEnabled(bool(self._dropped))
+
         if notes:
             self.dropped_label.setText("　".join(notes))
             self.dropped_label.show()
@@ -417,10 +668,7 @@ class AIChatPage(BasePage):
             self.dropped_label.hide()
 
         if not rows:
-            self.extract_status.setText(
-                "這一頁上沒有抓到任何公司。可能是頁面內容要 JavaScript 才長出來，"
-                "或這一頁本來就不是名錄。"
-            )
+            self.extract_status.setText(empty_hint)
             self.status("沒有抓到公司", "warning")
         else:
             self.extract_status.setText(
@@ -431,6 +679,11 @@ class AIChatPage(BasePage):
     def _on_extract_error(self, exc: Exception) -> None:
         self.fetch_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        # 這個處理函式兩條路共用（單一網址與一次抓好幾個網站），所以兩邊的
+        # 按鈕都要放回去——只放回自己那一邊的話，另一邊會永遠停在「不能按」。
+        self.find_button.setEnabled(True)
+        self.crawl_button.setEnabled(bool(self._candidates))
+        self.sites_cancel_button.setEnabled(False)
 
         if isinstance(exc, ExtractCancelled):
             # 他自己按的，不是壞了。跳錯誤視窗會讓人以為按取消把東西弄壞了。
@@ -592,3 +845,12 @@ class AIChatPage(BasePage):
         self.history.clear()
         self._pending = ""
         self.transcript.clear()
+
+
+def _host_of(url: str | None) -> str:
+    """網址取主機名稱，給表格的「來自」欄用。
+
+    整個網址塞進那一格會把欄寬撐爆，而使用者要看的只是「哪個網站」。
+    """
+    host = urlsplit(url or "").netloc
+    return host[4:] if host.startswith("www.") else host

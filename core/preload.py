@@ -45,8 +45,10 @@ log = get_logger(LogCategory.GUI)
 #: 所有會在背景執行緒裡第一次被 import 的模組。來源是 controllers/ 底下
 #: 所有寫在函式內的 import——那些函式都是 BackgroundTask 的 worker。
 WORKER_MODULES: tuple[str, ...] = (
-    # AI 抽取（「AI 助手」頁按「抓這一頁」時才會用到 bs4／lxml）
+    # AI 抽取與找網站（「AI 助手」頁按下去時才會用到 bs4／lxml／httpx）
     "ai.extract",
+    "ai.sites",
+    "crawler.websearch",
     # 爬取
     "crawler.pipeline",
     "crawler.enrich",
