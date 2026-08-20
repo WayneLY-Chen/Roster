@@ -635,6 +635,49 @@ class CompletionSection(_Base):
     auto_after_import_limit: int = Field(default=200, ge=1, le=5000)
 
 
+class AISection(_Base):
+    """語言模型的設定。見 :mod:`ai.provider`。
+
+    這一整段都是選填的。什麼都不設定的話，AI 相關的畫面會顯示「還沒設定」
+    並告訴使用者兩條路怎麼走；程式其餘的功能完全不受影響。
+    """
+
+    #: 用哪一個供應商。``auto`` 是「本機的 Ollama 跑得起來就用它，否則用
+    #: OpenRouter」——本機優先是刻意的，見 :mod:`ai.provider` 的模組說明。
+    provider: Literal["auto", "openrouter", "anthropic", "ollama"] = "auto"
+
+    #: 使用者上次選的模型代號（例如 ``gemma3:12b``）。
+    #:
+    #: 刻意不給預設值，也刻意不寫死任何模型名稱：能用哪些模型完全取決於使用者
+    #: 自己拉了什麼、金鑰能通到什麼。程式該做的是去問對方要清單，不是內建一份
+    #: 會過期的名單。
+    model: str = ""
+
+    #: 本機 Ollama 的位址。裝在別台機器上時改這裡。
+    ollama_url: str = "http://localhost:11434"
+
+    #: 等模型回應的秒數上限。
+    #:
+    #: 預設值偏長是因為本機模型第一次呼叫要把權重載進記憶體，十幾秒到一分鐘
+    #: 都算正常；用連外的服務時通常幾秒就回來了，這個值不會有感覺。
+    timeout_seconds: int = Field(default=120, ge=5, le=1800)
+
+    #: 一次回覆最多產生幾個 token。
+    max_output_tokens: int = Field(default=2048, ge=64, le=32768)
+
+    #: 0 到 2，越高越發散。
+    #:
+    #: 預設值刻意壓得很低：這支程式要模型做的事是「把名錄上的欄位對出來」，
+    #: 那是抄寫不是創作。溫度高一點在這裡的具體後果是模型開始**自己補**看起來
+    #: 合理但不存在的信箱與電話，而那種錯誤在名單裡完全看不出來。
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+
+    #: 使用者自己寫的補充指示，會接在內建的 system prompt 後面。
+    #:
+    #: 內建那一段蓋不掉，見 :func:`ai.prompts.build_system_prompt`。
+    system_prompt: str = ""
+
+
 class ExporterSection(_Base):
     output_dir: str = "./output"
     excel_sheet_name: str = "Companies"
@@ -859,6 +902,7 @@ class AppConfig(_Base):
     crawler: CrawlerSection = Field(default_factory=CrawlerSection)
     verifier: VerifierSection = Field(default_factory=VerifierSection)
     completion: CompletionSection = Field(default_factory=CompletionSection)
+    ai: AISection = Field(default_factory=AISection)
     exporter: ExporterSection = Field(default_factory=ExporterSection)
     backup: BackupSection = Field(default_factory=BackupSection)
     gmail: GmailSection = Field(default_factory=GmailSection)

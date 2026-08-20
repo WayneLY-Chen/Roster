@@ -130,7 +130,7 @@ _IMPORT_TO_PACKAGE = {
 
 #: 專案自己的頂層套件，不是外部相依。
 _LOCAL_PACKAGES = {
-    "app_main", "conftest", "controllers", "core", "crawler", "database",
+    "ai", "app_main", "conftest", "controllers", "core", "crawler", "database",
     "exporter", "gmail", "gui_qt", "main", "tests", "verifier",
 }
 

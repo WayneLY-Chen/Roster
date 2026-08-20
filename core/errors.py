@@ -50,3 +50,15 @@ class GmailError(CRMError):
 
 class BackupError(CRMError):
     """Backup or restore failure."""
+
+
+class AIError(CRMError):
+    """語言模型供應商相關的錯誤（沒設定、連不上、對方回錯）。"""
+
+
+class AINotConfigured(AIError):
+    """選定的供應商還沒有可用的設定——OpenRouter 沒有金鑰、Ollama 連不上。
+
+    跟 :class:`AIError` 分開是因為畫面的反應不一樣：這一種要把使用者帶去
+    設定頁，而不是顯示「發生錯誤」。
+    """

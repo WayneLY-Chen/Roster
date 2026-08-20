@@ -40,6 +40,7 @@ from core.logging_setup import get_logger, setup_logging
 from core.scheduler import CrawlScheduler
 from gui_qt import theme
 from gui_qt.pages.base import BasePage, bump_data_version
+from gui_qt.pages.ai_chat import AIChatPage
 from gui_qt.pages.companies import CompaniesPage
 from gui_qt.pages.contacts import ContactsPage
 from gui_qt.pages.crawler import CrawlerPage
@@ -67,6 +68,7 @@ log = get_logger(LogCategory.GUI)
 #:     export_page.ExportPage     匯出    📤
 #:     mail.MailPage              郵件    ✉
 #:     logs.LogsPage              日誌    📜
+#:     ai_chat.AIChatPage         AI 助手 🤖
 #:     settings.SettingsPage      設定    ⚙️
 #:     feedback.FeedbackPage      反饋    💬
 #:     changelog.ChangelogPage    更新資訊 🆕
@@ -86,6 +88,7 @@ PAGE_CLASSES: tuple[type[BasePage], ...] = (
     ExportPage,
     MailPage,
     LogsPage,
+    AIChatPage,
     SettingsPage,
     FeedbackPage,
     ChangelogPage,

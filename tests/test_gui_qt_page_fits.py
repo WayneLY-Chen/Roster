@@ -32,6 +32,7 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from gui_qt import theme  # noqa: E402
+from gui_qt.pages.ai_chat import AIChatPage  # noqa: E402
 from gui_qt.pages.companies import CompaniesPage  # noqa: E402
 from gui_qt.pages.crawler import CrawlerPage  # noqa: E402
 from gui_qt.pages.export_page import ExportPage  # noqa: E402
@@ -69,6 +70,7 @@ class _FakeApp:
 
 #: 側邊欄選得到的每一個內容頁。
 PAGES = [
+    AIChatPage,
     CompaniesPage,
     CrawlerPage,
     ExportPage,
@@ -141,3 +143,54 @@ def test_page_does_not_demand_more_height_than_a_small_laptop_has(page_class, qt
 # 它沒有捲軸也永遠不會溢出——強迫它包一層只是讓測試看起來比較整齊，實際上
 # 還會多出一條「表格該撐滿還是該捲動」的矛盾。要守的是上面兩條的性質：
 # 東西不能掉出去、而且要留得下字型變大的餘裕。怎麼達成交給頁面自己決定。
+
+
+# ---------------------------------------------- 可編輯下拉的寬度不能自己跳
+
+#: 會被使用者「填滿整列」預期的可編輯下拉：(頁面, 屬性名)。
+EDITABLE_COMBOS = [
+    (AIChatPage, "model_combo"),
+    (SettingsPage, "ai_model_combo"),
+]
+
+
+@pytest.mark.parametrize(
+    ("page_class", "attribute"),
+    EDITABLE_COMBOS,
+    ids=lambda value: value if isinstance(value, str) else value.__name__,
+)
+def test_editable_combo_keeps_its_width_across_a_refresh(
+    page_class, attribute, qt_app, db_session
+):
+    """下拉框的寬度不可以因為重新整理就變一個樣子。
+
+    ``WideComboBox`` 用 ``AdjustToContents`` 量寬度（讓長的產業名稱不會被切
+    掉），但**可編輯**的下拉在清單是空的時候，「內容寬度」只有一個游標那麼
+    寬。它跟版面的伸展係數湊在一起會打架，實測同一頁 build 之後量到 126px、
+    refresh 之後量到 914px，換個呼叫順序又反過來——使用者看到的就是下拉框
+    自己忽大忽小。
+
+    修法是給它 Expanding 的尺寸策略。這條測的是結果：兩次量到的要一樣，而且
+    要真的填滿那一列。
+    """
+    page = _build(page_class, qt_app)
+    try:
+        combo = getattr(page, attribute)
+        before = combo.width()
+        page.refresh()
+        qt_app.processEvents()
+        after = combo.width()
+
+        assert before == after, (
+            f"{page_class.__name__}.{attribute} 的寬度在 refresh 前後不一樣"
+            f"（{before}px -> {after}px），畫面上會看到它自己跳一下"
+        )
+        # 「沒有變」但兩次都是 126px 也不對——它應該填滿那一列。
+        assert after > page.width() // 2, (
+            f"{page_class.__name__}.{attribute} 只有 {after}px，"
+            f"沒有填滿 {page.width()}px 寬的那一列"
+        )
+    finally:
+        page.hide()
+        page.deleteLater()
+        qt_app.processEvents()

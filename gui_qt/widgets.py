@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -390,6 +391,28 @@ class WideComboBox(QComboBox):
         hint = super().minimumSizeHint()
         hint.setWidth(max(hint.width(), self._needed_width()))
         return hint
+
+    def fill_row(self, min_chars: int = 8) -> "WideComboBox":
+        """改成「填滿它在版面裡分到的寬度」，而不是「剛好包住內容」。
+
+        預設的 ``AdjustToContents``（見類別說明）對**篩選用**的下拉是對的：
+        它要隨著選項變長而變寬。但對「輸入或選一個模型代號」這種要填滿整列
+        的欄位，它會跟版面搶著決定寬度，而且兩邊會輪流贏——實測同一頁
+        ``build()`` 之後量到 723px、``refresh()`` 之後變 126px，換個呼叫順序
+        又反過來。使用者看到的是下拉框自己忽大忽小。
+
+        ``AdjustToMinimumContentsLengthWithIcon`` 讓寬度不再從內容推導，
+        版面說了算；``Expanding`` 讓它真的把多的空間吃掉。彈出清單的寬度仍然
+        由 :meth:`showPopup` 負責，所以長的模型代號在展開時照樣看得完整。
+
+        回傳自己，方便 ``combo = WideComboBox().fill_row()`` 這樣接著寫。
+        """
+        self.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.setMinimumContentsLength(min_chars)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        return self
 
     def showPopup(self) -> None:  # noqa: N802 - Qt 的覆寫方法命名
         # 加上捲軸與左右內距的餘裕；不足下拉框本身寬度時就沿用下拉框的寬度。

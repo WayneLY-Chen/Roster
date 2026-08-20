@@ -59,6 +59,7 @@ from core import legal
 from core.credentials import SecretSource, SecretStatus
 from core.errors import CRMError
 from core.i18n import ALL_OPTION, STAGE_LABELS, stage_labels, to_value
+from controllers.ai import AIController
 from controllers.core import SettingsController
 
 # gui.controllers_mail.MailController 是跟 gui.controllers 同一種東西：純資料層
@@ -140,6 +141,7 @@ class SettingsPage(BasePage):
     def __init__(self, app: object) -> None:
         super().__init__(app)
         self.controller = SettingsController()
+        self.ai_controller = AIController()
         self.mail_controller = MailController()
 
         self._refresh_task = BackgroundTask(
@@ -150,6 +152,14 @@ class SettingsPage(BasePage):
             self.controller.test_gmail_connection,
             on_done=self._on_test_connection_done,
             on_error=self._on_test_connection_error,
+        )
+        # 模型清單要連網才拿得到，而 Ollama 沒在跑的時候那是一次逾時等待。
+        # 放背景執行緒，設定頁不會因此卡住。
+        self.ai_models_task = BackgroundTask(
+            self,
+            self.ai_controller.models,
+            on_done=self._on_ai_models_done,
+            on_error=self._on_ai_models_error,
         )
 
     # ------------------------------------------------------------- 建立元件
@@ -196,6 +206,7 @@ class SettingsPage(BasePage):
         self._build_overview_section()
         self._build_encryption_section()
         self._build_search_section()
+        self._build_ai_section()
         self._build_gmail_section()
         self._build_mailer_section()
         self._build_scheduler_section()
@@ -532,6 +543,256 @@ class SettingsPage(BasePage):
             entry.set("")
         self._refresh_search_key_status()
         self.status("搜尋金鑰已清除，補齊資料會改用 DuckDuckGo", "success")
+
+    # --------------------------------------------------------------- AI 模型
+
+    def _build_ai_section(self) -> None:
+        """挑一個語言模型來源，填金鑰，寫自己的補充指示。
+
+        這一整段是選填的：什麼都不設定的話，程式其餘功能完全不受影響，只有
+        「AI 助手」頁會顯示「還沒設定」並說明兩條路怎麼走。
+
+        隱私那一行放在最上面而不是註腳，是因為它是這一頁唯一一個**選錯會有
+        實際後果**的決定：OpenRouter 會把網頁原文與（之後的）公司資料送給
+        第三方，Ollama 不會。使用者有權在按下去之前就知道。
+        """
+        section = Section("AI 模型（選填）")
+
+        intro = QLabel(
+            "讓 AI 幫忙看懂名錄頁面、回答關於名單的問題。兩條路：<br>"
+            "<b>Ollama</b>——模型跑在你自己的電腦上，<b>資料完全不出門</b>，不用錢。"
+            "要先到 <a href=\"https://ollama.com\">ollama.com</a> 安裝，"
+            "然後拉一個模型下來（例如 <code>ollama pull gemma3</code>）。<br>"
+            "<b>OpenRouter</b>——一把金鑰通到幾百個模型，什麼都不用裝。"
+            "但送出去的內容（網頁原文、公司資料）<b>會傳給第三方</b>。"
+            "到 <a href=\"https://openrouter.ai/keys\">openrouter.ai</a> 申請。<br>"
+            "<b>Anthropic API</b>——官方直連。注意這跟 <b>Claude Pro／Max 訂閱是兩回事</b>："
+            "訂閱不含 API 額度，也沒有辦法用訂閱帳號登入這支程式，要另外到 "
+            "<a href=\"https://console.anthropic.com\">console.anthropic.com</a> "
+            "申請金鑰、另外計費。"
+        )
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setOpenExternalLinks(True)
+        intro.setObjectName("MutedLabel")
+        intro.setWordWrap(True)
+        section.body_layout.addWidget(intro)
+
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(caption("使用哪一個"))
+        self.ai_provider_combo = WideComboBox()
+        self._ai_providers = self.ai_controller.provider_options()
+        self.ai_provider_combo.addItems(list(self._ai_providers.values()))
+        current = self.controller.config.ai.provider or "auto"
+        self.ai_provider_combo.setCurrentText(
+            self._ai_providers.get(current, self._ai_providers["auto"])
+        )
+        # 跟這一頁其他下拉一樣：先設好初始值再接訊號，避免把初始化當成一次操作。
+        self.ai_provider_combo.currentTextChanged.connect(self._on_ai_provider_changed)
+        provider_row.addWidget(self.ai_provider_combo, 1)
+        section.body_layout.addLayout(provider_row)
+
+        self.ai_status_label = QLabel("")
+        self.ai_status_label.setWordWrap(True)
+        section.body_layout.addWidget(self.ai_status_label)
+
+        # 模型清單要連網才拿得到，所以是一顆按鈕而不是進頁面就自動抓——
+        # 沒設定的人每次打開設定頁都要等一次連線逾時是不能接受的。
+        model_row = QHBoxLayout()
+        self.ai_model_combo = WideComboBox().fill_row()
+        self.ai_model_combo.setEditable(True)
+        self.ai_model_combo.setPlaceholderText("按右邊「重新整理」取得清單，或直接輸入模型代號")
+        if self.controller.config.ai.model:
+            self.ai_model_combo.setCurrentText(self.controller.config.ai.model)
+        model_row.addWidget(inline_caption("模型"), 0)
+        model_row.addWidget(self.ai_model_combo, 1)
+        self.ai_refresh_button = QPushButton("重新整理")
+        self.ai_refresh_button.clicked.connect(self._refresh_ai_models)
+        model_row.addWidget(self.ai_refresh_button, 0, Qt.AlignmentFlag.AlignBottom)
+        self.ai_save_model_button = QPushButton("記住這個模型")
+        self.ai_save_model_button.clicked.connect(self._save_ai_model)
+        model_row.addWidget(self.ai_save_model_button, 0, Qt.AlignmentFlag.AlignBottom)
+        section.body_layout.addLayout(model_row)
+
+        key_row = QHBoxLayout()
+        self.openrouter_key_entry = LabeledEntry("OpenRouter 金鑰", placeholder="選填")
+        self.openrouter_key_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
+        key_row.addWidget(self.openrouter_key_entry, 1)
+        self.anthropic_key_entry = LabeledEntry("Anthropic 金鑰", placeholder="選填")
+        self.anthropic_key_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
+        key_row.addWidget(self.anthropic_key_entry, 1)
+        section.body_layout.addLayout(key_row)
+
+        key_buttons = QHBoxLayout()
+        self.save_ai_key_button = QPushButton("儲存到系統")
+        self.save_ai_key_button.clicked.connect(self._save_ai_key)
+        if not self.controller.keyring_available():
+            self.save_ai_key_button.setEnabled(False)
+        key_buttons.addWidget(self.save_ai_key_button)
+        clear_ai_key_button = QPushButton("清除")
+        clear_ai_key_button.clicked.connect(self._clear_ai_key)
+        key_buttons.addWidget(clear_ai_key_button)
+        key_buttons.addStretch(1)
+        section.body_layout.addLayout(key_buttons)
+
+        section.body_layout.addWidget(caption("你的補充指示（選填）"))
+        self.ai_prompt_box = QPlainTextEdit()
+        self.ai_prompt_box.setPlainText(self.controller.config.ai.system_prompt or "")
+        self.ai_prompt_box.setPlaceholderText(
+            "例如：我只做工具機產業，抓資料時優先看「產品」欄有沒有提到 CNC。"
+        )
+        self.ai_prompt_box.setFixedHeight(theme.text_box_height(4))
+        section.body_layout.addWidget(self.ai_prompt_box)
+
+        prompt_buttons = QHBoxLayout()
+        save_prompt_button = QPushButton("儲存指示")
+        save_prompt_button.clicked.connect(self._save_ai_prompt)
+        prompt_buttons.addWidget(save_prompt_button)
+        view_prompt_button = QPushButton("看完整的指示")
+        view_prompt_button.clicked.connect(self._show_ai_prompt)
+        prompt_buttons.addWidget(view_prompt_button)
+        prompt_buttons.addStretch(1)
+        section.body_layout.addLayout(prompt_buttons)
+
+        note = QLabel(
+            "你寫的指示會接在程式內建的那一段<b>後面</b>，內建的部分蓋不掉——"
+            "包含「不要編造資料」「不要幫忙繞過網站的存取限制」這幾條。"
+            "按「看完整的指示」可以看到實際送出去的全文。<br>"
+            "金鑰跟 Gmail 密碼一樣存在作業系統的憑證保管庫，不會寫進這個資料夾"
+            "裡的任何檔案。"
+        )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
+
+        self._refresh_ai_status()
+        self._body_layout.addWidget(section)
+
+    def _refresh_ai_status(self) -> None:
+        """哪幾個來源現在可用，以及實際會走哪一個。"""
+        # 每一個來源各佔一行，而不是全部串成一長條：三個來源接起來會超過欄寬
+        # 而換行，換行的位置又不會落在分隔符號上，讀起來像亂碼。
+        lines = [
+            f"{status.label}：{'可用' if status.configured else '未設定'}"
+            f"（{status.detail}）"
+            for status in self.ai_controller.statuses()
+        ]
+        lines.append(f"目前會使用：{self.ai_controller.active_provider_label()}")
+        if self.ai_controller.ready() and self.ai_controller.sends_data_off_device():
+            lines.append("⚠ 這個來源會把內容送到你的電腦以外。")
+        self.ai_status_label.setText("\n".join(lines))
+
+    def _on_ai_provider_changed(self, text: str) -> None:
+        name = next(
+            (key for key, label in self._ai_providers.items() if label == text), "auto"
+        )
+        try:
+            self.ai_controller.remember_choice(name, self.controller.config.ai.model)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.controller.config = self.ai_controller.config
+        self._refresh_ai_status()
+
+    def _refresh_ai_models(self) -> None:
+        """跟供應商要清單。會連網，所以走背景執行緒。"""
+        self.ai_refresh_button.setEnabled(False)
+        self.ai_models_task.start()
+
+    def _on_ai_models_done(self, models) -> None:
+        self.ai_refresh_button.setEnabled(True)
+        previous = self.ai_model_combo.currentText().strip()
+        self.ai_model_combo.clear()
+        self.ai_model_combo.addItems([model.id for model in models])
+        if previous:
+            self.ai_model_combo.setCurrentText(previous)
+        self.status(f"找到 {len(models)} 個可用模型", "success")
+
+    def _on_ai_models_error(self, exc: Exception) -> None:
+        self.ai_refresh_button.setEnabled(True)
+        self.report_error(exc)
+
+    def _save_ai_model(self) -> None:
+        model_id = self.ai_model_combo.currentText().strip()
+        if not model_id:
+            self.status("還沒有選模型", "warning")
+            return
+        name = next(
+            (
+                key
+                for key, label in self._ai_providers.items()
+                if label == self.ai_provider_combo.currentText()
+            ),
+            "auto",
+        )
+        try:
+            self.ai_controller.remember_choice(name, model_id)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.controller.config = self.ai_controller.config
+        self._refresh_ai_status()
+        self.status(f"之後會使用 {model_id}", "success")
+
+    def _save_ai_key(self) -> None:
+        """空白一律不動，理由跟搜尋金鑰那一段一樣（金鑰不會被讀回畫面上）。"""
+        from ai.provider import ANTHROPIC_KEY_SECRET, OPENROUTER_KEY_SECRET
+
+        pending = {
+            OPENROUTER_KEY_SECRET: self.openrouter_key_entry.get().strip(),
+            ANTHROPIC_KEY_SECRET: self.anthropic_key_entry.get().strip(),
+        }
+        filled = {name: value for name, value in pending.items() if value}
+        if not filled:
+            self.status("沒有填入任何金鑰，沒有變更", "warning")
+            return
+        try:
+            for name, value in filled.items():
+                self.controller.save_credential(name, value)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        for entry in (self.openrouter_key_entry, self.anthropic_key_entry):
+            entry.set("")
+        self._refresh_ai_status()
+        self.status("金鑰已存進系統憑證保管庫", "success")
+
+    def _clear_ai_key(self) -> None:
+        from ai.provider import ANTHROPIC_KEY_SECRET, OPENROUTER_KEY_SECRET
+
+        for name in (OPENROUTER_KEY_SECRET, ANTHROPIC_KEY_SECRET):
+            self.controller.delete_credential(name)
+        for entry in (self.openrouter_key_entry, self.anthropic_key_entry):
+            entry.set("")
+        self._refresh_ai_status()
+        self.status("AI 金鑰已清除", "success")
+
+    def _save_ai_prompt(self) -> None:
+        try:
+            self.ai_controller.remember_prompt(self.ai_prompt_box.toPlainText().strip())
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.controller.config = self.ai_controller.config
+        self.status("補充指示已儲存", "success")
+
+    def _show_ai_prompt(self) -> None:
+        """把實際會送出去的全文攤開。
+
+        使用者有權看到程式用他的名義對模型說了什麼——尤其是那幾條他改不掉的。
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("實際送出去的指示")
+        dialog.resize(720, 560)
+        layout = QVBoxLayout(dialog)
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(self.ai_controller.system_prompt())
+        layout.addWidget(box)
+        close_button = QPushButton("關閉")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec()
 
     def _build_gmail_section(self) -> None:
         section = Section("Gmail 帳號")

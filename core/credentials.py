@@ -52,6 +52,11 @@ SECRET_ENV_VARS: dict[str, str] = {
     "brave_search_key": "BRAVE_SEARCH_KEY",
     "google_search_key": "GOOGLE_SEARCH_KEY",
     "google_search_cx": "GOOGLE_SEARCH_CX",
+    # OpenRouter 的金鑰。選填——不填就只能用本機的 Ollama，見 ai/provider.py。
+    "openrouter_key": "OPENROUTER_API_KEY",
+    # Anthropic 官方 API 的金鑰。注意這跟 Claude 的訂閱方案是兩回事，
+    # 帳單也是分開的——見 ai/provider.py 的 AnthropicProvider 說明。
+    "anthropic_key": "ANTHROPIC_API_KEY",
 }
 
 try:  # pragma: no cover - 取決於執行環境
