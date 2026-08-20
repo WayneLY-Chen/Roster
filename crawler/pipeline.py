@@ -357,7 +357,7 @@ class CrawlPipeline:
                     _apply_default_industry(batch.records, source_config.default_industry)
                     _keep_only(batch.records, self._fields_for(source_config))
                     # getattr：測試裡的來源替身不是 BaseSource 的子類。
-                    self._store_page(
+                    store_records(
                         batch.records, repo, cleaner, summary,
                         getattr(source, "known", None),
                     )
@@ -428,67 +428,72 @@ class CrawlPipeline:
         )
         return summary
 
-    @staticmethod
-    def _store_page(
-        records: Iterable[RawCompany],
-        repo: CompanyRepository,
-        cleaner: CleaningService,
-        summary: CrawlSummary,
-        known: KnownCompanies | None = None,
-    ) -> None:
-        """Dedupe within the page, clean, then upsert each record.
 
-        ``known`` 裡的公司連 upsert 都不做。這不只是省事——**少了這一段會製造
-        重複資料**：來源那邊已經略過了明細頁，於是這一筆手上只剩公司名稱，
-        ``dedupe_key`` 從 ``mail:a@example.test`` 掉回 ``n:<名稱>``，而
-        :meth:`~database.repository.CompanyRepository.find_match` 沒辦法把一個
-        只有名字的新記錄接回一個已經有信箱的舊記錄——它會當成新公司插進去。
-        第二次爬同一個名錄就會把整份資料再存一遍。
+def store_records(
+    records: Iterable[RawCompany],
+    repo: CompanyRepository,
+    cleaner: CleaningService,
+    summary: CrawlSummary,
+    known: KnownCompanies | None = None,
+) -> None:
+    """Dedupe within the page, clean, then upsert each record.
 
-        直接不存就沒有這個問題，而且那本來就是使用者要的：已經有了就略過。
-        """
-        records = list(records)
-        unique, dropped_in_page = deduplicate_batch(records)
-        summary.records_duplicate += dropped_in_page
+    這是**唯一**一條把 :class:`~core.schemas.RawCompany` 寫進資料庫的路。爬取
+    以外的來源（「AI 助手」頁的抽取，見 :mod:`controllers.ai`）也走這裡，而
+    不是自己再寫一套 upsert——去重規則、清理規則、「已經有了就略過」的判斷
+    只該有一份，兩份遲早會長得不一樣，而不一樣的那一天沒有人會發現。
 
-        cleaned, dropped = cleaner.clean_batch(unique)
-        summary.records_invalid += len(dropped)
+    ``known`` 裡的公司連 upsert 都不做。這不只是省事——**少了這一段會製造
+    重複資料**：來源那邊已經略過了明細頁，於是這一筆手上只剩公司名稱，
+    ``dedupe_key`` 從 ``mail:a@example.test`` 掉回 ``n:<名稱>``，而
+    :meth:`~database.repository.CompanyRepository.find_match` 沒辦法把一個
+    只有名字的新記錄接回一個已經有信箱的舊記錄——它會當成新公司插進去。
+    第二次爬同一個名錄就會把整份資料再存一遍。
 
-        if dropped:
-            # 被丟掉的**那幾筆的公司名稱欄長什麼樣**，就是「選擇器指到了什麼
-            # 位置」最直接的證據。以前這裡只把數字加一加，使用者看到的是
-            # 「拒絕 21」，完全不知道被丟掉的是什麼、為什麼。
-            #
-            # 一筆都沒留下來跟只丟掉幾筆是兩件事：前者代表整個抓錯位置（要
-            # 重新分析），後者常常是正常的（同一頁上混著表頭、分類代號）。
-            # 所以講法不一樣，嚴重度也不一樣。
-            names = ", ".join(
-                repr((record.company_name or "").strip()[:24]) for record in dropped[:5]
+    直接不存就沒有這個問題，而且那本來就是使用者要的：已經有了就略過。
+    """
+    records = list(records)
+    unique, dropped_in_page = deduplicate_batch(records)
+    summary.records_duplicate += dropped_in_page
+
+    cleaned, dropped = cleaner.clean_batch(unique)
+    summary.records_invalid += len(dropped)
+
+    if dropped:
+        # 被丟掉的**那幾筆的公司名稱欄長什麼樣**，就是「選擇器指到了什麼
+        # 位置」最直接的證據。以前這裡只把數字加一加，使用者看到的是
+        # 「拒絕 21」，完全不知道被丟掉的是什麼、為什麼。
+        #
+        # 一筆都沒留下來跟只丟掉幾筆是兩件事：前者代表整個抓錯位置（要
+        # 重新分析），後者常常是正常的（同一頁上混著表頭、分類代號）。
+        # 所以講法不一樣，嚴重度也不一樣。
+        names = ", ".join(
+            repr((record.company_name or "").strip()[:24]) for record in dropped[:5]
+        )
+        more = f"…等 {len(dropped)} 筆" if len(dropped) > 5 else ""
+        if not cleaned:
+            log.warning(
+                "這一頁的 {} 筆全部不是公司資料，被丟掉了。"
+                "「公司名稱」抓到的是：{}{}",
+                len(dropped), names, more,
             )
-            more = f"…等 {len(dropped)} 筆" if len(dropped) > 5 else ""
-            if not cleaned:
-                log.warning(
-                    "這一頁的 {} 筆全部不是公司資料，被丟掉了。"
-                    "「公司名稱」抓到的是：{}{}",
-                    len(dropped), names, more,
-                )
-            else:
-                log.info(
-                    "這一頁有 {} 筆不是公司資料，被丟掉了（另外 {} 筆有存進去）。"
-                    "被丟掉的「公司名稱」是：{}{}",
-                    len(dropped), len(cleaned), names, more,
-                )
+        else:
+            log.info(
+                "這一頁有 {} 筆不是公司資料，被丟掉了（另外 {} 筆有存進去）。"
+                "被丟掉的「公司名稱」是：{}{}",
+                len(dropped), len(cleaned), names, more,
+            )
 
-        for record in cleaned:
-            if known is not None and known.has(record.company_name, record.tax_id):
-                summary.records_skipped_known += 1
-                continue
-            _, merged = repo.upsert(record)
-            if merged:
-                summary.records_updated += 1
-                summary.records_duplicate += 1
-            else:
-                summary.records_new += 1
+    for record in cleaned:
+        if known is not None and known.has(record.company_name, record.tax_id):
+            summary.records_skipped_known += 1
+            continue
+        _, merged = repo.upsert(record)
+        if merged:
+            summary.records_updated += 1
+            summary.records_duplicate += 1
+        else:
+            summary.records_new += 1
 
 
 def crawl(

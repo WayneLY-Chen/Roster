@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt  # noqa: E402
 
-from gui_qt.widgets import DataTable, DataTableModel, StatCard  # noqa: E402
+from gui_qt.widgets import CHECK_KEY, DataTable, DataTableModel, StatCard  # noqa: E402
 
 COLUMNS = [("name", "名稱", 120), ("count", "數量", 60)]
 
@@ -30,6 +30,75 @@ def qt_app():
 
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+# ------------------------------------------------------------------ 勾選欄
+#
+# 「先預覽再決定要存哪幾筆」那種畫面用的。用選取（反白）表達同一件事的話，
+# 使用者不小心點一下表格就會把幾十筆的選擇清空，而且完全沒有提示。
+
+
+def test_a_plain_table_has_no_checkboxes(qt_app):
+    """既有的頁面一個字都不必改。"""
+    model = DataTableModel(COLUMNS)
+    model.set_rows([{"name": "甲", "count": 1}])
+
+    index = model.index(0, 0)
+    assert model.data(index, Qt.ItemDataRole.CheckStateRole) is None
+    assert not (model.flags(index) & Qt.ItemFlag.ItemIsUserCheckable)
+    # 沒開勾選時「勾起來的列」就是全部——呼叫端不必分兩種寫法。
+    assert len(model.checked_rows()) == 1
+
+
+def test_checkable_rows_start_ticked(qt_app):
+    model = DataTableModel(COLUMNS, checkable=True)
+    model.set_rows([{"name": "甲", "count": 1}, {"name": "乙", "count": 2}])
+
+    assert len(model.checked_rows()) == 2
+    assert model.data(model.index(0, 0), Qt.ItemDataRole.CheckStateRole) == (
+        Qt.CheckState.Checked
+    )
+
+
+def test_clicking_a_checkbox_actually_unticks_it(qt_app):
+    """Qt 送進 setData 的是 int，不是 CheckState。
+
+    拿它直接跟 enum 比會永遠是 False，使用者看到的是「勾了沒反應」——而那種
+    錯不會有任何錯誤訊息。
+    """
+    model = DataTableModel(COLUMNS, checkable=True)
+    model.set_rows([{"name": "甲", "count": 1}, {"name": "乙", "count": 2}])
+
+    index = model.index(1, 0)
+    assert model.setData(index, int(Qt.CheckState.Unchecked.value), Qt.ItemDataRole.CheckStateRole)
+
+    assert [row["name"] for row in model.checked_rows()] == ["甲"]
+    assert model.data(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Unchecked
+
+
+def test_sorting_does_not_move_the_ticks_onto_other_rows(qt_app):
+    """勾選狀態存在列自己的 dict 裡，就是為了這件事。
+
+    另外存一份 list[bool] 的話，排一次序勾選就跑到別人身上——安靜地存錯資料。
+    """
+    model = DataTableModel(COLUMNS, checkable=True)
+    model.set_rows([{"name": "甲", "count": 3}, {"name": "乙", "count": 1}])
+    model.set_all_checked(False)
+    model._rows[0][CHECK_KEY] = True          # 只勾「甲」
+
+    model.sort(1, Qt.SortOrder.AscendingOrder)   # 依數量排序，兩列對調
+
+    assert [row["name"] for row in model.checked_rows()] == ["甲"]
+
+
+def test_set_all_checked_from_the_table_wrapper(qt_app):
+    table = DataTable(COLUMNS, checkable=True)
+    table.set_rows([{"name": "甲", "count": 1}, {"name": "乙", "count": 2}])
+
+    table.set_all_checked(False)
+    assert table.checked_rows() == []
+    table.set_all_checked(True)
+    assert len(table.checked_rows()) == 2
 
 
 # ------------------------------------------------------------- DataTableModel

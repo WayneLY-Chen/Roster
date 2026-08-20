@@ -5,12 +5,25 @@
 
 from __future__ import annotations
 
+import json
+import threading
+from types import SimpleNamespace
+
 import pytest
 
+from ai.extract import EXTRACT_MAX_TOKENS
 from ai.prompts import BASE_SYSTEM_PROMPT
 from ai.provider import ChatMessage
-from controllers.ai import MAX_HISTORY_MESSAGES, AIController, ChatTurn
-from core.errors import AIError
+from controllers.ai import (
+    MAX_HISTORY_MESSAGES,
+    AIController,
+    ChatTurn,
+    ExtractCancelled,
+    SaveResult,
+    normalize_url,
+)
+from core.errors import AIError, RobotsDisallowedError
+from core.schemas import CompanyFilter, RawCompany
 
 
 class _RecordingProvider:
@@ -23,11 +36,17 @@ class _RecordingProvider:
     def __init__(self) -> None:
         self.sent: list[ChatMessage] = []
         self.model: str | None = None
+        self.max_tokens: int | None = None
+        #: 抽取那條路要看回覆內容，聊天那條不在乎。
+        self.reply = "ok"
 
-    def chat(self, messages, model, *, on_chunk=None):
+    def chat(self, messages, model, *, on_chunk=None, max_tokens=None):
         self.sent = list(messages)
         self.model = model
-        return "ok"
+        self.max_tokens = max_tokens
+        if on_chunk is not None:
+            on_chunk(self.reply)
+        return self.reply
 
 
 @pytest.fixture
@@ -112,3 +131,169 @@ def test_sends_data_off_device_defaults_to_true_when_unknown(monkeypatch, tmp_co
 
     monkeypatch.setattr("controllers.ai.get_provider", boom)
     assert AIController().sends_data_off_device() is True
+
+
+# --------------------------------------------------------------- 從網址抽取
+#
+# 這一段守的是這個專案最不能退讓的兩條：
+#
+#   1. 網頁一律由 crawler.fetcher 抓，那一層會先查 robots.txt。模型手上沒有
+#      任何連網的工具，「不要爬被擋掉的網站」不是靠 prompt 請它配合。
+#   2. 模型講的話不算資料來源。每一個值都要回頭在頁面文字裡對得到。
+
+
+class _FakeFetcher:
+    """假的擷取層。記下被要求抓了什麼，回一段固定的 HTML。"""
+
+    def __init__(self, html: str = "<html><body>甲公司 02-1111</body></html>") -> None:
+        self.html = html
+        self.asked: list[str] = []
+
+    def fetch(self, url, **_kwargs):
+        self.asked.append(url)
+        return SimpleNamespace(
+            url=url, status_code=200, html=self.html, raw=b"", ok=True
+        )
+
+    def close(self) -> None: ...
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+@pytest.fixture
+def fetcher(monkeypatch):
+    fake = _FakeFetcher()
+    monkeypatch.setattr("crawler.fetcher.build_fetcher", lambda *a, **k: fake)
+    return fake
+
+
+def test_the_page_is_fetched_before_the_model_ever_sees_it(provider, fetcher, tmp_config):
+    """順序不能顛倒，而且沒有參數可以顛倒它。
+
+    模型看得到的網頁內容，一律是 crawler.fetcher 抓好、已經通過 robots.txt
+    檢查的。這條測的是「它真的走了那一層」。
+    """
+    provider.reply = json.dumps([{"company_name": "甲公司", "phone": "02-1111"}])
+    result = AIController().extract_url("https://example.test/members", model="m")
+
+    assert fetcher.asked == ["https://example.test/members"]
+    assert [r.company_name for r in result.records] == ["甲公司"]
+    assert result.records[0].source_url == "https://example.test/members"
+
+
+def test_robots_disallowed_stops_before_anything_is_sent_to_the_model(
+    provider, monkeypatch, tmp_config
+):
+    """被 robots.txt 擋下來時，不只是「不抓」——連模型都不會被呼叫。
+
+    這件事有成本上的意義（沒有東西可讀就不該付那次 token），但真正的重點是
+    界線畫在能力上：抓不到就是抓不到，沒有第二條路可以拿到那一頁的內容。
+    """
+    class _Blocked:
+        def fetch(self, url, **_k):
+            raise RobotsDisallowedError(url, "Roster/1.0")
+
+        def close(self): ...
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr("crawler.fetcher.build_fetcher", lambda *a, **k: _Blocked())
+
+    with pytest.raises(RobotsDisallowedError):
+        AIController().extract_url("https://blocked.test/x", model="m")
+
+    assert provider.sent == []
+
+
+def test_an_invented_value_never_leaves_the_controller(provider, fetcher, tmp_config):
+    """模型多補了一個頁面上沒有的信箱，它到不了呼叫端。"""
+    provider.reply = json.dumps(
+        [{"company_name": "甲公司", "email": "sales@invented.test"}]
+    )
+    result = AIController().extract_url("https://example.test/", model="m")
+
+    assert result.records[0].email is None
+    assert [d.value for d in result.dropped] == ["sales@invented.test"]
+
+
+def test_cancelling_mid_stream_raises_its_own_error(provider, fetcher, tmp_config):
+    """使用者按取消不是「壞掉了」，畫面要分得出來。"""
+    event = threading.Event()
+    event.set()
+
+    with pytest.raises(ExtractCancelled):
+        AIController().extract_url("https://example.test/", model="m", cancel_event=event)
+
+
+def test_extraction_asks_for_more_output_room_than_a_chat_reply(
+    provider, fetcher, tmp_config
+):
+    """聊天的 2048 token 是「一段回話」的長度，一頁名錄的 JSON 遠比它長。
+
+    用同一個數字的話 JSON 會在中間被切斷，而切斷的 JSON 解析失敗——使用者
+    付了錢卻什麼都沒拿到。
+    """
+    provider.reply = "[]"
+    AIController().extract_url("https://example.test/", model="m")
+
+    assert provider.max_tokens == EXTRACT_MAX_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ("https://example.test/x", "https://example.test/x"),
+        ("  http://example.test  ", "http://example.test"),
+        # 從網址列複製常常只複製到主機名稱，為了這件事把人擋下來很沒有必要。
+        ("example.com.tw/members", "https://example.com.tw/members"),
+    ],
+)
+def test_normalize_url_accepts_what_people_actually_paste(typed, expected):
+    assert normalize_url(typed) == expected
+
+
+@pytest.mark.parametrize("typed", ["", "   ", "這不是網址", "ftp://example.test/x"])
+def test_normalize_url_rejects_things_that_are_not_web_addresses(typed):
+    with pytest.raises(AIError):
+        normalize_url(typed)
+
+
+def test_saving_goes_through_the_one_shared_write_path(tmp_config, db_session):
+    """去重、清理、upsert 的規則只該有一份。
+
+    這裡不驗證那些規則本身（它們有自己的測試），驗證的是「AI 這條路真的走了
+    那一份」——所以連 dedupe_key 都要跟爬取存進去的長得一樣。
+    """
+    from database.repository import CompanyRepository
+
+    records = [
+        RawCompany(
+            company_name="大安精密工業股份有限公司",
+            email="Sales@Daan.test",
+            source="ai",
+            source_url="https://example.test/",
+        ),
+        # 同一家，只是名稱寫法不同——這一批自己內部就該先併掉。
+        RawCompany(company_name="大安精密工業", email="sales@daan.test", source="ai"),
+    ]
+    result = AIController().save_records(records)
+
+    assert result.new == 1
+    assert result.duplicate == 1
+
+    stored = CompanyRepository(db_session).search(CompanyFilter())
+    assert [c.company_name for c in stored] == ["大安精密工業股份有限公司"]
+    # 清理層有跑過：信箱被正規化成小寫。
+    assert stored[0].email == "sales@daan.test"
+
+
+def test_saving_nothing_does_not_touch_the_database(tmp_config):
+    assert AIController().save_records([]) == SaveResult()

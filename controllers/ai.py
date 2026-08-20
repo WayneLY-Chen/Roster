@@ -3,13 +3,21 @@
 跟其他 controller 一樣：畫面不直接 import :mod:`ai.provider`，也不自己組
 訊息串。這裡負責把「一段對話」翻成供應商要的東西，並且**保證 system prompt
 一定在最前面**——那件事不能交給畫面去記得做。
+
+抽取那條路（:meth:`AIController.extract_url`）多守一件事：**網頁一律由
+:mod:`crawler.fetcher` 抓**，而不是由模型。那一層才有 robots.txt 檢查與請求
+間隔，理由見 :mod:`ai.prompts`。這裡把兩邊接起來，順序永遠是「先抓，再給模型
+讀」——沒有任何參數可以顛倒它。
 """
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
+from ai.extract import AI_SOURCE, ExtractResult
 from ai.prompts import build_system_prompt
 from ai.provider import (
     ChatMessage,
@@ -23,6 +31,7 @@ from ai.provider import (
 )
 from core.config import AppConfig, get_config, save_user_settings
 from core.errors import AIError
+from core.schemas import RawCompany
 
 #: 一次帶幾則歷史訊息給模型。
 #:
@@ -30,6 +39,60 @@ from core.errors import AIError
 #: 超過模型的上下文長度時對方會直接回錯誤，而不是自己截斷。20 則大約是十輪
 #: 來回，聊天情境下夠用；真的需要更長的脈絡是另一個功能，不是把這個數字調大。
 MAX_HISTORY_MESSAGES = 20
+
+#: 串流回覆時每收到幾個字回報一次進度。
+#:
+#: 不是每一段都報：串流一段常常只有兩三個字，一頁名錄會產生上萬段，而每一段
+#: 都是一次跨執行緒的 signal 加一次畫面更新。實測那樣會讓抽取進行中的視窗
+#: 明顯變鈍——回報是為了讓使用者知道還活著，不是為了精確。
+_REPORT_EVERY_CHARS = 500
+
+
+class ExtractCancelled(AIError):
+    """使用者自己按了取消。
+
+    要一個專屬的例外，是為了讓畫面分得出「壞掉了」與「他自己停的」——後者不
+    該跳錯誤視窗，那會讓人以為按取消把東西弄壞了。
+    """
+
+
+def normalize_url(url: str) -> str:
+    """把使用者貼進來的東西變成一個抓得動的網址。
+
+    沒寫通訊協定時補上 ``https://``：從網址列複製常常只複製到
+    ``example.com.tw/members``，為了這件事把人擋下來很沒有必要。
+
+    但只在那一段**看起來像主機名稱**時才補。無條件補的話「這不是網址」也會
+    變成一個合法的 URL，然後使用者拿到的是一個 DNS 查不到的錯誤訊息，而不是
+    「你打的不是網址」。有寫通訊協定時就不做這個判斷——那時候他很清楚自己在
+    打什麼，內網主機沒有點也是正常的。
+    """
+    text = (url or "").strip()
+    if not text:
+        raise AIError("先貼一個網址進來。")
+    if "://" not in text:
+        host = text.split("/", 1)[0]
+        if " " in text or "." not in host:
+            raise AIError(
+                f"「{text}」不像一個網址。要的是 https://example.com.tw/… 這種東西。"
+            )
+        text = f"https://{text}"
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise AIError(
+            f"「{url.strip()}」不像一個網址。要的是 https://example.com.tw/… 這種東西。"
+        )
+    return text
+
+
+def _tick(report: Callable[[object], None] | None, message: str) -> None:
+    if report is not None:
+        report(message)
+
+
+def _stop_if_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ExtractCancelled("已取消。")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +118,29 @@ class AIStatus:
     sends_data_off_device: bool
     #: 每個供應商的逐項狀態，設定頁用。
     providers: tuple[ProviderStatus, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SaveResult:
+    """把抽出來的資料存進名單之後的結果。"""
+
+    new: int = 0
+    #: 併進一筆已經存在的公司（補了它缺的欄位）。
+    merged: int = 0
+    #: 這一批自己內部的重複，連 upsert 都沒送。
+    duplicate: int = 0
+    #: 清理階段判定不是公司資料而丟掉的。
+    rejected: int = 0
+
+    def describe(self) -> str:
+        parts = [f"新增 {self.new} 筆"]
+        if self.merged:
+            parts.append(f"併進既有的 {self.merged} 筆")
+        if self.duplicate:
+            parts.append(f"這批裡面自己重複 {self.duplicate} 筆")
+        if self.rejected:
+            parts.append(f"{self.rejected} 筆不像公司資料被丟掉")
+        return "，".join(parts)
 
 
 class AIController:
@@ -194,3 +280,119 @@ class AIController:
         messages = [ChatMessage("system", self.system_prompt())]
         messages.extend(ChatMessage(turn.role, turn.content) for turn in recent)
         return provider.chat(messages, chosen, on_chunk=on_chunk)
+
+    # ------------------------------------------------------------ 從網址抽取
+
+    def extract_url(
+        self,
+        url: str,
+        *,
+        model: str | None = None,
+        provider_name: str | None = None,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> ExtractResult:
+        """抓一頁、請模型讀完、把對得回原文的公司交出來。**不寫資料庫。**
+
+        分成「抽取」與「存檔」兩步是刻意的：中間那一步是使用者看預覽表格、
+        把不要的勾掉。少了那一步，一個把整頁導覽選單當成公司名稱的模型可以
+        在三秒內把兩百筆垃圾灌進名單裡，而清掉它們要花的時間遠比看一眼多。
+
+        抓網頁的是 :mod:`crawler.fetcher`，不是模型——robots.txt 被擋下來的話
+        這個方法在**送出任何東西給模型之前**就會丟
+        :class:`~core.errors.RobotsDisallowedError`。
+        """
+        from ai.extract import EXTRACT_MAX_TOKENS, extract_from_html
+        from crawler.fetcher import build_fetcher, decode_bytes
+        from crawler.parser import sniff_declared_encoding
+
+        target = normalize_url(url)
+        provider = get_provider(provider_name or self.config.ai.provider, self.config)
+        chosen = (model or self.config.ai.model or "").strip()
+        if not chosen:
+            raise AIError("還沒有選模型。到「設定」頁的「AI 模型」選一個。")
+
+        _tick(report, f"正在抓 {target} …")
+        _stop_if_cancelled(cancel_event)
+        with build_fetcher(self.config) as fetcher:
+            page = fetcher.fetch(target)
+        if not page.ok:
+            raise AIError(f"抓不到那一頁：對方回了 HTTP {page.status_code}。")
+
+        # 頁面自己宣告的編碼優先於 HTTP 標頭。台灣不少公協會名錄是 Big5 的
+        # 舊站，標頭只寫 text/html 不附 charset，這時整頁中文會變成亂碼——而
+        # 亂碼的公司名稱看起來仍然「有值」，只會安靜地存進一堆看不懂的字。
+        html = page.html
+        declared = sniff_declared_encoding(page.raw) if page.raw else None
+        if declared:
+            html = decode_bytes(page.raw, declared)
+
+        _stop_if_cancelled(cancel_event)
+        _tick(report, "抓到了，正在請模型讀這一頁…")
+
+        def chat(messages: Sequence[ChatMessage]) -> str:
+            received = 0
+            reported = 0
+
+            def on_chunk(piece: str) -> None:
+                nonlocal received, reported
+                # 串流的每一段都是一次「還活著」的證明，也是**唯一**能中途
+                # 停下來的地方：模型回一頁名錄可能要好幾分鐘，等它整段回完
+                # 才看 cancel_event 的話，取消鈕按下去到真的停要等一樣久。
+                _stop_if_cancelled(cancel_event)
+                received += len(piece)
+                if received - reported >= _REPORT_EVERY_CHARS:
+                    reported = received
+                    _tick(report, f"模型正在回覆…（已收到 {received:,} 字）")
+
+            return provider.chat(
+                messages, chosen, on_chunk=on_chunk, max_tokens=EXTRACT_MAX_TOKENS
+            )
+
+        result = extract_from_html(html, page.url or target, chat)
+        _tick(report, f"讀完了，抽到 {len(result.records)} 筆。")
+        return result
+
+    def save_records(
+        self,
+        records: Sequence[RawCompany],
+        *,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SaveResult:
+        """把使用者確認過的那幾筆存進名單。
+
+        走的是爬取那條既有的存檔路徑（:func:`crawler.pipeline.store_records`）
+        ——去重、清理、upsert 的規則只該有一份。這裡不自己寫任何 SQL。
+
+        ``cancel_event`` 收下就不用：整批是一個交易，使用者按過確認之後中途
+        停下來只會留下一半的資料，比讓它做完糟。簽名要收得下是因為
+        :class:`~gui_qt.tasks.BackgroundTask` 一律傳這兩個參數進來。
+        """
+        from core.constants import CrawlStatus
+        from core.schemas import CrawlSummary
+        from crawler.pipeline import store_records
+        from database.repository import CompanyRepository
+        from database.session import session_scope
+        from verifier.mx import MXChecker
+        from verifier.service import CleaningService
+
+        records = list(records)
+        if not records:
+            return SaveResult()
+
+        _tick(report, f"正在存 {len(records)} 筆…")
+        summary = CrawlSummary(source=AI_SOURCE, status=CrawlStatus.RUNNING.value)
+        with session_scope() as session:
+            repo = CompanyRepository(session)
+            mx = MXChecker(self.config, session) if self.config.verifier.check_mx else None
+            store_records(records, repo, CleaningService(self.config, mx), summary)
+
+        # records_duplicate 同時算了「這批自己重複」與「併進既有的」兩種
+        # （見 store_records），兩個都報給使用者會變成同一筆講兩次。
+        return SaveResult(
+            new=summary.records_new,
+            merged=summary.records_updated,
+            duplicate=max(summary.records_duplicate - summary.records_updated, 0),
+            rejected=summary.records_invalid,
+        )

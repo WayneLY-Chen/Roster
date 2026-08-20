@@ -165,11 +165,17 @@ class BaseProvider(ABC):
         model: str,
         *,
         on_chunk: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """送一輪對話，回傳助手的完整回覆。
 
         給了 ``on_chunk`` 就用串流，每收到一段就呼叫一次——聊天畫面靠它做到
         「字一個一個浮出來」，而不是轉圈轉三十秒然後整段跳出來。
+
+        ``max_tokens`` 蓋掉設定裡的 ``ai.max_output_tokens``。有這個參數是
+        因為那個設定是「一段回話」的長度（預設 2048），而抽取一頁名錄要回
+        的 JSON 遠比一段回話長——用同一個數字的話 JSON 會在中間被切斷，而
+        切斷的 JSON 解析失敗，使用者付了錢卻什麼都沒拿到。
         """
 
     # ------------------------------------------------------------- 共用工具
@@ -250,6 +256,7 @@ class OpenRouterProvider(BaseProvider):
         model: str,
         *,
         on_chunk: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         headers = self._headers()
         settings = self.config.ai
@@ -257,7 +264,7 @@ class OpenRouterProvider(BaseProvider):
             "model": model,
             "messages": [m.as_dict() for m in messages],
             "temperature": settings.temperature,
-            "max_tokens": settings.max_output_tokens,
+            "max_tokens": max_tokens or settings.max_output_tokens,
         }
         url = f"{OPENROUTER_BASE}/chat/completions"
         if on_chunk is None:
@@ -361,6 +368,7 @@ class AnthropicProvider(BaseProvider):
         model: str,
         *,
         on_chunk: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         headers = self._headers()
         settings = self.config.ai
@@ -368,7 +376,7 @@ class AnthropicProvider(BaseProvider):
         body: dict = {
             "model": model,
             "messages": conversation,
-            "max_tokens": settings.max_output_tokens,
+            "max_tokens": max_tokens or settings.max_output_tokens,
             "temperature": settings.temperature,
         }
         if system:
@@ -448,6 +456,7 @@ class OllamaProvider(BaseProvider):
         model: str,
         *,
         on_chunk: Callable[[str], None] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         headers = {"Content-Type": "application/json"}
         settings = self.config.ai
@@ -456,7 +465,7 @@ class OllamaProvider(BaseProvider):
             "messages": [m.as_dict() for m in messages],
             "options": {
                 "temperature": settings.temperature,
-                "num_predict": settings.max_output_tokens,
+                "num_predict": max_tokens or settings.max_output_tokens,
             },
             "stream": on_chunk is not None,
         }

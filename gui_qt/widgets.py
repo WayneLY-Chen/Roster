@@ -156,18 +156,37 @@ class StatCard(QFrame):
         return self._hint.text()
 
 
+#: 勾選狀態存在每一列的 dict 裡，用這個 key。
+#:
+#: 為什麼不另外存一份 ``list[bool]``：表格點表頭可以排序，而排序是把
+#: ``self._rows`` 整個重排。另外存的那一份不會跟著排，使用者排一次序就會發現
+#: 勾選跑到別人身上——而且那種錯不會報錯，只會安靜地存錯資料。跟著列走就永遠
+#: 不會對不上。
+CHECK_KEY = "__checked__"
+
+
 class DataTableModel(QAbstractTableModel):
     """:class:`DataTable` 背後的資料模型。列永遠是純 dict，不是 Qt 物件。
 
     ``columns`` 是 ``(key, heading, width)`` 的序列，跟 Tk 版 ``DataTable``
     的參數形狀完全一樣——頁面從 Tk 換成 Qt 時，呼叫 ``set_rows()`` 的方式不必改。
+
+    ``checkable=True`` 時第一欄多一個勾選方塊，預設全部勾起來。給「先預覽再
+    決定要存哪幾筆」那種畫面用：用選取（反白）表達同一件事的話，使用者不小心
+    點一下表格就會把幾十筆的選擇清空，而且完全沒有提示。
     """
 
-    def __init__(self, columns: Sequence[tuple[str, str, int]], parent: Any = None) -> None:
+    def __init__(
+        self,
+        columns: Sequence[tuple[str, str, int]],
+        parent: Any = None,
+        checkable: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._keys = [key for key, _, _ in columns]
         self._headings = [heading for _, heading, _ in columns]
         self._rows: list[dict[str, Any]] = []
+        self._checkable = checkable
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: B008
         return 0 if parent.isValid() else len(self._rows)
@@ -181,7 +200,35 @@ class DataTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             row = self._rows[index.row()]
             return _display(row.get(self._keys[index.column()]))
+        if (
+            role == Qt.ItemDataRole.CheckStateRole
+            and self._checkable
+            and index.column() == 0
+        ):
+            checked = self._rows[index.row()].get(CHECK_KEY, True)
+            return Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
         return None
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        base = super().flags(index)
+        if self._checkable and index.isValid() and index.column() == 0:
+            return base | Qt.ItemFlag.ItemIsUserCheckable
+        return base
+
+    def setData(  # noqa: N802 - Qt 的命名
+        self, index: QModelIndex, value: Any, role: int = Qt.ItemDataRole.EditRole
+    ) -> bool:
+        if role != Qt.ItemDataRole.CheckStateRole or not self._checkable:
+            return False
+        if not index.isValid() or index.column() != 0:
+            return False
+        # Qt 送過來的是 int（PySide6 不會自動包成 CheckState），拿它跟 enum
+        # 直接比會永遠是 False，勾選就變成按了沒反應。
+        self._rows[index.row()][CHECK_KEY] = (
+            Qt.CheckState(value) == Qt.CheckState.Checked
+        )
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
+        return True
 
     def headerData(
         self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole
@@ -210,6 +257,11 @@ class DataTableModel(QAbstractTableModel):
         """整批換掉表格內容。``rows`` 是以欄位 key 為鍵的 dict 序列。"""
         self.beginResetModel()
         self._rows = [dict(row) for row in rows]
+        if self._checkable:
+            # 預設全部勾起來：這種表格的用途是「把不要的勾掉」，預設全不勾的
+            # 話使用者要按幾十次才回到起點。
+            for row in self._rows:
+                row.setdefault(CHECK_KEY, True)
         self.endResetModel()
 
     def row_at(self, row_index: int) -> dict[str, Any]:
@@ -217,6 +269,21 @@ class DataTableModel(QAbstractTableModel):
 
     def row_count(self) -> int:
         return len(self._rows)
+
+    def checked_rows(self) -> list[dict[str, Any]]:
+        """勾起來的那幾列。沒開 ``checkable`` 時就是全部。"""
+        if not self._checkable:
+            return list(self._rows)
+        return [row for row in self._rows if row.get(CHECK_KEY, True)]
+
+    def set_all_checked(self, checked: bool) -> None:
+        if not self._checkable or not self._rows:
+            return
+        for row in self._rows:
+            row[CHECK_KEY] = checked
+        top = self.index(0, 0)
+        bottom = self.index(len(self._rows) - 1, 0)
+        self.dataChanged.emit(top, bottom, [Qt.ItemDataRole.CheckStateRole])
 
 
 class DataTable(QWidget):
@@ -234,6 +301,7 @@ class DataTable(QWidget):
         selectmode: str = "browse",
         min_rows: int = 3,
         parent: QWidget | None = None,
+        checkable: bool = False,
     ) -> None:
         """``selectmode``："browse"（單選，預設）或 "extended"（可複選）。
 
@@ -245,7 +313,7 @@ class DataTable(QWidget):
         self.on_select = on_select
         self.on_activate = on_activate
 
-        self.model = DataTableModel(columns)
+        self.model = DataTableModel(columns, checkable=checkable)
         self.view = QTableView(self)
         self.view.setModel(self.model)
         self.view.setAlternatingRowColors(True)
@@ -301,6 +369,13 @@ class DataTable(QWidget):
 
     def row_count(self) -> int:
         return self.model.row_count()
+
+    def checked_rows(self) -> list[dict[str, Any]]:
+        """使用者勾起來的那幾列（建構時 ``checkable=True`` 才有意義）。"""
+        return self.model.checked_rows()
+
+    def set_all_checked(self, checked: bool) -> None:
+        self.model.set_all_checked(checked)
 
     def clear(self) -> None:
         self.set_rows([])
