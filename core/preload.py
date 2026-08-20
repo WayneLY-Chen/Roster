@@ -49,6 +49,8 @@ WORKER_MODULES: tuple[str, ...] = (
     "ai.extract",
     "ai.sites",
     "ai.query",
+    "ai.mcp",
+    "ai.tools",
     "crawler.websearch",
     # 爬取
     "crawler.pipeline",

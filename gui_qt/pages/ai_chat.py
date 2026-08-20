@@ -125,6 +125,14 @@ ANSWER_COLUMNS: tuple[tuple[str, str, int], ...] = (
 )
 
 
+#: 工具回來的內容在對話裡最多顯示幾個字。
+#:
+#: 模型看得到的是完整的那一份（上限在 :data:`ai.mcp.MAX_RESULT_CHARS`）。這裡
+#: 只是顯示：一個工具回八千字的話，對話框會被那一段淹掉，使用者要往上捲很久才
+#: 找得到自己問了什麼。少掉的部分會照實寫出來還有幾個字。
+TOOL_PREVIEW_CHARS = 800
+
+
 class AIChatPage(BasePage):
     """跟語言模型對話，以及請它讀一頁網頁。"""
 
@@ -146,6 +154,17 @@ class AIChatPage(BasePage):
         self._candidates: list = []
         #: 上一次問答查到的那幾家，表格的每一列都對應這裡面的一筆。
         self._answered: list = []
+        #: 外部工具（MCP）列到的工具。連過一次就留著，直到使用者重新整理這一頁
+        #: ——每送一則訊息就重連一次，等於每一則都要多等幾秒啟動子行程。
+        self._tools: list = []
+        self._tools_loaded = False
+        #: 正在進行中的「可以用工具」那一輪。沒有的時候是 None。
+        self._session = None
+        #: 這一輪用哪個模型。送出時就讀好，之後每一步都用同一個——中途換模型
+        #: 的話，前半段的對話是另一個模型產生的，而那件事看不出來。
+        self._turn_model: str | None = None
+        #: 使用者送出的訊息在等工具清單連完。
+        self._awaiting_tools = False
 
         self.chat_task = BackgroundTask(
             self,
@@ -191,6 +210,31 @@ class AIChatPage(BasePage):
             on_done=self._on_answered,
             on_error=self._on_ask_error,
         )
+        # 外部工具那三個工作。分開成三個而不是一個大迴圈，是因為中間那一步
+        # （問使用者要不要執行）**必須**在畫面執行緒上跳視窗，而模型與外部
+        # 工具都必須在背景執行緒跑。從背景執行緒去等一個視窗的答案是死結的
+        # 標準寫法，所以整件事拆成「背景一步、畫面一步」輪流推。
+        self.tools_task = BackgroundTask(
+            self,
+            self.controller.list_tools,
+            on_progress=self._on_tool_progress,
+            on_done=self._on_tools_listed,
+            on_error=self._on_tools_error,
+        )
+        self.step_task = BackgroundTask(
+            self,
+            self._next_step,
+            on_progress=self._on_tool_progress,
+            on_done=self._on_step,
+            on_error=self._on_turn_error,
+        )
+        self.invoke_task = BackgroundTask(
+            self,
+            self._invoke_tool,
+            on_progress=self._on_tool_progress,
+            on_done=self._on_tool_output,
+            on_error=self._on_turn_error,
+        )
         # 「有沒有可用的模型」對 Ollama 來說要真的連一次線，最久兩秒。放在
         # 畫面執行緒上做的話，每次切到這一頁介面就凍住——實測 refresh() 花了
         # 7 秒（三個地方各探測一次）。
@@ -231,6 +275,7 @@ class AIChatPage(BasePage):
         self._build_sites(body_column)
         self._build_extract(body_column)
         self._build_ask(body_column)
+        self._build_tools(body_column)
         self._build_conversation(body_column)
         self._build_composer(body_column)
 
@@ -429,6 +474,33 @@ class AIChatPage(BasePage):
 
         column.addWidget(section, 1)
 
+    def _build_tools(self, column: QVBoxLayout) -> None:
+        """外部工具（MCP）的狀態。
+
+        一個工具都沒接的人也看得到這一段，而且看得到怎麼接——藏起來的功能等於
+        不存在。接了之後這裡就是「模型現在手上有什麼」唯一看得到的地方。
+        """
+        section = Section("外部工具（MCP）")
+
+        self.tools_label = QLabel("")
+        self.tools_label.setWordWrap(True)
+        section.body_layout.addWidget(self.tools_label)
+
+        row = QHBoxLayout()
+        self.tools_button = QPushButton("連線並列出工具")
+        self.tools_button.clicked.connect(self._reload_tools)
+        row.addWidget(self.tools_button)
+        hint = QLabel(
+            "模型每一次要用工具，都會先跳一個視窗問你，上面寫著要執行哪一個、"
+            "帶什麼參數。你不按就不會執行。"
+        )
+        hint.setObjectName("MutedLabel")
+        hint.setWordWrap(True)
+        row.addWidget(hint, 1)
+        section.body_layout.addLayout(row)
+
+        column.addWidget(section)
+
     def _build_conversation(self, column: QVBoxLayout) -> None:
         section = Section("對話")
         self.transcript = QPlainTextEdit()
@@ -474,7 +546,12 @@ class AIChatPage(BasePage):
         self.controller = AIController()
         # 設定可能剛改過，丟掉快取重新探測一次。
         self.controller.forget_probes()
+        # 工具伺服器的設定也可能剛改過。這裡只是把快取作廢，不主動去連——
+        # 連線要啟動子行程，每切到這一頁就啟動一輪別人的程式太過分了。
+        self._tools = []
+        self._tools_loaded = False
         self.status_label.setText("檢查可用的模型…")
+        self._describe_tools()
         if not self.status_task.running:
             self.status_task.start()
 
@@ -490,7 +567,10 @@ class AIChatPage(BasePage):
             self.privacy_label.hide()
             return
 
-        self.send_button.setEnabled(True)
+        # 這一頁的重新整理可能落在一輪對話進行到一半的時候（使用者切走再切
+        # 回來）。無條件把送出鈕打開的話，他會送出第二則，而第一輪的工具確認
+        # 視窗還在後面排隊。
+        self.send_button.setEnabled(not self._busy())
         self.fetch_button.setEnabled(not self.extract_task.running)
         model = self.controller.config.ai.model or "（還沒選模型）"
         self.status_label.setText(
@@ -514,7 +594,7 @@ class AIChatPage(BasePage):
     def _on_status_error(self, exc: Exception) -> None:
         # 探測失敗不該擋住整頁：使用者還是可以自己打模型代號送出去試。
         self.status_label.setText(f"檢查模型狀態時出錯：{exc}")
-        self.send_button.setEnabled(True)
+        self.send_button.setEnabled(not self._busy())
         self.fetch_button.setEnabled(True)
 
     # --------------------------------------------------------------- 模型清單
@@ -955,7 +1035,7 @@ class AIChatPage(BasePage):
         text = self.input_box.toPlainText().strip()
         if not text:
             return
-        if self.chat_task.running:
+        if self._busy():
             self.status("上一則還在回覆中，等它結束", "warning")
             return
 
@@ -963,10 +1043,24 @@ class AIChatPage(BasePage):
         self.input_box.clear()
         self._append_line(f"你：{text}\n")
         self._pending = ""
-        self._append_line("助手：")
-
+        self._turn_model = self.model_combo.currentText().strip() or None
         self.send_button.setEnabled(False)
-        self.chat_task.start(self.model_combo.currentText().strip() or None)
+
+        # 沒接外部工具的人走的還是原本那條路，含串流。接了工具那條沒有辦法
+        # 邊收邊顯示：整段收完之前，不知道它是在回話還是在要一個工具，而把
+        # 一串 {"tool": …} 一個字一個字印出來，看起來就是程式壞了。
+        if not self.controller.uses_tools():
+            self._append_line("助手：")
+            self.chat_task.start(self._turn_model)
+            return
+
+        if not self._tools_loaded:
+            self._awaiting_tools = True
+            self._append_line("（正在連你接的外部工具…）\n")
+            self.tools_task.start()
+            return
+
+        self._begin_tool_turn()
 
     def _ask(self, model: str | None, *, report, cancel_event) -> str:
         """在背景執行緒裡跑。
@@ -996,6 +1090,203 @@ class AIChatPage(BasePage):
         self._pending = ""
         # 「還沒設定」要把人帶去設定頁，不是丟一個錯誤了事——這是使用者
         # 唯一會遇到、而且自己有辦法解決的失敗。
+        if isinstance(exc, AINotConfigured):
+            QMessageBox.information(self, "還沒設定好 AI", str(exc))
+            self.refresh()
+            return
+        self.report_error(exc)
+
+    # -------------------------------------------------------------- 外部工具
+
+    def _busy(self) -> bool:
+        """有沒有一輪對話正在進行。工具那條路會來回好幾次，中間都不能再送。"""
+        return (
+            self.chat_task.running
+            or self.tools_task.running
+            or self.step_task.running
+            or self.invoke_task.running
+            or self._session is not None
+        )
+
+    def _describe_tools(self) -> None:
+        """把「現在接了什麼」寫在畫面上。"""
+        servers = self.controller.mcp_servers()
+        enabled = [server for server in servers if server.enabled]
+        if not servers:
+            self.tools_label.setText(
+                "還沒有接任何外部工具。到「設定」頁的「AI 的外部工具（MCP）」"
+                "可以加一個——查天氣、讀本機檔案、查另一個資料庫這種這支程式"
+                "自己不做的事，接一個現成的伺服器就有了。"
+            )
+            self.tools_button.setEnabled(False)
+            return
+        self.tools_button.setEnabled(True)
+        names = "、".join(server.name for server in enabled) or "（全部停用中）"
+        if self._tools_loaded:
+            self.tools_label.setText(
+                f"已連上 {len(self._tools)} 個工具，來自：{names}。"
+            )
+        else:
+            self.tools_label.setText(
+                f"設定裡有 {len(enabled)} 個啟用中的工具伺服器：{names}。"
+                "第一次送出訊息時才會去連（要啟動它們的程式，要幾秒）。"
+            )
+
+    def _reload_tools(self) -> None:
+        if self._busy():
+            self.status("正在忙，等它結束", "warning")
+            return
+        self._tools_loaded = False
+        self._tools = []
+        self.tools_button.setEnabled(False)
+        self.tools_label.setText("正在連…")
+        self.tools_task.start()
+
+    def _on_tool_progress(self, message: object) -> None:
+        self.status(str(message), "normal")
+
+    def _on_tools_listed(self, listing) -> None:
+        self._tools = list(listing.tools)
+        self._tools_loaded = True
+        self._describe_tools()
+        for name, why in listing.failures:
+            # 連不上的一定要講出來。少說的話使用者看到的是「模型不用我接的
+            # 工具」，而真正的原因是那支程式根本沒啟動起來。
+            self._append_line(f"（連不上工具伺服器「{name}」：{why}）\n")
+        self.status(listing.describe(), "warning" if listing.failures else "success")
+
+        if not self._awaiting_tools:
+            return
+        self._awaiting_tools = False
+        if not self._tools:
+            self._append_line("（一個工具都沒有連上，這一則當一般對話送出。）\n助手：")
+            self.chat_task.start(self._turn_model)
+            return
+        self._begin_tool_turn()
+
+    def _on_tools_error(self, exc: Exception) -> None:
+        self._tools_loaded = False
+        self._describe_tools()
+        self.tools_button.setEnabled(True)
+        if self._awaiting_tools:
+            self._awaiting_tools = False
+            self._append_line(f"（連外部工具失敗：{exc}）\n助手：")
+            self.chat_task.start(self._turn_model)
+            return
+        self.report_error(exc)
+
+    def _begin_tool_turn(self) -> None:
+        self._session = self.controller.start_tools_chat(self.history, self._tools)
+        self._append_line("助手：")
+        self.step_task.start(self._session, model=self._turn_model)
+
+    def _next_step(self, session, *, model=None, report=None, cancel_event=None):
+        """在背景執行緒裡問模型下一步要做什麼。**不會執行任何工具。**"""
+        return self.controller.next_step(
+            session, model=model, report=report, cancel_event=cancel_event
+        )
+
+    def _on_step(self, step) -> None:
+        """模型回話了（這個方法跑在畫面執行緒上）。"""
+        session = self._session
+        if session is None:      # 使用者中途清掉對話了
+            return
+
+        if step.unknown:
+            self._append_line(
+                f"\n（它要了一個不存在的工具「{step.unknown}」，什麼都沒有執行。）\n"
+            )
+            session.record_unknown(step.unknown)
+            self.step_task.start(session, model=self._turn_model)
+            return
+
+        if not step.wants_tool:
+            self._finish_tool_turn(step.answer)
+            return
+
+        call = step.call
+        self._append_line(f"\n▶ 它想用工具：{call.qualified}\n")
+        if not self._confirm_tool(call):
+            # 這裡是整個功能的那一道門。按「不要」的結果不是「稍後再問」，
+            # 是這一次的呼叫從來沒有發生過。
+            self._append_line("→ 你按了「不要」，沒有執行。\n")
+            session.record_refusal(call)
+            self.step_task.start(session, model=self._turn_model)
+            return
+
+        self._append_line("→ 你同意了，正在執行…\n")
+        self.invoke_task.start(call)
+
+    def _confirm_tool(self, call) -> bool:
+        """跳出確認視窗。回 ``True`` 才會執行。
+
+        預設按鈕刻意是「不要」：這個視窗會在使用者正在讀對話時突然跳出來，
+        而習慣性地敲一下 Enter 不該等於同意執行一支外部程式。
+
+        參數整份印出來，不是只寫工具名字——使用者唯一需要判斷的就是那些值
+        （要寫哪個檔案、要送去哪裡）。
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("要執行這個工具嗎？")
+        box.setText(f"模型想執行「{call.qualified}」。")
+        box.setInformativeText(
+            f"{call.describe()}\n\n"
+            "這會在你的電腦上執行你自己接的那支程式。不確定的話按「不要」——"
+            "它會改用手上的資訊回答。"
+        )
+        run_button = box.addButton("執行", QMessageBox.ButtonRole.AcceptRole)
+        skip_button = box.addButton("不要", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(skip_button)
+        box.exec()
+        return box.clickedButton() is run_button
+
+    def _invoke_tool(self, call, *, report=None, cancel_event=None):
+        """在背景執行緒裡真的執行那一次呼叫。使用者已經按過同意了。"""
+        output = self.controller.invoke_tool(
+            call, report=report, cancel_event=cancel_event
+        )
+        return call, output
+
+    def _on_tool_output(self, payload) -> None:
+        call, output = payload
+        session = self._session
+        if session is None:
+            return
+
+        preview = output.text.strip()
+        if len(preview) > TOOL_PREVIEW_CHARS:
+            hidden = len(preview) - TOOL_PREVIEW_CHARS
+            preview = (
+                preview[:TOOL_PREVIEW_CHARS]
+                + f"\n…（還有 {hidden:,} 字沒有顯示在這裡，模型看得到）"
+            )
+        head = "回報失敗" if output.failed else "回覆"
+        tail = "（內容太長，後面被截掉了）" if output.truncated else ""
+        self._append_line(f"◀ {call.qualified} {head}{tail}：\n{preview}\n\n")
+
+        session.record_result(call, output)
+        self.step_task.start(session, model=self._turn_model)
+
+    def _finish_tool_turn(self, answer: str) -> None:
+        self._session = None
+        self.send_button.setEnabled(True)
+        if answer:
+            self.history.append(ChatTurn("assistant", answer))
+            self._append_line(f"{answer}\n\n")
+        else:
+            self._append_line("（沒有回覆）\n\n")
+
+    def _on_turn_error(self, exc: Exception) -> None:
+        """工具那條路上出的錯。
+
+        出錯就結束這一輪，不餵回去讓模型自己想辦法：走到這裡的失敗都是環境
+        問題（伺服器沒啟動起來、逾時、金鑰不對），模型再試一次也是同一個結果，
+        而每一次重試都要使用者再按一個確認視窗。
+        """
+        self._session = None
+        self.send_button.setEnabled(True)
+        self._append_line(f"\n（這一輪停在這裡：{str(exc).splitlines()[0]}）\n\n")
         if isinstance(exc, AINotConfigured):
             QMessageBox.information(self, "還沒設定好 AI", str(exc))
             self.refresh()

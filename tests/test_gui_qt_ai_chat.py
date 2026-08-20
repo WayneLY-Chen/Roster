@@ -26,12 +26,15 @@ import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from ai.extract import DroppedValue, ExtractResult  # noqa: E402
+from ai.mcp import McpError, McpTool, ToolOutput  # noqa: E402
 from ai.query import Answer, Query  # noqa: E402
 from ai.sites import COMPANY, DIRECTORY, UNRELATED, Candidate, SiteSearchResult  # noqa: E402
+from ai.tools import Step, ToolCall  # noqa: E402
 from controllers.ai import (  # noqa: E402
     BatchExtractResult,
     ExtractCancelled,
     SaveResult,
+    ToolListing,
 )
 from core.errors import RobotsDisallowedError  # noqa: E402
 from core.schemas import CompanyView, RawCompany  # noqa: E402
@@ -590,3 +593,201 @@ def test_the_whole_ask_wiring_runs_off_the_ui_thread(qt_app, db_session, monkeyp
     assert seen["model"] == "some-model"
     assert page.answer_table.row_count() == 1
     assert page.ask_button.isEnabled()
+
+
+# ------------------------------------------------------------------ 外部工具
+#
+# 這一組守的是「模型要用外部工具時，那顆按鈕不能被繞過去」。
+#
+# 真的去啟動子行程是 tests/test_ai_mcp.py 的事，狀態機是 tests/test_ai_tools.py
+# 的事。這裡只驗 Qt 這一段的接線：確認視窗回「不要」的時候，執行那個工作
+# 一次都不能被啟動。
+
+
+def _tool(server: str = "fake", name: str = "echo") -> McpTool:
+    return McpTool(server=server, name=name, description="測試用")
+
+
+def _with_tools(page, monkeypatch, tools=None) -> list:
+    """把這一頁接上兩個假工具，並攔下所有背景工作。"""
+    tools = list(tools if tools is not None else [_tool(), _tool("clock", "now")])
+    monkeypatch.setattr(page.controller, "uses_tools", lambda: True)
+    page._tools = tools
+    page._tools_loaded = True
+    return tools
+
+
+def test_a_message_goes_the_plain_route_when_no_tools_are_connected(qt_app, db_session, monkeypatch):
+    """沒接工具的人走的還是原本那條路，含串流。
+
+    多一個「要不要用工具」的開關，就多一種「我明明接了工具它卻不用」要解釋。
+    """
+    page = _page(qt_app)
+    monkeypatch.setattr(page.controller, "uses_tools", lambda: False)
+    started: list = []
+    monkeypatch.setattr(page.chat_task, "start", lambda *a: started.append(a))
+    monkeypatch.setattr(page.tools_task, "start", lambda *a: pytest.fail("不該去連工具"))
+
+    page.input_box.setPlainText("你好")
+    page._send()
+
+    assert len(started) == 1
+
+
+def test_the_first_message_connects_the_tools_before_asking_the_model(qt_app, db_session, monkeypatch):
+    """連線要啟動子行程，所以是第一次送出時才做，不是切到這一頁就做。"""
+    page = _page(qt_app)
+    monkeypatch.setattr(page.controller, "uses_tools", lambda: True)
+    listed: list = []
+    monkeypatch.setattr(page.tools_task, "start", lambda *a: listed.append(a))
+    monkeypatch.setattr(page.step_task, "start", lambda *a, **k: pytest.fail("要先連工具"))
+
+    page.input_box.setPlainText("現在幾點")
+    page._send()
+
+    assert len(listed) == 1
+    assert page._awaiting_tools
+
+
+def test_pressing_no_on_the_confirmation_executes_nothing(qt_app, db_session, monkeypatch):
+    """**這就是整個功能的那一道門。**
+
+    按「不要」的結果不是「稍後再問」，是那一次呼叫從來沒有發生過。
+    """
+    page = _page(qt_app)
+    _with_tools(page, monkeypatch)
+    page._session = page.controller.start_tools_chat([], page._tools)
+
+    monkeypatch.setattr(page, "_confirm_tool", lambda _call: False)
+    monkeypatch.setattr(page.invoke_task, "start", lambda *a: pytest.fail("按了不要卻執行了"))
+    steps: list = []
+    monkeypatch.setattr(page.step_task, "start", lambda *a, **k: steps.append(a))
+
+    page._on_step(Step(call=ToolCall("fake", "echo", {"text": "哈囉"})))
+
+    assert len(steps) == 1                       # 有回去讓它換個方式回答
+    assert "不要" in page.transcript.toPlainText()
+    assert "不同意" in page._session.messages[-1].content
+
+
+def test_pressing_yes_runs_it_and_the_result_shows_up(qt_app, db_session, monkeypatch):
+    page = _page(qt_app)
+    _with_tools(page, monkeypatch)
+    page._session = page.controller.start_tools_chat([], page._tools)
+
+    monkeypatch.setattr(page, "_confirm_tool", lambda _call: True)
+    ran: list = []
+    monkeypatch.setattr(page.invoke_task, "start", lambda call: ran.append(call))
+
+    call = ToolCall("fake", "echo", {"text": "哈囉"})
+    page._on_step(Step(call=call))
+    assert [item.qualified for item in ran] == ["fake.echo"]
+
+    monkeypatch.setattr(page.step_task, "start", lambda *a, **k: None)
+    page._on_tool_output((call, ToolOutput(text="今天台中晴時多雲")))
+
+    assert "今天台中晴時多雲" in page.transcript.toPlainText()
+
+
+def test_the_confirmation_is_asked_before_anything_runs(qt_app, db_session, monkeypatch):
+    """順序不能反過來：先執行再問等於沒有問。"""
+    page = _page(qt_app)
+    _with_tools(page, monkeypatch)
+    page._session = page.controller.start_tools_chat([], page._tools)
+
+    order: list[str] = []
+    monkeypatch.setattr(page, "_confirm_tool", lambda _call: order.append("問") or True)
+    monkeypatch.setattr(page.invoke_task, "start", lambda _call: order.append("跑"))
+
+    page._on_step(Step(call=ToolCall("fake", "echo")))
+
+    assert order == ["問", "跑"]
+
+
+def test_a_tool_the_model_invented_never_reaches_the_confirmation(qt_app, db_session, monkeypatch):
+    """不存在的工具連問都不用問——沒有東西可以執行。"""
+    page = _page(qt_app)
+    _with_tools(page, monkeypatch)
+    page._session = page.controller.start_tools_chat([], page._tools)
+
+    monkeypatch.setattr(page, "_confirm_tool", lambda _call: pytest.fail("不該跳確認"))
+    monkeypatch.setattr(page.invoke_task, "start", lambda *a: pytest.fail("不該執行"))
+    monkeypatch.setattr(page.step_task, "start", lambda *a, **k: None)
+
+    page._on_step(Step(unknown="danger.delete_everything"))
+
+    assert "danger.delete_everything" in page.transcript.toPlainText()
+    assert "沒有執行" in page.transcript.toPlainText()
+
+
+def test_a_long_result_is_shortened_and_says_how_much_it_hid(qt_app, db_session, monkeypatch):
+    """對話框被一段八千字的東西淹掉的話，使用者要往上捲很久才找得到自己問了什麼。"""
+    page = _page(qt_app)
+    _with_tools(page, monkeypatch)
+    page._session = page.controller.start_tools_chat([], page._tools)
+    monkeypatch.setattr(page.step_task, "start", lambda *a, **k: None)
+
+    call = ToolCall("fake", "echo")
+    # 刻意用一個不會出現在包裝文字裡的字，否則數出來的是包裝加內容。
+    page._on_tool_output((call, ToolOutput(text="甲" * 5000)))
+
+    transcript = page.transcript.toPlainText()
+    assert "沒有顯示在這裡" in transcript
+    assert transcript.count("甲") < 1000
+    # 模型看得到的仍然是完整的那一份。
+    assert page._session.messages[-1].content.count("甲") == 5000
+
+
+def test_a_server_that_could_not_be_reached_is_named(qt_app, db_session, monkeypatch):
+    """少說的話，使用者看到的是「模型不用我接的工具」，而真正的原因看不到。"""
+    page = _page(qt_app)
+    monkeypatch.setattr(page.controller, "uses_tools", lambda: True)
+    monkeypatch.setattr(page.chat_task, "start", lambda *a: None)
+
+    page._on_tools_listed(
+        ToolListing(tools=[_tool()], failures=[("壞掉的", "找不到指令 npx")])
+    )
+
+    assert "壞掉的" in page.transcript.toPlainText()
+    assert "找不到指令 npx" in page.transcript.toPlainText()
+
+
+def test_when_no_tool_connects_the_message_still_gets_sent(qt_app, db_session, monkeypatch):
+    """一個都連不上時不要把訊息吞掉——那一則當一般對話送出去。"""
+    page = _page(qt_app)
+    monkeypatch.setattr(page.controller, "uses_tools", lambda: True)
+    sent: list = []
+    monkeypatch.setattr(page.chat_task, "start", lambda *a: sent.append(a))
+    page._awaiting_tools = True
+
+    page._on_tools_listed(ToolListing(tools=[], failures=[("壞掉的", "沒啟動")]))
+
+    assert len(sent) == 1
+
+
+def test_a_second_message_cannot_start_while_a_tool_turn_is_running(qt_app, db_session, monkeypatch):
+    """工具那條路會來回好幾次，中間送第二則會讓兩輪的確認視窗排在一起。"""
+    page = _page(qt_app)
+    _with_tools(page, monkeypatch)
+    page._session = page.controller.start_tools_chat([], page._tools)
+    monkeypatch.setattr(page.step_task, "start", lambda *a, **k: pytest.fail("不該再送"))
+
+    page.input_box.setPlainText("再問一句")
+    page._send()
+
+    assert page.app.messages[-1][1] == "warning"
+
+
+def test_an_error_in_the_middle_ends_the_turn_instead_of_retrying(qt_app, db_session, monkeypatch):
+    """環境問題（伺服器沒啟動、逾時）重試也是同一個結果，而每一次重試都要再按一次。"""
+    page = _page(qt_app)
+    _with_tools(page, monkeypatch)
+    page._session = page.controller.start_tools_chat([], page._tools)
+    monkeypatch.setattr(page.step_task, "start", lambda *a, **k: pytest.fail("不該重試"))
+    monkeypatch.setattr(page, "report_error", lambda _exc: None)
+
+    page._on_turn_error(McpError("工具「fake」中途結束了。"))
+
+    assert page._session is None
+    assert page.send_button.isEnabled()
+    assert "中途結束" in page.transcript.toPlainText()

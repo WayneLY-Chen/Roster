@@ -37,8 +37,10 @@ from core.logging_setup import get_logger
 from core.schemas import RawCompany
 
 if TYPE_CHECKING:      # 只為了型別；ai.sites 會拉進 httpx 與 bs4，不值得在
-    from ai.query import Answer               # import 這個模組時就付那個成本
+    from ai.mcp import McpServer, McpTool, ToolOutput   # import 這個模組時就付那個成本
+    from ai.query import Answer
     from ai.sites import SiteSearchResult
+    from ai.tools import Step, ToolCall, ToolSession
 
 log = get_logger(LogCategory.GUI)
 
@@ -192,6 +194,26 @@ class SaveResult:
             parts.append(f"這批裡面自己重複 {self.duplicate} 筆")
         if self.rejected:
             parts.append(f"{self.rejected} 筆不像公司資料被丟掉")
+        return "，".join(parts)
+
+
+@dataclass(slots=True)
+class ToolListing:
+    """問過每一個外部工具伺服器之後的結果。
+
+    連不上的那幾個要跟成功的一起交出來。只回成功的話，使用者會以為他接的三個
+    工具都在，然後納悶模型為什麼從來不用其中一個——而真正的原因（那支程式根本
+    沒啟動起來）完全看不到。
+    """
+
+    tools: list["McpTool"] = field(default_factory=list)
+    #: ``(伺服器名稱, 錯誤訊息第一行)``。
+    failures: list[tuple[str, str]] = field(default_factory=list)
+
+    def describe(self) -> str:
+        parts = [f"{len(self.tools)} 個工具"]
+        if self.failures:
+            parts.append("連不上：" + "、".join(name for name, _why in self.failures))
         return "，".join(parts)
 
 
@@ -611,3 +633,151 @@ class AIController:
             duplicate=max(summary.records_duplicate - summary.records_updated, 0),
             rejected=summary.records_invalid,
         )
+
+    # ------------------------------------------------------------ 外部工具
+
+    def mcp_servers(self) -> list["McpServer"]:
+        """設定裡的每一個外部工具伺服器，含停用的。"""
+        from ai.mcp import McpServer
+
+        return [
+            McpServer(
+                name=item.name,
+                command=item.command,
+                args=tuple(item.args),
+                env=dict(item.env),
+                enabled=item.enabled,
+            )
+            for item in self.config.ai.mcp_servers
+        ]
+
+    def enabled_servers(self) -> list["McpServer"]:
+        return [server for server in self.mcp_servers() if server.enabled]
+
+    def uses_tools(self) -> bool:
+        """對話要不要走「可以用工具」那條路。
+
+        沒有接任何工具的人走的還是原本那條（含串流）。這件事刻意不做成一個
+        開關：多一個開關就多一種「我明明接了工具它卻不用」的狀況要解釋。
+        """
+        return bool(self.enabled_servers())
+
+    def save_servers(self, servers: Sequence[dict]) -> None:
+        """把整份伺服器清單存進 ``user_settings.yaml``。
+
+        整份覆蓋而不是逐筆改：這份清單本來就短，而「刪掉一筆」用逐筆更新的
+        寫法會變成要另外處理的特例。
+        """
+        save_user_settings("ai", {"mcp_servers": [dict(item) for item in servers]})
+        self.config = get_config()
+
+    def list_tools(
+        self,
+        servers: Sequence["McpServer"] | None = None,
+        *,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> "ToolListing":
+        """問過每一個伺服器有哪些工具。**會啟動子行程。**
+
+        這是唯一一個「不需要使用者按就會執行外部程式」的地方，而它只做握手與
+        ``tools/list``——沒有呼叫任何工具。使用者按「測試連線」或送出一則要用
+        工具的訊息時，本來就是在說「去接那個伺服器」。
+        """
+        from ai.mcp import list_tools
+
+        targets = list(servers) if servers is not None else self.enabled_servers()
+        if not targets:
+            return ToolListing()
+        _stop_if_cancelled(cancel_event)
+        _tick(report, f"正在連 {len(targets)} 個外部工具伺服器…")
+        tools, failures = list_tools(targets)
+        _tick(report, f"找到 {len(tools)} 個工具。")
+        return ToolListing(tools=tools, failures=failures)
+
+    def start_tools_chat(
+        self, history: Sequence[ChatTurn], tools: Sequence["McpTool"]
+    ) -> "ToolSession":
+        """開一次「可以用工具」的問答。
+
+        system prompt 與工具清單都在這裡組好，之後那個 session 就凍住了——
+        畫面沒有辦法在中途把工具加進去，模型與外部工具更不行。
+        """
+        from ai.tools import ToolSession, build_messages
+
+        recent = list(history)[-MAX_HISTORY_MESSAGES:]
+        messages = build_messages(
+            tools,
+            self.system_prompt(),
+            [ChatMessage(turn.role, turn.content) for turn in recent],
+        )
+        return ToolSession(tools, messages)
+
+    def next_step(
+        self,
+        session: "ToolSession",
+        *,
+        model: str | None = None,
+        provider_name: str | None = None,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> "Step":
+        """問模型接下來要做什麼。**不會執行任何工具。**"""
+        provider = get_provider(provider_name or self.config.ai.provider, self.config)
+        chosen = (model or self.config.ai.model or "").strip()
+        if not chosen:
+            raise AIError("還沒有選模型。到「設定」頁的「AI 模型」選一個。")
+
+        _stop_if_cancelled(cancel_event)
+        _tick(report, "模型正在想…")
+
+        def chat(messages: Sequence[ChatMessage]) -> str:
+            received = 0
+            reported = 0
+
+            def on_chunk(piece: str) -> None:
+                nonlocal received, reported
+                # 這條路刻意不把串流的字顯示出來：整段收完之前，沒有辦法知道
+                # 它是在回話還是在要工具，而把一串 {"tool": …} 的 JSON 一個字
+                # 一個字印在對話裡，看起來就是程式壞了。串流仍然開著，因為它
+                # 是唯一能中途取消、也是唯一能證明「還活著」的地方。
+                _stop_if_cancelled(cancel_event)
+                received += len(piece)
+                if received - reported >= _REPORT_EVERY_CHARS:
+                    reported = received
+                    _tick(report, f"模型正在回覆…（已收到 {received:,} 字）")
+
+            return provider.chat(messages, chosen, on_chunk=on_chunk)
+
+        return session.next_step(chat)
+
+    def invoke_tool(
+        self,
+        call: "ToolCall",
+        *,
+        report: Callable[[object], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> "ToolOutput":
+        """真的去執行一次工具呼叫。
+
+        **呼叫這個方法就等於使用者已經按過同意了。** 這裡不再檢查一次——
+        檢查寫在畫面那一層（跳確認視窗的地方），在這裡重複一份只會讓兩邊
+        哪一邊才是真的說了算變得不清楚。
+
+        伺服器名稱對不上設定的話直接拒絕。模型只拿得到凍住的那份工具清單，
+        所以正常情況走不到這裡；走到了就代表設定在中途被改過。
+        """
+        from ai.mcp import McpError, call_tool
+
+        server = next(
+            (item for item in self.enabled_servers() if item.name == call.server), None
+        )
+        if server is None:
+            raise McpError(
+                f"設定裡找不到啟用中的工具伺服器「{call.server}」，沒有執行任何東西。"
+            )
+        _stop_if_cancelled(cancel_event)
+        _tick(report, f"正在執行 {call.qualified} …")
+        output = call_tool(server, call.name, call.arguments)
+        _tick(report, f"{call.qualified} 執行完了。")
+        return output

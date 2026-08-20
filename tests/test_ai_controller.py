@@ -565,3 +565,115 @@ def test_cancelling_a_question_raises_its_own_error(provider, tmp_config, db_ses
 
     with pytest.raises(ExtractCancelled):
         AIController().ask_database("台中有幾家？", model="m", cancel_event=event)
+
+
+# ------------------------------------------------------------------ 外部工具
+#
+# 這一段守的是「controller 這一層不會自己執行工具」。真的去啟動子行程在
+# tests/test_ai_mcp.py，狀態機在 tests/test_ai_tools.py。
+
+
+def _with_servers(tmp_config, *servers):
+    """做一份「接了這幾個工具伺服器」的設定出來。
+
+    ``model_copy`` 不會驗證，所以這裡自己把 dict 變成設定物件——直接塞 dict
+    進去的話，測試會在一個跟正式流程不一樣的形狀上跑。
+    """
+    from core.config import McpServerSetting
+
+    entries = [McpServerSetting.model_validate(item) for item in servers]
+    ai = tmp_config.ai.model_copy(update={"mcp_servers": entries})
+    return tmp_config.model_copy(update={"ai": ai})
+
+
+def test_no_servers_means_the_chat_stays_on_the_plain_route(tmp_config):
+    assert not AIController(tmp_config).uses_tools()
+
+
+def test_a_disabled_server_does_not_switch_the_chat_over(tmp_config):
+    """停用就是完全當它不存在，不是「列出來再忽略」。"""
+    config = _with_servers(
+        tmp_config, {"name": "off", "command": "npx", "enabled": False}
+    )
+
+    controller = AIController(config)
+    assert not controller.uses_tools()
+    assert controller.enabled_servers() == []
+
+
+def test_listing_with_nothing_connected_starts_no_subprocess(tmp_config, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *a, **k: pytest.fail("沒有伺服器卻啟動了行程")
+    )
+
+    listing = AIController(tmp_config).list_tools()
+
+    assert listing.tools == []
+    assert listing.failures == []
+
+
+def test_a_call_to_a_server_that_is_not_configured_runs_nothing(tmp_config, monkeypatch):
+    """模型拿到的是凍住的工具清單，所以正常情況走不到這裡。
+
+    走到了就代表設定在中途被改過（使用者一邊對話一邊去設定頁把伺服器刪了）。
+    那時候要做的事是什麼都不執行，不是「找一個像的來跑」。
+    """
+    import subprocess
+
+    from ai.mcp import McpError
+    from ai.tools import ToolCall
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("不該啟動"))
+
+    with pytest.raises(McpError) as caught:
+        AIController(tmp_config).invoke_tool(ToolCall("不存在的", "delete_everything"))
+
+    assert "不存在的" in str(caught.value)
+
+
+def test_the_tool_prompt_is_built_from_the_tools_actually_connected(tmp_config):
+    """system prompt 裡的工具清單不是手寫的一份。
+
+    手寫的話，使用者拔掉一個伺服器之後模型還會一直要求它——而那個要求會變成
+    一個他看不懂的確認視窗。
+    """
+    from ai.mcp import McpTool
+
+    session = AIController(tmp_config).start_tools_chat(
+        [ChatTurn("user", "現在幾點")],
+        [McpTool(server="clock", name="now", description="現在幾點")],
+    )
+
+    system = session.messages[0].content
+    assert BASE_SYSTEM_PROMPT.split("\n")[0] in system
+    assert "clock.now" in system
+    assert session.messages[-1].content == "現在幾點"
+
+
+def test_the_tool_prompt_still_carries_the_rules_that_cannot_be_dropped(tmp_config):
+    """接了工具不代表前面那幾條就放寬了。"""
+    session = AIController(tmp_config).start_tools_chat([], [])
+
+    system = session.messages[0].content
+    assert "robots.txt" in system
+    assert "使用者親自按過" in system
+
+
+def test_saving_servers_round_trips_through_the_settings_file(
+    tmp_config, monkeypatch, tmp_path
+):
+    """設定頁存的東西，下一次讀得回來。"""
+    import core.config as config_module
+
+    monkeypatch.setattr(config_module, "USER_SETTINGS_PATH", tmp_path / "user.yaml")
+
+    controller = AIController(tmp_config)
+    controller.save_servers(
+        [{"name": "files", "command": "npx", "args": ["-y", "server-filesystem"]}]
+    )
+
+    saved = controller.config.ai.mcp_servers
+    assert [item.name for item in saved] == ["files"]
+    assert saved[0].args == ["-y", "server-filesystem"]

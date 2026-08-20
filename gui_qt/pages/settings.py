@@ -213,6 +213,7 @@ class SettingsPage(BasePage):
         self._build_encryption_section()
         self._build_search_section()
         self._build_ai_section()
+        self._build_mcp_section()
         self._build_gmail_section()
         self._build_mailer_section()
         self._build_scheduler_section()
@@ -818,6 +819,269 @@ class SettingsPage(BasePage):
         close_button.clicked.connect(dialog.accept)
         layout.addWidget(close_button)
         dialog.exec()
+
+    # ------------------------------------------------ AI 的外部工具（MCP）
+
+    def _build_mcp_section(self) -> None:
+        """接一個外部工具伺服器上來。
+
+        這一段跟這一頁其他地方性質不同：**填在這裡的指令會真的在使用者的電腦上
+        被執行。** 填錯一個爬取參數頂多抓不到東西，填錯這裡是跑了一支別的程式。
+        所以警告寫在最上面、用紅字，而不是塞在下面當註腳。
+        """
+        section = Section("AI 的外部工具（MCP）")
+
+        intro = QLabel(
+            "MCP 是一個公開協定：一支外部程式宣告自己有哪些工具，讓 AI 用。"
+            "查天氣、讀本機檔案、查另一個資料庫這種這支程式自己不做的事，"
+            "接一個現成的伺服器就有了。<br>"
+            "<b>⚠ 這裡填的指令會在你的電腦上執行。</b>只接你自己看得懂、"
+            "而且信得過的東西——它拿得到的權限跟你本人一樣大。<br>"
+            "接上之後，模型每一次要用工具都會先跳視窗問你，上面寫著要執行哪一個、"
+            "帶什麼參數；<b>你不按就不會執行</b>。"
+        )
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setWordWrap(True)
+        section.body_layout.addWidget(intro)
+
+        self.mcp_list = QListWidget()
+        self.mcp_list.setFixedHeight(theme.text_box_height(4))
+        self.mcp_list.currentRowChanged.connect(self._on_mcp_selected)
+        section.body_layout.addWidget(self.mcp_list)
+
+        name_row = QHBoxLayout()
+        self.mcp_name_entry = LabeledEntry("名稱", placeholder="例如 files")
+        name_row.addWidget(self.mcp_name_entry, 1)
+        self.mcp_command_entry = LabeledEntry("指令", placeholder="例如 npx")
+        name_row.addWidget(self.mcp_command_entry, 1)
+        section.body_layout.addLayout(name_row)
+
+        self.mcp_enabled_check = QCheckBox("啟用（停用的伺服器完全不會被啟動）")
+        self.mcp_enabled_check.setChecked(True)
+        section.body_layout.addWidget(self.mcp_enabled_check)
+
+        # 參數一行一個，不是一整串用空白切開。使用者填的路徑裡有空白時（Windows
+        # 上「Program Files」到處都是），自己切會切錯，而切錯的症狀是一個看不懂
+        # 的「找不到檔案」。
+        section.body_layout.addWidget(caption("參數（一行一個，不會再被 shell 拆一次）"))
+        self.mcp_args_box = QPlainTextEdit()
+        self.mcp_args_box.setPlaceholderText("-y\n@modelcontextprotocol/server-filesystem\nD:/名單")
+        self.mcp_args_box.setFixedHeight(theme.text_box_height(3))
+        section.body_layout.addWidget(self.mcp_args_box)
+
+        section.body_layout.addWidget(caption("環境變數（一行一個 KEY=VALUE，選填）"))
+        self.mcp_env_box = QPlainTextEdit()
+        self.mcp_env_box.setPlaceholderText("SOME_API_KEY=${secret:my_tool_key}")
+        self.mcp_env_box.setFixedHeight(theme.text_box_height(2))
+        section.body_layout.addWidget(self.mcp_env_box)
+
+        buttons = QHBoxLayout()
+        save_button = QPushButton("新增／更新")
+        save_button.clicked.connect(self._save_mcp_server)
+        buttons.addWidget(save_button)
+        delete_button = QPushButton("刪除")
+        delete_button.clicked.connect(self._delete_mcp_server)
+        buttons.addWidget(delete_button)
+        self.mcp_test_button = QPushButton("測試連線")
+        self.mcp_test_button.clicked.connect(self._test_mcp_server)
+        buttons.addWidget(self.mcp_test_button)
+        buttons.addStretch(1)
+        section.body_layout.addLayout(buttons)
+
+        self.mcp_status_label = QLabel("")
+        self.mcp_status_label.setWordWrap(True)
+        self.mcp_status_label.setObjectName("MutedLabel")
+        section.body_layout.addWidget(self.mcp_status_label)
+
+        # 金鑰要進系統保管庫，不是進 user_settings.yaml——那個檔案是明碼的。
+        # 環境變數欄位寫 ${secret:名稱}，值存在這裡。
+        secret_row = QHBoxLayout()
+        self.mcp_secret_name_entry = LabeledEntry("金鑰名稱", placeholder="my_tool_key")
+        secret_row.addWidget(self.mcp_secret_name_entry, 1)
+        self.mcp_secret_value_entry = LabeledEntry("金鑰內容", placeholder="貼上金鑰")
+        self.mcp_secret_value_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
+        secret_row.addWidget(self.mcp_secret_value_entry, 1)
+        save_secret_button = QPushButton("存進系統保管庫")
+        save_secret_button.clicked.connect(self._save_mcp_secret)
+        if not self.controller.keyring_available():
+            save_secret_button.setEnabled(False)
+        secret_row.addWidget(save_secret_button, 0, Qt.AlignmentFlag.AlignBottom)
+        section.body_layout.addLayout(secret_row)
+
+        note = QLabel(
+            "工具需要金鑰時，環境變數那一欄寫 <code>${secret:名稱}</code>，"
+            "真正的值用上面這一列存進系統保管庫。"
+            "直接把金鑰打在環境變數欄裡的話，它會明碼寫進 "
+            "<code>user_settings.yaml</code>。"
+        )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
+
+        self._refresh_mcp_list()
+        self._body_layout.addWidget(section)
+
+    def _mcp_servers(self) -> list[dict]:
+        """設定裡的清單，轉成可以直接改、直接存回去的 dict。"""
+        return [
+            {
+                "name": item.name,
+                "command": item.command,
+                "args": list(item.args),
+                "env": dict(item.env),
+                "enabled": item.enabled,
+            }
+            for item in self.controller.config.ai.mcp_servers
+        ]
+
+    def _refresh_mcp_list(self) -> None:
+        servers = self._mcp_servers()
+        self.mcp_list.clear()
+        for server in servers:
+            command = " ".join([server["command"], *server["args"]]).strip()
+            mark = "" if server["enabled"] else "（停用）"
+            # 環境變數的值不進這一行：金鑰常常在裡面，而這一頁很常被截圖。
+            item = QListWidgetItem(f"{server['name']}{mark}　{command}")
+            self.mcp_list.addItem(item)
+        if not servers:
+            self.mcp_status_label.setText(
+                "還沒有接任何外部工具。填好上面幾欄按「新增／更新」。"
+            )
+
+    def _on_mcp_selected(self, row: int) -> None:
+        servers = self._mcp_servers()
+        if not 0 <= row < len(servers):
+            return
+        server = servers[row]
+        self.mcp_name_entry.set(server["name"])
+        self.mcp_command_entry.set(server["command"])
+        self.mcp_args_box.setPlainText("\n".join(server["args"]))
+        self.mcp_env_box.setPlainText(
+            "\n".join(f"{key}={value}" for key, value in server["env"].items())
+        )
+        self.mcp_enabled_check.setChecked(bool(server["enabled"]))
+
+    def _mcp_form(self) -> dict | None:
+        """把表單讀成一筆設定。名稱或指令沒填就回 ``None``。"""
+        name = self.mcp_name_entry.get().strip()
+        command = self.mcp_command_entry.get().strip()
+        if not name or not command:
+            self.status("名稱與指令都要填", "warning")
+            return None
+        args = [line.strip() for line in self.mcp_args_box.toPlainText().splitlines()]
+        env: dict[str, str] = {}
+        for line in self.mcp_env_box.toPlainText().splitlines():
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip():
+                env[key.strip()] = value.strip()
+        return {
+            "name": name,
+            "command": command,
+            "args": [arg for arg in args if arg],
+            "env": env,
+            "enabled": self.mcp_enabled_check.isChecked(),
+        }
+
+    def _save_mcp_server(self) -> None:
+        entry = self._mcp_form()
+        if entry is None:
+            return
+        servers = self._mcp_servers()
+        # 名稱當識別碼：同名的就是在改同一筆。名稱同時也是工具的前綴
+        # （``名稱.工具``），兩筆同名的話模型講的那個名字會指到兩個東西。
+        for index, server in enumerate(servers):
+            if server["name"] == entry["name"]:
+                servers[index] = entry
+                break
+        else:
+            servers.append(entry)
+        try:
+            self.ai_controller.save_servers(servers)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.controller.config = self.ai_controller.config
+        self._refresh_mcp_list()
+        self.status(f"已儲存工具伺服器「{entry['name']}」", "success")
+
+    def _delete_mcp_server(self) -> None:
+        name = self.mcp_name_entry.get().strip()
+        servers = [item for item in self._mcp_servers() if item["name"] != name]
+        if len(servers) == len(self._mcp_servers()):
+            self.status("沒有這個名稱的工具伺服器", "warning")
+            return
+        try:
+            self.ai_controller.save_servers(servers)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.controller.config = self.ai_controller.config
+        self._refresh_mcp_list()
+        self.status(f"已刪除「{name}」", "success")
+
+    def _test_mcp_server(self) -> None:
+        """真的啟動它一次，看列不列得出工具。
+
+        存了就算數是不夠的：指令拼錯、套件沒裝、金鑰沒設，這幾件事都要等到
+        使用者在對話裡問了一個需要工具的問題時才會爆炸，而那時候畫面上同時有
+        模型、子行程、確認視窗好幾層，錯誤訊息會指向錯的地方。
+        """
+        entry = self._mcp_form()
+        if entry is None:
+            return
+        from ai.mcp import McpServer
+
+        server = McpServer(
+            name=entry["name"],
+            command=entry["command"],
+            args=tuple(entry["args"]),
+            env=dict(entry["env"]),
+            enabled=True,
+        )
+        self.mcp_test_button.setEnabled(False)
+        self.mcp_status_label.setText("正在啟動它…")
+        BackgroundTask(
+            self,
+            self.ai_controller.list_tools,
+            on_done=self._on_mcp_tested,
+            on_error=self._on_mcp_test_failed,
+        ).start([server])
+
+    def _on_mcp_tested(self, listing) -> None:
+        self.mcp_test_button.setEnabled(True)
+        if listing.failures:
+            name, why = listing.failures[0]
+            self.mcp_status_label.setText(f"連不上「{name}」：{why}")
+            self.status("連不上那個工具伺服器", "warning")
+            return
+        names = "、".join(tool.name for tool in listing.tools) or "（它一個工具都沒有宣告）"
+        self.mcp_status_label.setText(f"連上了，{len(listing.tools)} 個工具：{names}")
+        self.status(f"連上了，{len(listing.tools)} 個工具", "success")
+
+    def _on_mcp_test_failed(self, exc: Exception) -> None:
+        self.mcp_test_button.setEnabled(True)
+        self.mcp_status_label.setText(str(exc).splitlines()[0])
+        self.report_error(exc)
+
+    def _save_mcp_secret(self) -> None:
+        name = self.mcp_secret_name_entry.get().strip()
+        value = self.mcp_secret_value_entry.get().strip()
+        if not name or not value:
+            self.status("金鑰名稱與內容都要填", "warning")
+            return
+        try:
+            self.controller.save_credential(name, value)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.mcp_secret_value_entry.set("")
+        self.status(
+            f"已存進系統保管庫。環境變數那一欄寫 ${{secret:{name}}} 就會用到它",
+            "success",
+        )
 
     def _build_gmail_section(self) -> None:
         section = Section("Gmail 帳號")

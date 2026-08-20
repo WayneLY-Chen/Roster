@@ -641,6 +641,28 @@ class CompletionSection(_Base):
     auto_after_import_limit: int = Field(default=200, ge=1, le=5000)
 
 
+class McpServerSetting(_Base):
+    """一個外部工具伺服器（MCP）。見 :mod:`ai.mcp`。
+
+    這一筆設定會**在使用者的電腦上執行 ``command``**，所以它跟其他設定的性質
+    不一樣：填錯一個爬取參數頂多抓不到東西，填錯這裡是跑了一支別的程式。介面
+    上那一段警告不是客套話。
+
+    ``env`` 裡的值寫成 ``${secret:名稱}`` 時，會去系統憑證保管庫拿（見
+    :func:`ai.mcp.resolve_env`）。要接需要金鑰的工具時用那個寫法——這個檔案
+    是明碼的純文字，金鑰打在這裡就等於繞過了「金鑰只放在保管庫」那一條。
+    """
+
+    #: 顯示用的名字，同時也是工具的前綴（``名字.工具``）。
+    name: str
+    #: 要執行的指令，例如 ``npx``。不含參數。
+    command: str = ""
+    #: 指令的參數，一個一個分開。**不會**經過 shell 重新解析。
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+
+
 class AISection(_Base):
     """語言模型的設定。見 :mod:`ai.provider`。
 
@@ -682,6 +704,13 @@ class AISection(_Base):
     #:
     #: 內建那一段蓋不掉，見 :func:`ai.prompts.build_system_prompt`。
     system_prompt: str = ""
+
+    #: 使用者自己接上的外部工具伺服器。預設一個都沒有。
+    #:
+    #: 空的時候「AI 助手」頁的對話跟以前完全一樣（含串流）。接了至少一個之後
+    #: 才會走 :mod:`ai.tools` 那條路——那條路要先看完整段回覆才知道它是不是在
+    #: 要工具，所以沒有辦法邊收邊顯示。
+    mcp_servers: list[McpServerSetting] = Field(default_factory=list)
 
 
 class ExporterSection(_Base):
