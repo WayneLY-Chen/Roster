@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import smtplib
 from email.message import EmailMessage as MimeMessage
-from email.utils import formataddr
+from email.utils import formataddr, make_msgid
 from pathlib import Path
 from typing import Protocol
 
@@ -93,7 +93,7 @@ class SmtpSender:
         self,
         message: SendableMessage,
         attachments: list[tuple[str, bytes, str]] | None = None,
-    ) -> None:
+    ) -> str:
         """Compose and hand one message to the SMTP relay.
 
         ``message`` only needs ``to_address``, ``subject`` and ``body`` --
@@ -123,6 +123,11 @@ class SmtpSender:
         )
         mime["To"] = to_address
         mime["Subject"] = subject
+        # 自己配一個 Message-ID 並且記下來：對方回信時會在 In-Reply-To 帶著
+        # 它，那是唯一「這封回信對應到我哪一封」的確定證據。不設的話由伺服器
+        # 配，而我們永遠看不到那個值。
+        rfc_message_id = make_msgid(domain=address.rpartition("@")[2] or None)
+        mime["Message-ID"] = rfc_message_id
         if self.settings.reply_to:
             mime["Reply-To"] = self.settings.reply_to
 
@@ -138,6 +143,7 @@ class SmtpSender:
             self._connection.send_message(mime)
         except smtplib.SMTPException as exc:
             raise GmailError(f"寄送給 {to_address} 失敗：{exc}") from exc
+        return rfc_message_id
 
     def _set_body(self, mime: MimeMessage, body: str) -> None:
         """Attach the body, as plain text or as HTML with inline images.

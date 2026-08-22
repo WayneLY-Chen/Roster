@@ -296,10 +296,11 @@ def send_campaign(
             status = EmailStatus.DRY_RUN if mailer.dry_run else EmailStatus.SENT
             error_text: str | None = None
 
+            rfc_message_id: str | None = None
             if not mailer.dry_run:
                 try:
                     assert sender is not None
-                    sender.send(message, loaded_attachments)
+                    rfc_message_id = sender.send(message, loaded_attachments)
                 except GmailError as exc:
                     status = EmailStatus.FAILED
                     error_text = str(exc)
@@ -309,6 +310,7 @@ def send_campaign(
             with session_scope() as session:
                 stored = session.get(EmailMessage, message_id)
                 if stored is not None:
+                    stored.message_id = rfc_message_id
                     stored.status = status.value
                     stored.error = error_text
                     stored.sent_at = now() if status != EmailStatus.FAILED else None

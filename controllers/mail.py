@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.config import AppConfig, get_config
+from core.constants import PipelineStage
+from core.i18n import STAGE_LABELS
 from core.errors import CRMError
 from core.schemas import CompanyFilter
 from gmail import campaign as campaign_module
@@ -344,6 +346,7 @@ class BounceController:
     def scan(
         self,
         *,
+        client: Any = None,
         query: str | None = None,
         limit: int | None = None,
         report: Callable[[object], None] | None = None,
@@ -353,7 +356,11 @@ class BounceController:
 
         順序刻意是「先讀完信箱、再開資料庫交易」：IMAP 那一段可能要幾十秒，
         整段包在交易裡的話 SQLite 會被佔著，同時間背景在跑的爬取就寫不進去。
+
+        ``client`` 給的話就用那一條既有的連線（見 :func:`scan_inbox`）。
         """
+        from contextlib import nullcontext
+
         from sqlalchemy import select
 
         from core.constants import EmailStatus, EmailVerdict
@@ -375,9 +382,10 @@ class BounceController:
                 report(f"看過 {len(messages)} 封了…")
 
         try:
-            with gmail_session(self.config) as client:
+            opened = gmail_session(self.config) if client is None else nullcontext(client)
+            with opened as connection:
                 for bounce in iter_bounces(
-                    client, query=query, limit=limit, sent_to=sent, on_message=note
+                    connection, query=query, limit=limit, sent_to=sent, on_message=note
                 ):
                     if cancel_event is not None and cancel_event.is_set():
                         raise CRMError("已取消。")
@@ -490,3 +498,362 @@ class BounceController:
         if report is not None:
             report(result.describe())
         return result
+
+
+# ----------------------------------------------------------- 回覆與退訂
+#
+# 跟退信是同一趟：讀收件匣 → 對回寄送紀錄 → 預覽 → 使用者勾完才寫。
+# 差別在寫回去的是什麼：退信改的是「這個地址還活著嗎」，這裡改的是業務階段
+# 與請勿聯絡。
+
+
+#: 回信會把業務階段推到這裡。
+REPLY_STAGE = PipelineStage.CONTACTED
+
+#: 階段的先後。**只往前推，而且只推到 REPLY_STAGE。**
+#:
+#: 不在這個序列裡的階段（Lost、Inactive）一律不動：那是使用者自己下的結論，
+#: 一封回信——很可能只是「謝謝，目前沒有需求」——沒有資格推翻它。
+_STAGE_ORDER: tuple[str, ...] = (
+    PipelineStage.NEW.value,
+    PipelineStage.QUALIFIED.value,
+    PipelineStage.CONTACTED.value,
+    PipelineStage.MEETING.value,
+    PipelineStage.PROPOSAL.value,
+    PipelineStage.NEGOTIATION.value,
+    PipelineStage.WON.value,
+)
+
+
+def advances(current: str) -> bool:
+    """從 ``current`` 推到「已聯絡」算不算往前。
+
+    使用者手動改成「會議」之後，一封自動回覆不該把它拉回「已聯絡」——那會讓
+    他辛苦維護的階段被程式一夜之間洗掉，而且他不會馬上發現。
+    """
+    if current not in _STAGE_ORDER:
+        return False
+    return _STAGE_ORDER.index(current) < _STAGE_ORDER.index(REPLY_STAGE.value)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyHit:
+    """一封對得回名單的回信。"""
+
+    reply: Any                  # gmail.replies.Reply
+    company_id: int
+    company_name: str
+    email: str
+    #: 這家公司現在的業務階段。
+    stage: str = ""
+
+    @property
+    def will_advance(self) -> bool:
+        """採用之後會不會動到業務階段。"""
+        return not self.reply.unsubscribe and advances(self.stage)
+
+    @property
+    def action(self) -> str:
+        """畫面上那一格「會做什麼」。講清楚才叫看過。"""
+        if self.reply.unsubscribe:
+            return "標記為請勿聯絡"
+        if self.will_advance:
+            # 用中文標籤，不是資料庫裡那個英文值——這一格是給人看的。
+            return f"階段推到「{STAGE_LABELS.get(REPLY_STAGE.value, REPLY_STAGE.value)}」"
+        return "只留一則紀錄"
+
+    @property
+    def suggested(self) -> bool:
+        """預設要不要勾。
+
+        自動回覆（休假、系統確認）預設不勾：它證明信寄到了，但不證明有人在意。
+        把它算成「已聯絡」會讓使用者以為這一家有回應，而其實沒有人讀過。
+        要求退訂的例外——那個一定要勾，漏掉的代價大得多。
+        """
+        return bool(self.reply.unsubscribe or not self.reply.automatic)
+
+
+@dataclass(slots=True)
+class ReplyScan:
+    hits: list[ReplyHit] = field(default_factory=list)
+    #: 看了幾封信。
+    messages: int = 0
+
+    def describe(self) -> str:
+        out = sum(1 for hit in self.hits if hit.reply.unsubscribe)
+        parts = [f"看了 {self.messages} 封信，對得上名單的有 {len(self.hits)} 封"]
+        if out:
+            parts.append(f"其中 {out} 封是要求不要再寄")
+        return "；".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyResult:
+    advanced: int = 0
+    unsubscribed: int = 0
+    noted: int = 0
+
+    def describe(self) -> str:
+        stage = STAGE_LABELS.get(REPLY_STAGE.value, REPLY_STAGE.value)
+        parts = []
+        if self.advanced:
+            parts.append(f"{self.advanced} 家推到「{stage}」")
+        if self.unsubscribed:
+            parts.append(f"{self.unsubscribed} 家標記為請勿聯絡，之後不會再寄")
+        if self.noted:
+            parts.append(f"{self.noted} 封只留了紀錄")
+        return "，".join(parts) or "沒有任何改動"
+
+
+class ReplyController:
+    """把收件匣裡的回信與退訂要求對回名單。
+
+    **這個類別不會寄任何東西。** 自動回覆是一個「一次設定錯就對著幾百個真實
+    客戶連續發生」的功能，不是這支程式該替使用者做的決定。
+    """
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config or get_config()
+
+    def _sent_index(self) -> tuple[set[str], dict[str, int]]:
+        """``(寄過的地址, {Message-ID: EmailMessage.id})``。
+
+        兩個都只從 ``status = Sent`` 的紀錄長出來。這是那條「只認自己寄過的
+        地址」——少了它，收件匣裡任何一封信都能改動使用者的名單。
+        """
+        from sqlalchemy import select
+
+        from core.constants import EmailStatus
+        from database.models import EmailMessage
+        from database.session import session_scope
+
+        addresses: set[str] = set()
+        ids: dict[str, int] = {}
+        with session_scope() as session:
+            rows = session.execute(
+                select(
+                    EmailMessage.id,
+                    EmailMessage.to_address,
+                    EmailMessage.message_id,
+                ).where(EmailMessage.status == EmailStatus.SENT.value)
+            )
+            for row_id, address, rfc_id in rows:
+                if address:
+                    addresses.add(address.strip().lower())
+                if rfc_id:
+                    ids[rfc_id.strip()] = row_id
+        return addresses, ids
+
+    def scan(
+        self,
+        *,
+        client: Any = None,
+        days: int | None = None,
+        limit: int | None = None,
+        report: Callable[[object], None] | None = None,
+        cancel_event: Any = None,
+    ) -> ReplyScan:
+        """讀收件匣找回信。**唯讀，什麼都不寫。**
+
+        ``client`` 給的話就用那一條既有的連線——使用者按的是一顆按鈕，不該為了
+        退信與回覆各登入一次。
+        """
+        from contextlib import nullcontext
+
+        from sqlalchemy import select
+
+        from core.constants import EmailStatus
+        from database.models import Company, EmailMessage
+        from database.session import session_scope
+        from gmail.client import gmail_session
+        from gmail.replies import DEFAULT_DAYS, iter_replies, since_query
+
+        addresses, ids = self._sent_index()
+        if not addresses and not ids:
+            # 一封都還沒寄過。這時候收件匣裡不可能有「回我的信」，連連線都不用。
+            return ReplyScan()
+
+        found: dict[str, Any] = {}
+        messages: set[str] = set()
+
+        def note(uid: str) -> None:
+            messages.add(uid)
+            if report is not None and len(messages) % 20 == 0:
+                report(f"看過 {len(messages)} 封了…")
+
+        if report is not None:
+            report("正在讀你的收件匣…")
+        try:
+            opened = gmail_session(self.config) if client is None else nullcontext(client)
+            with opened as connection:
+                for reply in iter_replies(
+                    connection,
+                    query=since_query(days or DEFAULT_DAYS),
+                    limit=limit,
+                    sent_to=addresses,
+                    sent_ids=ids,
+                    on_message=note,
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise CRMError("已取消。")
+                    previous = found.get(reply.address)
+                    # 同一個人回了好幾封時留最重要的那一封：要求退訂優先，
+                    # 其次是真人回覆，自動回覆最後。
+                    if previous is None or _outranks(reply, previous):
+                        found[reply.address] = reply
+        except CRMError:
+            raise
+        except Exception as exc:
+            raise CRMError(f"讀信箱時出錯：{exc}") from exc
+
+        scan = ReplyScan(messages=len(messages))
+        if not found:
+            return scan
+
+        with session_scope() as session:
+            for address, reply in found.items():
+                company = None
+                if reply.email_message_id is not None:
+                    sent = session.get(EmailMessage, reply.email_message_id)
+                    if sent is not None and sent.company_id:
+                        company = session.get(Company, sent.company_id)
+                if company is None:
+                    company_id = session.execute(
+                        select(EmailMessage.company_id)
+                        .where(
+                            EmailMessage.to_address == address,
+                            EmailMessage.status == EmailStatus.SENT.value,
+                        )
+                        .order_by(EmailMessage.sent_at.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    company = session.get(Company, company_id) if company_id else None
+                if company is None:
+                    continue
+                scan.hits.append(
+                    ReplyHit(
+                        reply=reply,
+                        company_id=company.id,
+                        company_name=company.company_name,
+                        email=company.email or address,
+                        stage=company.pipeline_stage,
+                    )
+                )
+        scan.hits.sort(key=lambda hit: (not hit.reply.unsubscribe, hit.company_name))
+        return scan
+
+    def apply(
+        self,
+        hits: "Sequence[ReplyHit]",
+        *,
+        report: Callable[[object], None] | None = None,
+        cancel_event: Any = None,
+    ) -> ReplyResult:
+        """把勾起來的那幾筆寫進資料庫。
+
+        兩件事，各自獨立：要求退訂的標成請勿聯絡（**只加不減**），其餘的把業務
+        階段往前推到「已聯絡」——而且只往前推。每一筆都留一則 Activity。
+        """
+        from core.constants import ActivityType
+        from database.models import now
+        from database.repository import ActivityRepository, CompanyRepository
+        from database.session import session_scope
+        from gmail.campaign import unsubscribe_by_email
+
+        chosen = list(hits)
+        if not chosen:
+            return ReplyResult()
+
+        advanced = unsubscribed = noted = 0
+
+        # 退訂先做，而且走既有的那條路（同一個地址可能對到好幾家公司，那個
+        # 函式已經處理了）。它自己開交易，所以放在下面那段之外。
+        for hit in chosen:
+            if hit.reply.unsubscribe:
+                unsubscribed += unsubscribe_by_email(hit.reply.address)
+
+        with session_scope() as session:
+            companies = CompanyRepository(session)
+            activities = ActivityRepository(session)
+            for hit in chosen:
+                company = companies.get(hit.company_id)
+                if company is None:
+                    continue
+                reply = hit.reply
+                detail = "；".join(
+                    part
+                    for part in (
+                        f"主旨：{reply.subject}" if reply.subject else "",
+                        reply.snippet,
+                        f"比對方式：{reply.confidence}",
+                    )
+                    if part
+                )
+                if reply.unsubscribe:
+                    # unsubscribe_by_email 已經留過紀錄了，這裡不重複寫一則。
+                    continue
+                if advances(company.pipeline_stage):
+                    company.pipeline_stage = REPLY_STAGE.value
+                    company.updated_at = now()
+                    advanced += 1
+                else:
+                    noted += 1
+                activities.add(
+                    hit.company_id,
+                    ActivityType.EMAIL,
+                    subject=f"收到回信：{reply.address}",
+                    body=detail or "（沒有內容）",
+                    occurred_at=reply.received_at,
+                )
+
+        result = ReplyResult(advanced=advanced, unsubscribed=unsubscribed, noted=noted)
+        if report is not None:
+            report(result.describe())
+        return result
+
+
+def _outranks(candidate: Any, current: Any) -> bool:
+    """同一個地址寄來好幾封時，哪一封比較該顯示。"""
+    def rank(reply: Any) -> int:
+        if reply.unsubscribe:
+            return 2
+        return 0 if reply.automatic else 1
+
+    return rank(candidate) > rank(current)
+
+
+@dataclass(slots=True)
+class InboxScan:
+    """讀一次信箱的完整結果：退信 + 回覆。"""
+
+    bounces: BounceScan = field(default_factory=BounceScan)
+    replies: ReplyScan = field(default_factory=ReplyScan)
+
+
+def scan_inbox(
+    config: AppConfig | None = None,
+    *,
+    report: Callable[[object], None] | None = None,
+    cancel_event: Any = None,
+) -> InboxScan:
+    """讀一次信箱，退信與回覆一起找出來。**唯讀，什麼都不寫。**
+
+    共用同一條 IMAP 連線：使用者按的是一顆按鈕，登入兩次只是慢一倍，而且
+    Gmail 對短時間內重複登入本來就比較敏感。
+    """
+    from gmail.client import gmail_session
+
+    config = config or get_config()
+    try:
+        with gmail_session(config) as client:
+            bounces = BounceController(config).scan(
+                client=client, report=report, cancel_event=cancel_event
+            )
+            replies = ReplyController(config).scan(
+                client=client, report=report, cancel_event=cancel_event
+            )
+    except CRMError:
+        raise
+    except Exception as exc:
+        raise CRMError(f"讀信箱時出錯：{exc}") from exc
+    return InboxScan(bounces=bounces, replies=replies)

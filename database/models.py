@@ -392,6 +392,16 @@ class EmailMessage(Base):
     #: ``attachments/``，這裡存的是「當時寄出去的是哪幾個」。用換行分隔而不是
     #: 逗號，因為檔名裡可以有逗號、不會有換行（見 gmail.attachments.safe_name）。
     attachments: Mapped[str | None] = mapped_column(Text)
+    #: 這封信送出去時帶的 RFC 5322 ``Message-ID``。
+    #:
+    #: 存它是為了認出回信：對方的信件會在 ``In-Reply-To``／``References`` 裡
+    #: 帶著它，那是唯一「這封回信對應到我哪一封」的確定證據。用寄件者地址去
+    #: 猜也可以，但同一個地址寄來的任何一封信都會被算成回覆。
+    #:
+    #: **不是每次都對得上。** 有些寄件伺服器（含 Gmail 的 SMTP）會把送出去的
+    #: Message-ID 換成自己的，那時候這裡存的值收件端根本沒看過。所以認回信是
+    #: 「先比對這個，比不到再退回用地址比對」，見 gmail/replies.py。
+    message_id: Mapped[str | None] = mapped_column(String(998), index=True)
     status: Mapped[str] = mapped_column(
         String(32), default=EmailStatus.PENDING.value, index=True
     )

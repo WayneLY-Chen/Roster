@@ -753,3 +753,180 @@ def test_a_failed_scan_leaves_the_button_usable(qt_app, db_session, mail_config,
 
     assert page.bounce_scan_button.isEnabled()
     assert "Gmail 登入失敗" in page.bounce_status.text()
+
+
+# ------------------------------------------------------------ 回覆與退訂
+#
+# 解析與資料庫那一半在 tests/test_gmail_replies.py。這裡只驗 Qt 這一段。
+
+
+def _reply_hit(name, address, *, unsubscribe=False, automatic=False, stage="New"):
+    from controllers.mail import ReplyHit
+    from gmail.replies import Reply
+
+    return ReplyHit(
+        reply=Reply(
+            address=address,
+            subject="Re: 合作洽詢",
+            unsubscribe=unsubscribe,
+            automatic=automatic,
+        ),
+        company_id=1,
+        company_name=name,
+        email=address,
+        stage=stage,
+    )
+
+
+def _reply_scan(*hits, messages: int = 5):
+    from controllers.mail import ReplyScan
+
+    return ReplyScan(hits=list(hits), messages=messages)
+
+
+def test_one_scan_fills_both_tables(qt_app, db_session, mail_config):
+    """使用者按的是一顆按鈕，退信與回覆一起回來。"""
+    from controllers.mail import InboxScan
+
+    page = _built_page(qt_app)
+
+    page._on_inbox(
+        InboxScan(
+            bounces=_scan(_hit("硬退的公司", "dead@a.example", hard=True)),
+            replies=_reply_scan(_reply_hit("回信的公司", "ming@b.example")),
+        )
+    )
+
+    assert page.bounce_table.row_count() == 1
+    assert page.reply_table.row_count() == 1
+
+
+def test_an_auto_reply_is_listed_but_not_ticked(qt_app, db_session, mail_config):
+    """自動回覆證明信寄到了，不證明有人讀過。"""
+    page = _built_page(qt_app)
+
+    page._on_replies(
+        _reply_scan(
+            _reply_hit("有人回的", "a@x.example"),
+            _reply_hit("休假中的", "b@x.example", automatic=True),
+        )
+    )
+
+    ticked = [row["company_name"] for row in page.reply_table.checked_rows()]
+    assert ticked == ["有人回的"]
+
+
+def test_an_unsubscribe_is_ticked_even_when_it_is_automatic(qt_app, db_session, mail_config):
+    """漏掉一個明講不要的人，代價遠大於多勾一筆。"""
+    page = _built_page(qt_app)
+
+    page._on_replies(
+        _reply_scan(_reply_hit("要退訂的", "c@x.example", unsubscribe=True, automatic=True))
+    )
+
+    assert len(page.reply_table.checked_rows()) == 1
+
+
+def test_the_table_says_what_each_row_will_do(qt_app, db_session, mail_config):
+    """「看過才寫」的「看過」要看得到後果，不只是看到一列字。"""
+    page = _built_page(qt_app)
+
+    page._on_replies(
+        _reply_scan(
+            _reply_hit("要退訂的", "c@x.example", unsubscribe=True),
+            _reply_hit("新公司", "a@x.example", stage="New"),
+            _reply_hit("已經在談的", "b@x.example", stage="Meeting"),
+        )
+    )
+
+    actions = {
+        page.reply_table.model.row_at(i)["company_name"]:
+        page.reply_table.model.row_at(i)["action"]
+        for i in range(page.reply_table.row_count())
+    }
+    assert actions["要退訂的"] == "標記為請勿聯絡"
+    assert "已聯絡" in actions["新公司"]
+    assert actions["已經在談的"] == "只留一則紀錄"
+
+
+def test_the_confidence_of_each_match_is_visible(qt_app, db_session, mail_config):
+    """用地址猜出來的那幾筆，使用者有權在勾之前就知道。"""
+    from controllers.mail import ReplyHit
+    from gmail.replies import Reply
+
+    page = _built_page(qt_app)
+    page._on_replies(
+        _reply_scan(
+            ReplyHit(
+                reply=Reply(address="a@x.example", matched_by="message-id"),
+                company_id=1,
+                company_name="確定的",
+                email="a@x.example",
+                stage="New",
+            ),
+            _reply_hit("用猜的", "b@x.example"),
+        )
+    )
+
+    seen = {
+        page.reply_table.model.row_at(i)["company_name"]:
+        page.reply_table.model.row_at(i)["confidence"]
+        for i in range(page.reply_table.row_count())
+    }
+    assert seen == {"確定的": "確定", "用猜的": "用地址比對"}
+
+
+def test_nothing_ticked_means_nothing_is_written(qt_app, db_session, mail_config, monkeypatch):
+    page = _built_page(qt_app)
+    page._on_replies(_reply_scan(_reply_hit("休假中的", "b@x.example", automatic=True)))
+
+    monkeypatch.setattr(
+        page.reply_mark_task, "start", lambda *a: pytest.fail("不該寫任何東西")
+    )
+    page._apply_replies()
+
+    assert page.app.messages[-1][1] == "warning"
+
+
+def test_saying_no_to_the_confirmation_writes_nothing(qt_app, db_session, mail_config, monkeypatch):
+    page = _built_page(qt_app)
+    page._on_replies(_reply_scan(_reply_hit("要退訂的", "c@x.example", unsubscribe=True)))
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    monkeypatch.setattr(
+        page.reply_mark_task, "start", lambda *a: pytest.fail("按了取消卻寫了")
+    )
+    page._apply_replies()
+
+
+def test_saying_yes_sends_exactly_the_ticked_rows(qt_app, db_session, mail_config, monkeypatch):
+    page = _built_page(qt_app)
+    page._on_replies(
+        _reply_scan(
+            _reply_hit("要退訂的", "c@x.example", unsubscribe=True),
+            _reply_hit("休假中的", "b@x.example", automatic=True),
+        )
+    )
+
+    sent: list = []
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(page.reply_mark_task, "start", lambda hits: sent.append(hits))
+    page._apply_replies()
+
+    assert [hit.company_name for hit in sent[0]] == ["要退訂的"]
+
+
+def test_a_new_scan_clears_the_previous_reply_table(qt_app, db_session, mail_config, monkeypatch):
+    """上一次的結果留在表格上、而新的一次失敗，使用者會把舊的採用進去。"""
+    page = _built_page(qt_app)
+    page._on_replies(_reply_scan(_reply_hit("上一次的", "a@x.example")))
+
+    monkeypatch.setattr(page.bounce_task, "start", lambda *a: None)
+    page._scan_bounces()
+
+    assert page.reply_table.row_count() == 0
+    assert not page.reply_apply_button.isEnabled()

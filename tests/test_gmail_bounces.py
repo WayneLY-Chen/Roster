@@ -134,7 +134,10 @@ Content-Type: text/plain; charset=UTF-8
 
 
 def _message(raw: str):
-    return email.message_from_string(raw)
+    # 用 bytes 解析，跟正式流程一樣（GmailClient.fetch_raw 拿回來的是位元組）。
+    # 用 message_from_string 的話，非 ASCII 內文經過 get_payload(decode=True)
+    # 會變成一串逃脫字元，測到的東西跟真的收信不一樣。
+    return email.message_from_bytes(raw.encode("utf-8"))
 
 
 # ------------------------------------------------------------------ 認得出來

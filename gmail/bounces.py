@@ -44,6 +44,7 @@ from email.utils import parsedate_to_datetime
 
 from core.constants import LogCategory
 from core.logging_setup import get_logger
+from gmail.client import decode_header_value
 
 log = get_logger(LogCategory.CRAWL)
 
@@ -125,10 +126,12 @@ def looks_like_bounce(message: Message) -> bool:
     三個判準取聯集，跟 :data:`DEFAULT_QUERY` 對齊——搜尋條件是給伺服器過濾用
     的粗篩，這裡才是真的判斷。使用者自己改過搜尋條件時，這一層仍然守得住。
     """
-    sender = (message.get("From") or "").lower()
+    sender = decode_header_value(message.get("From")).lower()
     if any(f"{name}@" in sender for name in _DAEMONS):
         return True
-    content_type = (message.get("Content-Type") or "").lower().replace(" ", "")
+    content_type = (
+        decode_header_value(message.get("Content-Type")).lower().replace(" ", "")
+    )
     if "report-type=delivery-status" in content_type:
         return True
     return any(
@@ -233,9 +236,9 @@ def parse_bounce(
     if not looks_like_bounce(message):
         return []
 
-    subject = (message.get("Subject") or "").strip()
+    subject = decode_header_value(message.get("Subject"))
     received: datetime | None = None
-    raw_date = message.get("Date")
+    raw_date = decode_header_value(message.get("Date"))
     if raw_date:
         try:
             received = parsedate_to_datetime(raw_date)

@@ -45,14 +45,29 @@ class MailMessage:
         return self.sender_email.rpartition("@")[2].lower()
 
 
-def _decode(raw: str | None) -> str:
-    """Decode an RFC 2047 header (``=?UTF-8?B?...?=``) to plain text."""
-    if not raw:
+def decode_header_value(raw: object) -> str:
+    """把一個標頭解成純文字。
+
+    兩件事一起做，而且兩件都會咬人：
+
+    * **RFC 2047 的編碼字**（``=?UTF-8?B?...?=``）要解開，不然主旨全是亂碼。
+    * **回傳值不一定是字串。** 標頭裡有非 ASCII 位元組時，email 套件回的是一個
+      ``Header`` 物件而不是 ``str``——直接對它呼叫 ``.lower()`` 會炸，而那只有
+      在真的收到一封中文主旨的信時才會發生。
+    """
+    if raw is None:
+        return ""
+    text = raw if isinstance(raw, str) else str(raw)
+    if not text:
         return ""
     try:
-        return str(make_header(decode_header(raw))).strip()
+        return str(make_header(decode_header(text))).strip()
     except (UnicodeDecodeError, LookupError, ValueError):
-        return raw.strip()
+        return text.strip()
+
+
+#: 舊名字，這個模組內部還在用。
+_decode = decode_header_value
 
 
 def _extract_body(message: Message) -> str:

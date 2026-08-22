@@ -68,11 +68,11 @@ from core.constants import EmailVerdict
 from core.errors import CRMError
 from core.schemas import CompanyFilter
 from controllers.core import CompanyController
-from controllers.mail import BounceController, MailController
+from controllers.mail import BounceController, MailController, ReplyController, scan_inbox
 from core.i18n import ALL_OPTION, STAGE_LABELS, stage_labels, to_value
 from gui_qt import theme
 from gui_qt.composer import RichTextEditor, edit_body, populate_preview
-from gui_qt.pages.base import BasePage
+from gui_qt.pages.base import BasePage, bump_data_version
 from gui_qt.tasks import BackgroundTask
 from gui_qt.widgets import (
     CHECK_KEY,
@@ -99,6 +99,22 @@ BOUNCE_COLUMNS: tuple[tuple[str, str, int], ...] = (
 )
 
 
+#: 「回覆與退訂」那張表的欄位。
+#:
+#: 「比對方式」是誠實那一欄：``確定``代表對方的信直接指到我們寄出的那一封，
+#: ``用地址比對``代表只是「同一個地址寄來的」——那可能跟這次開發無關。使用者
+#: 有權在勾之前就知道這一筆有多可信。
+REPLY_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("company_name", "公司名稱", 180),
+    ("email", "信箱", 180),
+    ("kind", "類型", 110),
+    ("confidence", "比對方式", 90),
+    ("action", "會做什麼", 150),
+    ("subject", "主旨", 220),
+    ("received", "收到", 90),
+)
+
+
 class MailPage(BasePage):
     title = "郵件"
     icon = "✉"
@@ -108,8 +124,10 @@ class MailPage(BasePage):
         self.controller = MailController()
         self.company_controller = CompanyController()
         self.bounces = BounceController()
-        #: 上一次掃出來的退信。表格的每一列都對應這裡面的一筆。
+        self.replies = ReplyController()
+        #: 上一次掃出來的退信與回信。兩張表的每一列都對應這裡面的一筆。
         self._bounce_hits: list = []
+        self._reply_hits: list = []
         self.plan: Any = None
         self._mailer_ready = False
         self._loaded_template_name: str | None = None
@@ -144,7 +162,7 @@ class MailPage(BasePage):
             self,
             self._scan_worker,
             on_progress=self._on_bounce_progress,
-            on_done=self._on_bounces,
+            on_done=self._on_inbox,
             on_error=self._on_bounce_error,
         )
         self.bounce_mark_task = BackgroundTask(
@@ -153,6 +171,13 @@ class MailPage(BasePage):
             on_progress=self._on_bounce_progress,
             on_done=self._on_bounces_applied,
             on_error=self._on_bounce_mark_error,
+        )
+        self.reply_mark_task = BackgroundTask(
+            self,
+            self._reply_worker,
+            on_progress=self._on_bounce_progress,
+            on_done=self._on_replies_applied,
+            on_error=self._on_reply_mark_error,
         )
 
     # ------------------------------------------------------------- 建立元件
@@ -188,6 +213,7 @@ class MailPage(BasePage):
         self._build_recipients_section(body_row)
         body_column.addWidget(panels, 1)
         self._build_bounce_section(body_column)
+        self._build_reply_section(body_column)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -580,7 +606,7 @@ class MailPage(BasePage):
         section.body_layout.addWidget(intro)
 
         row = QHBoxLayout()
-        self.bounce_scan_button = QPushButton("讀信箱找退信")
+        self.bounce_scan_button = QPushButton("讀信箱")
         self.bounce_scan_button.clicked.connect(self._scan_bounces)
         row.addWidget(self.bounce_scan_button)
         self.bounce_apply_button = QPushButton("標記勾起來的")
@@ -612,16 +638,21 @@ class MailPage(BasePage):
         column.addWidget(section)
 
     def _scan_worker(self, *, report=None, cancel_event=None):
-        """在背景執行緒裡讀信箱。
+        """在背景執行緒裡讀一次信箱：退信與回覆一起找。
 
-        包一層而不是直接把 ``self.bounces.scan`` 交給 BackgroundTask：那樣綁
-        住的是**建立當下**那個 controller，而 ``on_show()`` 會換掉它。使用者
-        剛在設定頁改完 Gmail 密碼的話，舊的那份會拿一組錯的帳密去登入。
+        包一層而不是直接把 controller 的方法交給 BackgroundTask：那樣綁住的是
+        **建立當下**那個 controller，而 ``on_show()`` 會換掉它。使用者剛在設定
+        頁改完 Gmail 密碼的話，舊的那份會拿一組錯的帳密去登入。
         """
-        return self.bounces.scan(report=report, cancel_event=cancel_event)
+        return scan_inbox(
+            self.controller.config, report=report, cancel_event=cancel_event
+        )
 
     def _mark_worker(self, hits, *, report=None, cancel_event=None):
         return self.bounces.apply(hits, report=report, cancel_event=cancel_event)
+
+    def _reply_worker(self, hits, *, report=None, cancel_event=None):
+        return self.replies.apply(hits, report=report, cancel_event=cancel_event)
 
     def _scan_bounces(self) -> None:
         if self.bounce_task.running:
@@ -629,7 +660,10 @@ class MailPage(BasePage):
         self.bounce_scan_button.setEnabled(False)
         self.bounce_apply_button.setEnabled(False)
         self.bounce_table.clear()
+        self.reply_table.clear()
         self._bounce_hits = []
+        self._reply_hits = []
+        self.reply_apply_button.setEnabled(False)
         self.bounce_status.setText("正在連你的信箱…")
         self.bounce_task.start()
 
@@ -701,6 +735,124 @@ class MailPage(BasePage):
         self.bounce_apply_button.setEnabled(True)
         self._handle_error(exc)
 
+    # ---------------------------------------------------------- 回覆與退訂
+
+    def _build_reply_section(self, column: QVBoxLayout) -> None:
+        """同一趟讀信箱找出來的回信與退訂要求。
+
+        跟退信分成兩張表而不是一張：它們寫回去的是完全不同的東西（一個改
+        「這個地址還活著嗎」，一個改業務階段與請勿聯絡），混在一張表裡那顆
+        「標記」按鈕就說不清楚自己會做什麼。
+        """
+        section = Section("回覆與退訂")
+
+        intro = QLabel(
+            "有人回信了卻沒有人記下來，下一批就會<b>對著已經回過信的人再寄一次"
+            "冷開發信</b>。有人說「不要再寄」而沒有人處理，那更嚴重——"
+            "每一封信都印著退訂說明，等於邀請了對方卻不去收。"
+        )
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setObjectName("MutedLabel")
+        intro.setWordWrap(True)
+        section.body_layout.addWidget(intro)
+
+        row = QHBoxLayout()
+        self.reply_apply_button = QPushButton("採用勾起來的")
+        self.reply_apply_button.clicked.connect(self._apply_replies)
+        self.reply_apply_button.setEnabled(False)
+        row.addWidget(self.reply_apply_button)
+        row.addStretch(1)
+        section.body_layout.addLayout(row)
+
+        self.reply_status = QLabel("")
+        self.reply_status.setObjectName("MutedLabel")
+        self.reply_status.setWordWrap(True)
+        section.body_layout.addWidget(self.reply_status)
+
+        self.reply_table = DataTable(REPLY_COLUMNS, min_rows=3, checkable=True)
+        section.body_layout.addWidget(self.reply_table)
+
+        note = QLabel(
+            "「會做什麼」那一欄就是採用之後實際發生的事。"
+            "業務階段<b>只會往前推</b>——你已經手動改成「會議」的公司，"
+            "一封回信不會把它拉回「已聯絡」。"
+            "<b>自動回覆</b>（休假通知那種）預設不勾：它證明信寄到了，"
+            "但不證明有人讀過。"
+        )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
+
+        column.addWidget(section)
+
+    def _on_inbox(self, scan) -> None:
+        """一趟讀完，兩張表一起填。"""
+        self._on_bounces(scan.bounces)
+        self._on_replies(scan.replies)
+
+    def _on_replies(self, scan) -> None:
+        self._reply_hits = list(scan.hits)
+        rows = []
+        for index, hit in enumerate(scan.hits):
+            received = hit.reply.received_at
+            rows.append(
+                {
+                    "company_name": hit.company_name,
+                    "email": hit.email,
+                    "kind": hit.reply.kind,
+                    "confidence": hit.reply.confidence,
+                    "action": hit.action,
+                    "subject": hit.reply.subject or "（沒有主旨）",
+                    "received": received.strftime("%Y-%m-%d") if received else "",
+                    CHECK_KEY: hit.suggested,
+                    "_index": index,
+                }
+            )
+        self.reply_table.set_rows(rows)
+        self.reply_apply_button.setEnabled(bool(rows))
+        self.reply_status.setText(scan.describe())
+
+    def _apply_replies(self) -> None:
+        chosen = [
+            self._reply_hits[row["_index"]]
+            for row in self.reply_table.checked_rows()
+            if 0 <= row.get("_index", -1) < len(self._reply_hits)
+        ]
+        if not chosen:
+            self.status("一筆都沒有勾", "warning")
+            return
+        out = sum(1 for hit in chosen if hit.reply.unsubscribe)
+        moved = sum(1 for hit in chosen if hit.will_advance)
+        confirmed = QMessageBox.question(
+            self,
+            "要採用這幾筆嗎？",
+            f"勾起來的 {len(chosen)} 筆會做這些事：\n\n"
+            f"・{out} 家標記為「請勿聯絡」，之後一律不再寄（這個只能加不能減，"
+            "要解除得到那家公司的詳細視窗自己取消）\n"
+            f"・{moved} 家的業務階段往前推到「已聯絡」\n"
+            "・其餘的只留一則紀錄",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        self.reply_apply_button.setEnabled(False)
+        self.reply_mark_task.start(chosen)
+
+    def _on_replies_applied(self, result) -> None:
+        self.reply_status.setText(result.describe())
+        self.status(result.describe(), "success")
+        self.reply_table.clear()
+        self._reply_hits = []
+        bump_data_version()
+        self.refresh()
+
+    def _on_reply_mark_error(self, exc: Exception) -> None:
+        self.reply_apply_button.setEnabled(True)
+        self._handle_error(exc)
+
+
     def _build_footer(self, outer: QVBoxLayout) -> None:
         footer = QHBoxLayout()
 
@@ -745,6 +897,7 @@ class MailPage(BasePage):
         # 退信那一個也要跟著換：Gmail 的帳號密碼可能剛在設定頁改過，舊的那份
         # controller 手上是舊設定，連線會用一組不存在的帳密去登入。
         self.bounces = BounceController()
+        self.replies = ReplyController()
         # 開關/每日上限的變更不會呼叫 bump_data_version()（那不是「新增/
         # 刪除/編輯公司」那類寫入），所以固定強制重整，不套用資料版本跳過
         # 機制，跟 Tk 版「每次顯示都整份重整」的行為一致。
