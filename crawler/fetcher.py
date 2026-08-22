@@ -56,6 +56,52 @@ def decode_bytes(raw: bytes, encoding: str) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
+#: 單一回應解壓縮後的大小上限。
+#:
+#: 擋的是「解壓縮炸彈」：httpx 會自動解開 gzip/br，而它**沒有任何預設上限**，
+#: 一律整包讀進記憶體。實測 100 KB 的 gzip 可以放大成 100 MB（約 1000 倍），
+#: 所以一個惡意站台只要回幾 MB 的壓縮內容就能把程式的記憶體吃光。
+#:
+#: 為什麼是 64 MB 而不是更小：PDF／Excel 名冊走的是同一支 fetch，而
+#: :data:`crawler.documents.MAX_DOCUMENT_BYTES` 允許到 40 MB。這個上限一旦
+#: 訂得比它低，合法的大份名冊會在下載階段就被誤殺，而且症狀是「這個來源
+#: 一直讀不到東西」，完全指不到原因。
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
+def _read_capped(response: httpx.Response) -> httpx.Response:
+    """把串流中的回應讀進記憶體，超過 :data:`MAX_RESPONSE_BYTES` 就中止。
+
+    回傳一個內容已經讀好的新 :class:`httpx.Response`，讓 ``.text`` /
+    ``.content`` 照常運作——編碼判斷（Big5 舊站靠的就是它）維持原本由 httpx
+    處理，這裡不自己重寫一套。
+
+    重組時要拿掉 ``Content-Encoding`` 與 ``Content-Length``：``iter_bytes()``
+    吐出來的已經是解壓後的位元組，留著那兩個標頭會讓 httpx 再解壓一次、
+    或是回報一個對不上的長度。
+    """
+    body = bytearray()
+    for chunk in response.iter_bytes():
+        body.extend(chunk)
+        if len(body) > MAX_RESPONSE_BYTES:
+            limit_mb = MAX_RESPONSE_BYTES // (1024 * 1024)
+            raise CrawlError(
+                f"{response.url} 的內容超過 {limit_mb} MB 上限，已中止下載。"
+            )
+
+    headers = {
+        key: value
+        for key, value in response.headers.items()
+        if key.lower() not in ("content-encoding", "content-length")
+    }
+    return httpx.Response(
+        status_code=response.status_code,
+        headers=headers,
+        content=bytes(body),
+        request=response.request,
+    )
+
+
 def _decode_body(response: httpx.Response, encoding: str | None) -> str:
     """依指定編碼解碼回應內容；未指定時交給 httpx 自己判斷（標頭或自動偵測）。"""
     if not encoding:
@@ -755,15 +801,20 @@ class HttpxFetcher(BaseFetcher):
                 # 因為伺服器是拿 Big5 位元組去比對資料庫。沒指定 encoding
                 # 時維持原本用 httpx 預設（UTF-8）的行為，不影響既有來源。
                 if encoding:
-                    response = self._client.post(
+                    request = self._client.build_request(
+                        "POST",
                         url,
                         content=_encode_form_body(data or {}, encoding),
                         headers={"Content-Type": "application/x-www-form-urlencoded"},
                     )
                 else:
-                    response = self._client.post(url, data=data or {})
+                    request = self._client.build_request("POST", url, data=data or {})
             else:
-                response = self._client.get(url)
+                request = self._client.build_request("GET", url)
+            # stream=True：先只把標頭讀回來，內容留在連線上由 _read_capped
+            # 邊讀邊數。用 .get()/.post() 的話 httpx 會直接把整包讀進記憶體，
+            # 那時再檢查大小已經來不及了。
+            response = self._client.send(request, stream=True)
         except httpx.TimeoutException as exc:
             raise TransientFetchError(f"timeout fetching {url}") from exc
         except httpx.TransportError as exc:
@@ -771,18 +822,26 @@ class HttpxFetcher(BaseFetcher):
         except httpx.HTTPError as exc:
             raise CrawlError(f"failed to fetch {url}: {exc}") from exc
 
-        if response.status_code in _RETRYABLE_STATUS:
-            self._honour_retry_after(response)
-            raise TransientFetchError(f"{url} returned {response.status_code}")
+        try:
+            # 狀態碼在讀內容之前就檢查完：錯誤頁的內容我們一個位元組都不需要，
+            # 先前的寫法會把 500 頁面整包下載回來才丟掉。
+            if response.status_code in _RETRYABLE_STATUS:
+                self._honour_retry_after(response)
+                raise TransientFetchError(f"{url} returned {response.status_code}")
 
-        if response.status_code >= 400:
-            raise CrawlError(f"{url} returned {response.status_code}")
+            if response.status_code >= 400:
+                raise CrawlError(f"{url} returned {response.status_code}")
+
+            body = _read_capped(response)
+        finally:
+            # stream=True 的回應一定要關，否則連線會留在池子裡不還。
+            response.close()
 
         return FetchResult(
-            url=str(response.url),
-            status_code=response.status_code,
-            html=_decode_body(response, encoding),
-            raw=response.content,
+            url=str(body.url),
+            status_code=body.status_code,
+            html=_decode_body(body, encoding),
+            raw=body.content,
         )
 
     @staticmethod
