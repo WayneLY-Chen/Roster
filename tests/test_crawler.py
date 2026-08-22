@@ -1466,3 +1466,87 @@ def test_turning_skip_known_off_crawls_everything_again(db_session, patch_config
 
     assert second.records_skipped_known == 0
     assert len([u for u in requested if "/c/" in u]) == 2
+
+
+# ------------------------------------------------- 回應大小上限（解壓縮炸彈）
+
+
+def test_fetch_rejects_oversized_response(tmp_config, monkeypatch):
+    """超過上限的回應要中止，而不是整包讀進記憶體。"""
+    from crawler import fetcher as fetcher_module
+
+    monkeypatch.setattr(fetcher_module, "MAX_RESPONSE_BYTES", 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 5000)
+
+    fetcher = _make_transport_fetcher(tmp_config, handler)
+    with pytest.raises(CrawlError, match="超過"):
+        fetcher.fetch("https://example.test/huge")
+
+
+def test_fetch_rejects_decompression_bomb(tmp_config, monkeypatch):
+    """壓縮後很小、解壓後很大——上限要算在**解壓之後**的位元組上。"""
+    import gzip
+
+    from crawler import fetcher as fetcher_module
+
+    monkeypatch.setattr(fetcher_module, "MAX_RESPONSE_BYTES", 64 * 1024)
+
+    payload = gzip.compress(b"\0" * (4 * 1024 * 1024))
+    assert len(payload) < 64 * 1024, "傳輸量本身要小於上限，否則測不到解壓後才爆的情況"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=payload, headers={"Content-Encoding": "gzip"}
+        )
+
+    fetcher = _make_transport_fetcher(tmp_config, handler)
+    with pytest.raises(CrawlError, match="超過"):
+        fetcher.fetch("https://example.test/bomb")
+
+
+def test_fetch_allows_response_just_under_the_cap(tmp_config, monkeypatch):
+    """上限本身不能誤殺正常頁面（PDF 名冊走的是同一條路）。"""
+    from crawler import fetcher as fetcher_module
+
+    monkeypatch.setattr(fetcher_module, "MAX_RESPONSE_BYTES", 4096)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"y" * 4000)
+
+    fetcher = _make_transport_fetcher(tmp_config, handler)
+    result = fetcher.fetch("https://example.test/ok")
+    assert len(result.raw) == 4000
+
+
+def test_response_cap_is_above_document_limit():
+    """上限必須高於文件檔上限，否則合法的大份名冊會在下載階段被誤殺。"""
+    from crawler.documents import MAX_DOCUMENT_BYTES
+    from crawler.fetcher import MAX_RESPONSE_BYTES
+
+    assert MAX_RESPONSE_BYTES > MAX_DOCUMENT_BYTES
+
+
+def test_big5_decoding_still_works_after_streaming_change(tmp_config):
+    """串流改寫不可以動到編碼判斷——Big5 舊站是這支程式的核心情境。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content="台灣機械公會".encode("big5"),
+            headers={"Content-Type": "text/html; charset=big5"},
+        )
+
+    fetcher = _make_transport_fetcher(tmp_config, handler)
+    result = fetcher.fetch("https://example.test/legacy")
+    assert "台灣機械公會" in result.html
+
+
+def test_error_status_is_still_raised_without_reading_body(tmp_config):
+    """狀態碼檢查移到讀內容之前，錯誤處理的行為不可以變。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b"not found")
+
+    fetcher = _make_transport_fetcher(tmp_config, handler)
+    with pytest.raises(CrawlError, match="404"):
+        fetcher.fetch("https://example.test/missing")

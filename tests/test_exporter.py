@@ -721,3 +721,87 @@ def test_a_summary_row_at_the_bottom_is_not_imported_as_a_company(
     assert summary.records_invalid == 1
     stored = {c.company_name for c in CompanyRepository(db_session).all()}
     assert stored == {"東台精機股份有限公司"}
+
+
+# --------------------------------------------------- 試算表公式注入（CSV Injection）
+#
+# 這一組測的是：被爬網站上的文字，不可以變成使用者 Excel 裡會執行的公式。
+# 公司名稱、地址、產品、以及自由欄位的「欄位名稱本身」，全部由名錄網站決定。
+
+
+def test_neutralise_formula_prefixes_dangerous_leads():
+    from exporter.base import neutralise_formula
+
+    for lead in ("=", "+", "-", "@"):
+        assert neutralise_formula(f"{lead}cmd") == f"'{lead}cmd"
+
+
+def test_neutralise_formula_covers_control_character_bypass():
+    """`\t=...` 會被 Excel 略過前置空白，讓 `=` 變成真正的開頭。"""
+    from exporter.base import neutralise_formula
+
+    for lead in ("\t", "\r", "\n"):
+        assert neutralise_formula(f"{lead}=cmd") == f"'{lead}=cmd"
+
+
+def test_neutralise_formula_leaves_ordinary_values_alone():
+    from exporter.base import neutralise_formula
+
+    assert neutralise_formula("正常公司股份有限公司") == "正常公司股份有限公司"
+    assert neutralise_formula("") == ""
+    assert neutralise_formula(None) is None
+    assert neutralise_formula(1234) == 1234        # 數值欄位不該被加引號
+    assert neutralise_formula(-500) == -500        # 負數是數字型別，不受影響
+
+
+def test_excel_export_produces_no_formula_cells(tmp_path):
+    """最關鍵的一條：xlsx 裡不可以出現任何真正的公式儲存格。"""
+    rows = [make_row(id=1, company_name="=cmd|'/c calc.exe'!A1")]
+    target = ExcelExporter().export(rows, tmp_path / "out.xlsx")
+
+    book = openpyxl.load_workbook(target)
+    sheet = book[book.sheetnames[0]]
+    for row in sheet.iter_rows():
+        for cell in row:
+            assert cell.data_type != "f", f"{cell.coordinate} 仍是公式儲存格"
+
+
+def test_csv_export_neutralises_formula(tmp_path):
+    rows = [make_row(id=1, company_name="=cmd|'/c calc.exe'!A1")]
+    target = CsvExporter().export(rows, tmp_path / "out.csv")
+    text = target.read_text(encoding="utf-8-sig")
+
+    assert "'=cmd" in text
+    # 沒有任何一格是以危險字元開頭（欄位開頭 = 行首或逗號之後）
+    for line in text.splitlines():
+        assert not line.startswith(("=", "+", "@", "\t"))
+        assert ",=" not in line and ",@" not in line
+
+
+def test_extra_field_names_and_values_are_neutralised(tmp_path):
+    """自由欄位的欄名與值都來自被爬網站，兩者都要中和。"""
+    rows = [make_row(id=1, extra_fields={"=惡意欄名": "@SUM(1+1)"})]
+    target = CsvExporter().export(rows, tmp_path / "out.csv")
+    text = target.read_text(encoding="utf-8-sig")
+
+    assert "'=惡意欄名" in text
+    assert "'@SUM(1+1)" in text
+
+
+def test_international_phone_survives_excel(tmp_path):
+    """+886 開頭的電話沒防護時會被 Excel 算成負數，加引號後才是原樣。"""
+    rows = [make_row(id=1, phone="+886-2-1234-5678")]
+    target = CsvExporter().export(rows, tmp_path / "out.csv")
+
+    assert "'+886-2-1234-5678" in target.read_text(encoding="utf-8-sig")
+
+
+def test_json_export_is_not_touched(tmp_path):
+    """JSON 是給程式讀的，補單引號只會讓下游拿到錯的字串。"""
+    evil = "=cmd|'/c calc.exe'!A1"
+    rows = [make_row(id=1, company_name=evil)]
+    target = JsonExporter().export(rows, tmp_path / "out.json")
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    records = payload if isinstance(payload, list) else payload["companies"]
+    assert records[0]["company_name"] == evil
