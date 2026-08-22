@@ -105,6 +105,55 @@ def _format_value(value: object, date_format: str) -> object:
     return value
 
 
+#: 會被試算表軟體當成「公式開頭」的字元。
+#:
+#: Excel、LibreOffice、Google Sheets 看到開頭是這幾個字元的儲存格，會把內容
+#: 當成公式求值而不是當成文字。而這份檔案裡的公司名稱、地址、產品說明全部
+#: 是從別人的網站上爬回來的——網站主人想在名稱欄位放什麼字元都可以。
+_FORMULA_LEAD = frozenset("=+-@")
+
+#: 這三個控制字元會被 Excel 當成前置空白略過，讓「下一個」字元變成真正的
+#: 開頭。少了它們，`\t=cmd|...` 這種寫法就繞過了上面那一組。
+_FORMULA_LEAD_CONTROL = frozenset("\t\r\n")
+
+
+def neutralise_formula(value: object) -> object:
+    """把會被試算表當成公式的字串前面補一個單引號，強制它變回純文字。
+
+    只處理 ``str``。數值欄位（資本額等）本來就是數字型別，不會經過這裡，
+    因此負數不會被加上引號。
+
+    順帶修好一個資料正確性的問題：台灣的國際碼電話 ``+886-2-1234-5678``
+    開頭是 ``+``，Excel 會把它當成 ``=886-2-1234-5678`` 算成一個負數。
+    加上引號之後它才會照原樣顯示。
+
+    取捨要說清楚：在 .xlsx 裡單引號是「這格是文字」的標記，不會顯示出來；
+    在 .csv 裡它是實際的一個字元，打開會看得到。用 CSV 而且值剛好以這些
+    字元開頭時，會多一個引號——那是為了讓那格不被當成公式執行所付的代價。
+    """
+    if not isinstance(value, str) or value == "":
+        return value
+    if value[0] in _FORMULA_LEAD or value[0] in _FORMULA_LEAD_CONTROL:
+        return "'" + value
+    return value
+
+
+def harden_for_spreadsheet(frame: pd.DataFrame) -> pd.DataFrame:
+    """把整張表中和過一次，**連欄位標題一起**。
+
+    標題也要處理的理由：自由欄位的名稱不是我們定的，是 :func:`extra_columns`
+    從爬回來的資料裡推出來的（「會員代表」「入會年月日」都是名錄自己的欄位
+    名稱）。名錄上寫什麼，那一格標題就是什麼。
+
+    用 ``DataFrame.map`` 逐格套用而不是逐欄判斷型別：欄位名稱有可能重複
+    （自由欄位剛好撞名內建欄位），那時 ``frame[name]`` 拿到的是 DataFrame
+    而不是 Series，逐欄的寫法會在那裡爆掉。
+    """
+    hardened = frame.map(neutralise_formula)
+    hardened.columns = [neutralise_formula(column) for column in hardened.columns]
+    return hardened
+
+
 #: 匯出檔最多附加這麼多個自由欄位。名錄各自的欄位通常不到十個；設上限只是
 #: 為了讓一份混了很多來源的資料不會變成幾百欄的試算表。
 MAX_EXTRA_COLUMNS = 20
@@ -191,6 +240,11 @@ class BaseExporter(ABC):
     extension: str = ""
     #: Human-readable format name, shown in the GUI.
     label: str = ""
+    #: 這個格式會不會被試算表軟體打開並求值公式。
+    #:
+    #: CSV 與 Excel 是 True——它們會被雙擊丟進 Excel。JSON 是 False：它是給
+    #: 程式讀的，補上單引號只會讓下游拿到錯的字串。
+    spreadsheet_safe: bool = False
 
     def __init__(self, config: AppConfig | None = None) -> None:
         self.config = config or get_config()
@@ -222,6 +276,11 @@ class BaseExporter(ABC):
         """Write ``rows`` and return the path written."""
         target = self.resolve_path(path)
         frame = build_dataframe(rows, self.config, columns)
+        # 公式中和放在這裡，不是放在各個 _write 裡：這是唯一一個所有格式都
+        # 一定會經過的地方。放進 _write 就會變成「三份各自實作，將來新增第
+        # 四種格式的人忘了抄」——這個專案已經在別處吃過那個虧。
+        if self.spreadsheet_safe:
+            frame = harden_for_spreadsheet(frame)
         try:
             self._write(frame, target, rows)
         except OSError as exc:

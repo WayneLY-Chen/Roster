@@ -22,6 +22,8 @@ class ExcelExporter(BaseExporter):
 
     extension = "xlsx"
     label = "Excel (.xlsx)"
+    #: 會被雙擊丟進 Excel，必須中和公式。
+    spreadsheet_safe = True
 
     def _write(self, frame: pd.DataFrame, target: Path, rows: list[CompanyView]) -> None:
         sheet_name = self.config.exporter.excel_sheet_name[:31] or "Companies"

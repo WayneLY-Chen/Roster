@@ -18,6 +18,8 @@ from exporter.base import BaseExporter, registry_attribution
 class CsvExporter(BaseExporter):
     extension = "csv"
     label = "CSV (.csv)"
+    #: 會被雙擊丟進 Excel，必須中和公式。
+    spreadsheet_safe = True
 
     def __init__(self, config: AppConfig | None = None, encoding: str = "utf-8-sig") -> None:
         super().__init__(config)
