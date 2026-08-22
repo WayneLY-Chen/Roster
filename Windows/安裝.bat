@@ -16,21 +16,25 @@ REM  and the launch at the end must not depend on that.
 set "ROOT=%CD%"
 title Roster - setup
 
-REM  The mascots live in assets\pets.txt, not in here.
+REM  The mascots live in assets\pets.txt, not in here: every | / < / > in
+REM  the artwork would have to be escaped with a caret, or cmd.exe would try
+REM  to run it as a pipe or a redirect.
 REM
-REM  Two reasons. The drawing needs full-width characters, and this file
-REM  is ASCII-only on purpose (see the header). And even if it were not,
-REM  every | / < / > in the artwork would have to be escaped with a caret
-REM  or cmd.exe would try to run it as a pipe or a redirect.
+REM  Codepage 65001 is UTF-8, needed for `type` to read the UTF-8 drawing.
 REM
-REM  Codepage 65001 is UTF-8. It is switched back straight after, so the
-REM  rest of the session keeps whatever the user had.
-for /f "tokens=2 delims=:" %%P in ('chcp') do set "OLDCP=%%P"
-set "OLDCP=%OLDCP: =%"
+REM  It is deliberately NOT switched back afterwards. Every chcp call resets
+REM  the console screen buffer, which wipes whatever is already on screen --
+REM  so a "restore the old codepage" line placed right after the drawing
+REM  erases the drawing. That is a real bug this file used to have, and it is
+REM  invisible in any test that captures output through a pipe, because a pipe
+REM  has no screen to clear.
+REM
+REM  Leaving the console on UTF-8 costs nothing: it lasts only as long as this
+REM  window, and everything printed after this point is either ASCII or comes
+REM  from Python, which writes to the console as Unicode regardless.
 chcp 65001 >nul
 echo.
 type "%ROOT%\assets\pets.txt"
-chcp %OLDCP% >nul
 
 echo.
 echo  Roster setup

@@ -410,6 +410,37 @@ def test_the_mascots_use_crlf():
     )
 
 
+def test_no_launcher_restores_the_codepage_after_drawing():
+    """**這一條是回歸測試，而且是被使用者的截圖抓到的。**
+
+    每一支 .bat 為了讓 ``type`` 讀得懂 UTF-8 的圖，會先 ``chcp 65001``。以前
+    它們印完圖之後還會把字碼頁切回原本的值——**而每一次 chcp 都會把主控台的
+    畫面清掉**，所以那一行的實際效果是「把剛剛印出來的貓跟狗擦掉」。
+
+    症狀是使用者看到「完全沒有貓跟狗」，連空行都少一行。而它在任何用管線接
+    輸出的測試裡都看不出來——管線沒有畫面可以被清，所以位元組全都在。
+
+    切回去本來也沒有必要：字碼頁只活在這一個視窗裡，視窗關掉就沒了。
+    """
+    offenders = []
+    for name in LAUNCHERS:
+        if not name.endswith((".bat", ".cmd")):
+            continue
+        text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
+        # 只看真的會執行的那幾行，註解裡提到 chcp 是在解釋為什麼不要用它。
+        commands = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.strip().upper().startswith("REM")
+        ]
+        switches = [line for line in commands if line.lower().startswith("chcp")]
+        if len(switches) > 1 or any("OLDCP" in line for line in commands):
+            offenders.append(f"{name}（{switches}）")
+    assert not offenders, (
+        f"這幾支又在印完圖之後切回字碼頁了，會把圖擦掉：{offenders}"
+    )
+
+
 def test_batch_files_contain_no_non_ascii_bytes(tracked_files):
     """.bat 的內容只能是 ASCII。
 

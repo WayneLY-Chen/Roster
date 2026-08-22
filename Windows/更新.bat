@@ -23,15 +23,10 @@ REM  Captured once -- %CD% would move if anything below cd'd.
 set "ROOT=%CD%"
 title Roster - update
 
-REM  The mascots live in assets\pets.txt, not in here. Same block as the
-REM  one in the setup and launcher files; codepage 65001 is UTF-8 and the
-REM  old one goes back straight after.
-for /f "tokens=2 delims=:" %%P in ('chcp') do set "OLDCP=%%P"
-set "OLDCP=%OLDCP: =%"
+REM  The mascots. Same block as the setup file -- see the comment there.
 chcp 65001 >nul
 echo.
 type "%ROOT%\assets\pets.txt"
-if defined OLDCP chcp %OLDCP% >nul
 
 echo.
 echo  Roster update

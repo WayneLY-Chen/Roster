@@ -32,15 +32,10 @@ set "PATH=%VIRTUAL_ENV%\Scripts;%PATH%"
 set "PYTHONHOME="
 set "PROMPT=(.venv) $P$G"
 
-REM  The mascots. Same block as the setup file -- see the comment there for
-REM  why the drawing lives in assets\pets.txt and why the codepage is
-REM  switched around it.
-for /f "tokens=2 delims=:" %%P in ('chcp') do set "OLDCP=%%P"
-set "OLDCP=%OLDCP: =%"
+REM  The mascots. Same block as the setup file -- see the comment there.
 chcp 65001 >nul
 echo.
 type "%CD%\assets\pets.txt"
-if defined OLDCP chcp %OLDCP% >nul
 
 echo.
 echo  Roster - virtual environment is active

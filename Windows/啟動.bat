@@ -20,20 +20,10 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-REM  The mascots live in assets\pets.txt, not in here -- this file is
-REM  ASCII-only on purpose (see the header), and every | / < / > in the
-REM  artwork would otherwise have to be escaped or cmd.exe would treat it
-REM  as a pipe or a redirect.
-REM
-REM  Codepage 65001 is UTF-8; the old one is put back straight after so the
-REM  rest of the session keeps whatever the user had. Same block as the one
-REM  in the setup file.
-for /f "tokens=2 delims=:" %%P in ('chcp') do set "OLDCP=%%P"
-set "OLDCP=%OLDCP: =%"
+REM  The mascots. Same block as the setup file -- see the comment there.
 chcp 65001 >nul
 echo.
 type "%CD%\assets\pets.txt"
-if defined OLDCP chcp %OLDCP% >nul
 
 echo.
 echo Starting Roster...
