@@ -104,6 +104,11 @@ def _classify(
     """Apply the skip rules, in the mandated order. ``None`` means send it."""
     if company.do_not_contact:
         return SkipReason.DO_NOT_CONTACT
+    if company.email_verdict == EmailVerdict.BOUNCED.value:
+        # 刻意排在 require_verified_email 那條**前面**：「這個地址寄不到」是
+        # 已經驗證過的事實，跟使用者有沒有打開信箱驗證無關。放在後面的話，
+        # 關掉驗證的人會繼續寄給死信箱——而被拉低送達率的是他自己的帳號。
+        return SkipReason.BOUNCED
     if not company.email:
         return SkipReason.NO_EMAIL
     if not is_valid_email(company.email):

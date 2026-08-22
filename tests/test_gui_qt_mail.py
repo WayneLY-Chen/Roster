@@ -29,7 +29,9 @@ from core.constants import EmailVerdict  # noqa: E402
 from database.models import Base  # noqa: E402
 from database.repository import CompanyRepository  # noqa: E402
 from gmail import templates as templates_module  # noqa: E402
+from core.errors import CRMError  # noqa: E402
 from gui_qt.pages.mail import MailPage, PreviewDialog  # noqa: E402
+from gui_qt.widgets import CHECK_KEY  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -623,3 +625,131 @@ def test_send_without_a_plan_shows_error(qt_app, db_session, mail_config):
     page.ensure_built()
     page._start_send(force_dry_run=True)
     assert app.messages[-1] == ("請先產生一份包含可寄送對象的名單", "error")
+
+
+# ------------------------------------------------------------------ 處理退信
+#
+# 解析與資料庫那一半在 tests/test_gmail_bounces.py。這裡只驗 Qt 這一段的接線：
+# 預設勾哪幾筆、沒勾的時候不寫、按了取消就什麼都不做。
+
+
+def _hit(name: str, address: str, *, hard: bool, already: bool = False):
+    from controllers.mail import BounceHit
+    from gmail.bounces import Bounce
+
+    return BounceHit(
+        bounce=Bounce(address=address, hard=hard, code="5.1.1" if hard else "4.2.2"),
+        company_id=1,
+        company_name=name,
+        email=address,
+        already=already,
+    )
+
+
+def _scan(*hits, messages: int = 3, unmatched: int = 0):
+    from controllers.mail import BounceScan
+
+    return BounceScan(hits=list(hits), messages=messages, unmatched=unmatched)
+
+
+def test_hard_bounces_are_ticked_and_soft_ones_are_not(qt_app, db_session, mail_config):
+    """**軟退信預設不勾。**
+
+    信箱滿了過幾天就好了，而標死一個真實客戶的代價是從此再也不寄給他——他不會
+    知道，使用者也不會發現。預設值就是這條規則實際生效的地方。
+    """
+    page = _built_page(qt_app)
+
+    page._on_bounces(
+        _scan(
+            _hit("硬退的公司", "dead@a.example", hard=True),
+            _hit("軟退的公司", "busy@b.example", hard=False),
+        )
+    )
+
+    assert page.bounce_table.row_count() == 2
+    ticked = [row["company_name"] for row in page.bounce_table.checked_rows()]
+    assert ticked == ["硬退的公司"]
+
+
+def test_an_already_marked_company_is_listed_but_not_ticked(qt_app, db_session, mail_config):
+    """重複標一次沒有意義，而且會讓「這次改了幾筆」那個數字騙人。"""
+    page = _built_page(qt_app)
+
+    page._on_bounces(_scan(_hit("標過的", "dead@a.example", hard=True, already=True)))
+
+    assert page.bounce_table.row_count() == 1
+    assert page.bounce_table.checked_rows() == []
+    assert "已標記" in page.bounce_table.model.row_at(0)["kind"]
+
+
+def test_nothing_ticked_means_nothing_is_written(qt_app, db_session, mail_config, monkeypatch):
+    page = _built_page(qt_app)
+    page._on_bounces(_scan(_hit("軟退的公司", "busy@b.example", hard=False)))
+
+    monkeypatch.setattr(
+        page.bounce_mark_task, "start", lambda *a: pytest.fail("不該寫任何東西")
+    )
+    page._apply_bounces()
+
+    assert page.app.messages[-1][1] == "warning"
+
+
+def test_saying_no_to_the_confirmation_writes_nothing(qt_app, db_session, mail_config, monkeypatch):
+    """看過才寫——而且「看過」包含最後那一下。"""
+    page = _built_page(qt_app)
+    page._on_bounces(_scan(_hit("硬退的公司", "dead@a.example", hard=True)))
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    monkeypatch.setattr(
+        page.bounce_mark_task, "start", lambda *a: pytest.fail("按了取消卻寫了")
+    )
+    page._apply_bounces()
+
+
+def test_saying_yes_sends_exactly_the_ticked_rows(qt_app, db_session, mail_config, monkeypatch):
+    page = _built_page(qt_app)
+    page._on_bounces(
+        _scan(
+            _hit("硬退的公司", "dead@a.example", hard=True),
+            _hit("軟退的公司", "busy@b.example", hard=False),
+        )
+    )
+    # 使用者自己也把軟退的那筆勾起來——那是他的決定，程式照做。
+    page.bounce_table.model.row_at(1)[CHECK_KEY] = True
+
+    sent: list = []
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(page.bounce_mark_task, "start", lambda hits: sent.append(hits))
+    page._apply_bounces()
+
+    assert [hit.company_name for hit in sent[0]] == ["硬退的公司", "軟退的公司"]
+
+
+def test_the_summary_says_how_many_were_ignored(qt_app, db_session, mail_config):
+    """「你的收件匣裡有退信，但那些地址我沒寄過」要講出來。
+
+    不講的話，使用者看到「0 筆」會以為程式壞了。
+    """
+    page = _built_page(qt_app)
+
+    page._on_bounces(_scan(messages=9, unmatched=4))
+
+    assert "9" in page.bounce_status.text()
+    assert "沒有寄過" in page.bounce_status.text()
+
+
+def test_a_failed_scan_leaves_the_button_usable(qt_app, db_session, mail_config, monkeypatch):
+    """Gmail 密碼錯了是最常見的失敗，而且使用者改完就想再按一次。"""
+    page = _built_page(qt_app)
+    page.bounce_scan_button.setEnabled(False)
+    monkeypatch.setattr(page, "report_error", lambda _exc: None)
+
+    page._on_bounce_error(CRMError("Gmail 登入失敗"))
+
+    assert page.bounce_scan_button.isEnabled()
+    assert "Gmail 登入失敗" in page.bounce_status.text()

@@ -569,6 +569,9 @@ class CompanyRepository:
             record.email_verdict is not EmailVerdict.UNKNOWN
             and record.email is not None
             and record.email == existing.email
+            # 退過信的地址不接受任何「升級」。那一筆是真的寄出去換來的，而爬
+            # 回來的頁面只是又看到同一個字串——它不知道那個信箱已經死了。
+            and existing.email_verdict != EmailVerdict.BOUNCED.value
         )
         if verdict_applies:
             existing.email_verdict = record.email_verdict.value
@@ -616,10 +619,16 @@ class CompanyRepository:
         company = self.get(company_id)
         if company is None:
             raise DatabaseError(f"company {company_id} not found")
+        previous_email = company.email
         for key, value in fields.items():
             if not hasattr(company, key):
                 raise DatabaseError(f"Company has no field {key!r}")
             setattr(company, key, value)
+        if "email" in fields and company.email != previous_email:
+            # 舊的判定講的是舊地址。不作廢的話，一個標成「退過信」的地址被使用
+            # 者手動改對之後，程式仍然會永遠跳過它——而畫面上看不出來為什麼。
+            company.email_verdict = EmailVerdict.UNKNOWN.value
+            company.email_checked_at = None
         company.updated_at = now()
         self.session.flush()
         return company

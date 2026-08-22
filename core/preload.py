@@ -67,8 +67,10 @@ WORKER_MODULES: tuple[str, ...] = (
     "exporter.base",
     "exporter.importer",
     "exporter.sample_template",
-    # 寄信
+    # 寄信與讀信
     "gmail.sender",
+    "gmail.client",
+    "gmail.bounces",
     # 資料庫與憑證
     "database.encryption",
     "database.backup",

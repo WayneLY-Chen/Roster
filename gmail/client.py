@@ -144,8 +144,13 @@ class GmailClient:
         ordered = [uid.decode() for uid in reversed(uids)]
         return ordered[: limit or self.settings.max_messages]
 
-    def fetch(self, uid: str) -> MailMessage | None:
-        """Fetch one message without changing its read state."""
+    def fetch_raw(self, uid: str) -> bytes | None:
+        """整封信的原始位元組，不改變已讀狀態。
+
+        退信通知要的東西在 ``message/delivery-status`` 那個 MIME 區塊裡，而
+        :meth:`fetch` 只留純文字內文——那一層會把非 ``text/*`` 的區塊丟掉。
+        要解析 DSN 就得看到完整的 MIME 樹（見 :mod:`gmail.bounces`）。
+        """
         if self._connection is None:
             raise GmailError("not connected; call connect() first")
         try:
@@ -155,8 +160,15 @@ class GmailClient:
             return None
         if status != "OK" or not data or not isinstance(data[0], tuple):
             return None
+        return data[0][1]
 
-        message = email.message_from_bytes(data[0][1])
+    def fetch(self, uid: str) -> MailMessage | None:
+        """Fetch one message without changing its read state."""
+        raw = self.fetch_raw(uid)
+        if raw is None:
+            return None
+
+        message = email.message_from_bytes(raw)
         sender_name, sender_email = parseaddr(_decode(message.get("From")))
 
         date_value: datetime | None = None

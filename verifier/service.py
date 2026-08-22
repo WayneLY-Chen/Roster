@@ -233,6 +233,13 @@ class VerificationService:
                 changed |= self._renormalize(company)
 
             verdict, checked_at = self.cleaner.verify_email(company.email)
+            if company.email_verdict == EmailVerdict.BOUNCED.value:
+                # 退信是**真的寄過**得到的結果，比任何一種檢查都有力。MX 查詢
+                # 只證明那個網域收信，證明不了那個信箱存在——讓它把退信洗成
+                # Valid 的話，使用者按一次「重新驗證」就會再寄一輪死信箱。
+                # 這個標記唯一的解除方式是把信箱改掉（見 CompanyRepository.update）。
+                verdict = EmailVerdict.BOUNCED
+                checked_at = None
             if company.email_verdict != verdict.value:
                 company.email_verdict = verdict.value
                 changed = True

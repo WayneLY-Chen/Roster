@@ -68,13 +68,35 @@ from core.constants import EmailVerdict
 from core.errors import CRMError
 from core.schemas import CompanyFilter
 from controllers.core import CompanyController
-from controllers.mail import MailController
+from controllers.mail import BounceController, MailController
 from core.i18n import ALL_OPTION, STAGE_LABELS, stage_labels, to_value
 from gui_qt import theme
 from gui_qt.composer import RichTextEditor, edit_body, populate_preview
 from gui_qt.pages.base import BasePage
 from gui_qt.tasks import BackgroundTask
-from gui_qt.widgets import DataTable, LabeledEntry, Section, StatCard, WideComboBox, caption
+from gui_qt.widgets import (
+    CHECK_KEY,
+    DataTable,
+    LabeledEntry,
+    Section,
+    StatCard,
+    WideComboBox,
+    caption,
+)
+
+
+#: 「處理退信」那張表的欄位。
+#:
+#: 「為什麼」是對方伺服器原話，不是我們的判斷——擺在使用者眼前讓他自己看。
+#: 有些退信的理由是「這個信箱暫停使用中」，那跟「查無此人」該不該標死是兩件事。
+BOUNCE_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("company_name", "公司名稱", 200),
+    ("email", "信箱", 200),
+    ("kind", "類型", 110),
+    ("code", "代碼", 70),
+    ("reason", "對方說的原因", 300),
+    ("received", "收到", 90),
+)
 
 
 class MailPage(BasePage):
@@ -85,6 +107,9 @@ class MailPage(BasePage):
         super().__init__(app)
         self.controller = MailController()
         self.company_controller = CompanyController()
+        self.bounces = BounceController()
+        #: 上一次掃出來的退信。表格的每一列都對應這裡面的一筆。
+        self._bounce_hits: list = []
         self.plan: Any = None
         self._mailer_ready = False
         self._loaded_template_name: str | None = None
@@ -113,6 +138,22 @@ class MailPage(BasePage):
             on_done=self._on_send_done,
             on_error=self._on_send_error,
         )
+        # 退信那兩步分開成兩個工作，中間隔著使用者的勾選與確認：讀信箱是唯讀
+        # 的，寫回去是另一件事。合成一個的話就沒有中間那一眼了。
+        self.bounce_task = BackgroundTask(
+            self,
+            self._scan_worker,
+            on_progress=self._on_bounce_progress,
+            on_done=self._on_bounces,
+            on_error=self._on_bounce_error,
+        )
+        self.bounce_mark_task = BackgroundTask(
+            self,
+            self._mark_worker,
+            on_progress=self._on_bounce_progress,
+            on_done=self._on_bounces_applied,
+            on_error=self._on_bounce_mark_error,
+        )
 
     # ------------------------------------------------------------- 建立元件
 
@@ -136,11 +177,17 @@ class MailPage(BasePage):
         # 捲軸，不會像先前那樣讓「插入變數」那一列跟編輯器工具列疊在一起、
         # 或把下面的元件擠出視窗看不到。
         body_container = QWidget()
-        body_row = QHBoxLayout(body_container)
+        body_column = QVBoxLayout(body_container)
+        body_column.setContentsMargins(0, 0, 0, 0)
+        body_column.setSpacing(10)
+        panels = QWidget()
+        body_row = QHBoxLayout(panels)
         body_row.setContentsMargins(0, 0, 0, 0)
         body_row.setSpacing(10)
         self._build_template_section(body_row)
         self._build_recipients_section(body_row)
+        body_column.addWidget(panels, 1)
+        self._build_bounce_section(body_column)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -511,6 +558,149 @@ class MailPage(BasePage):
         self.summary_label.setWordWrap(True)
         section.body_layout.addWidget(self.summary_label)
 
+    # ------------------------------------------------------------- 處理退信
+
+    def _build_bounce_section(self, column: QVBoxLayout) -> None:
+        """讀收件匣找退信，把死信箱標出來。
+
+        放在寄信旁邊而不是「公司資訊」頁：這件事是寄信的一部分，而使用者會
+        想到它的時間點就是他準備寄下一批的時候。
+        """
+        section = Section("處理退信")
+
+        intro = QLabel(
+            "寄不到的信箱如果沒有人處理，下一批會再寄一次，"
+            "而<b>被拉低送達率的是你自己的 Gmail 帳號</b>。"
+            "按下面那顆按鈕會<b>唯讀</b>地讀一次你的信箱，"
+            "把退回來的信找出來——不會標成已讀，也不會刪任何東西。"
+        )
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setObjectName("MutedLabel")
+        intro.setWordWrap(True)
+        section.body_layout.addWidget(intro)
+
+        row = QHBoxLayout()
+        self.bounce_scan_button = QPushButton("讀信箱找退信")
+        self.bounce_scan_button.clicked.connect(self._scan_bounces)
+        row.addWidget(self.bounce_scan_button)
+        self.bounce_apply_button = QPushButton("標記勾起來的")
+        self.bounce_apply_button.clicked.connect(self._apply_bounces)
+        self.bounce_apply_button.setEnabled(False)
+        row.addWidget(self.bounce_apply_button)
+        row.addStretch(1)
+        section.body_layout.addLayout(row)
+
+        self.bounce_status = QLabel("")
+        self.bounce_status.setObjectName("MutedLabel")
+        self.bounce_status.setWordWrap(True)
+        section.body_layout.addWidget(self.bounce_status)
+
+        self.bounce_table = DataTable(BOUNCE_COLUMNS, min_rows=3, checkable=True)
+        section.body_layout.addWidget(self.bounce_table)
+
+        note = QLabel(
+            "只會列出<b>這支程式真的寄過</b>的地址——收件匣裡其他的信改不動你的名單。"
+            "<b>硬退信</b>（對方說這個信箱不存在）預設勾起來；"
+            "<b>軟退信</b>（信箱滿了、對方伺服器暫時掛掉）預設不勾，"
+            "因為那種過幾天就好了，標死一個真實客戶的代價大得多。"
+        )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
+
+        column.addWidget(section)
+
+    def _scan_worker(self, *, report=None, cancel_event=None):
+        """在背景執行緒裡讀信箱。
+
+        包一層而不是直接把 ``self.bounces.scan`` 交給 BackgroundTask：那樣綁
+        住的是**建立當下**那個 controller，而 ``on_show()`` 會換掉它。使用者
+        剛在設定頁改完 Gmail 密碼的話，舊的那份會拿一組錯的帳密去登入。
+        """
+        return self.bounces.scan(report=report, cancel_event=cancel_event)
+
+    def _mark_worker(self, hits, *, report=None, cancel_event=None):
+        return self.bounces.apply(hits, report=report, cancel_event=cancel_event)
+
+    def _scan_bounces(self) -> None:
+        if self.bounce_task.running:
+            return
+        self.bounce_scan_button.setEnabled(False)
+        self.bounce_apply_button.setEnabled(False)
+        self.bounce_table.clear()
+        self._bounce_hits = []
+        self.bounce_status.setText("正在連你的信箱…")
+        self.bounce_task.start()
+
+    def _on_bounce_progress(self, message: object) -> None:
+        self.bounce_status.setText(str(message))
+
+    def _on_bounces(self, scan) -> None:
+        self.bounce_scan_button.setEnabled(True)
+        self._bounce_hits = list(scan.hits)
+        rows = []
+        for index, hit in enumerate(scan.hits):
+            received = hit.bounce.received_at
+            rows.append(
+                {
+                    "company_name": hit.company_name,
+                    "email": hit.email,
+                    "kind": hit.bounce.kind + ("（已標記）" if hit.already else ""),
+                    "code": hit.bounce.code or "—",
+                    "reason": hit.bounce.reason or "對方沒有說明",
+                    "received": received.strftime("%Y-%m-%d") if received else "",
+                    # 硬退信預設勾、軟退信不勾。已經標過的也不勾——重複標一次
+                    # 沒有意義，而且會讓「這次改了幾筆」那個數字騙人。
+                    CHECK_KEY: bool(hit.bounce.hard and not hit.already),
+                    "_index": index,
+                }
+            )
+        self.bounce_table.set_rows(rows)
+        self.bounce_apply_button.setEnabled(bool(rows))
+        self.bounce_status.setText(scan.describe())
+        self.status(scan.describe(), "success" if scan.hits else "normal")
+
+    def _on_bounce_error(self, exc: Exception) -> None:
+        self.bounce_scan_button.setEnabled(True)
+        self.bounce_status.setText(str(exc).splitlines()[0])
+        self._handle_error(exc)
+
+    def _apply_bounces(self) -> None:
+        chosen = [
+            self._bounce_hits[row["_index"]]
+            for row in self.bounce_table.checked_rows()
+            if 0 <= row.get("_index", -1) < len(self._bounce_hits)
+        ]
+        if not chosen:
+            self.status("一筆都沒有勾", "warning")
+            return
+        hard = sum(1 for hit in chosen if hit.bounce.hard)
+        confirmed = QMessageBox.question(
+            self,
+            "要標記這幾筆嗎？",
+            f"勾起來的 {len(chosen)} 筆裡有 {hard} 筆是硬退信。\n\n"
+            f"那 {hard} 個信箱會被標成「退過信」，之後的寄送一律跳過它們"
+            "（把信箱改成別的之後就會解除）。其餘的只會留一則紀錄。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        self.bounce_apply_button.setEnabled(False)
+        self.bounce_mark_task.start(chosen)
+
+    def _on_bounces_applied(self, result) -> None:
+        self.bounce_status.setText(result.describe())
+        self.status(result.describe(), "success")
+        self.bounce_table.clear()
+        self._bounce_hits = []
+        self.refresh()
+
+    def _on_bounce_mark_error(self, exc: Exception) -> None:
+        self.bounce_apply_button.setEnabled(True)
+        self._handle_error(exc)
+
     def _build_footer(self, outer: QVBoxLayout) -> None:
         footer = QHBoxLayout()
 
@@ -552,6 +742,9 @@ class MailPage(BasePage):
         # 每日上限）可能剛存檔，只有重新建一個 MailController() 才讀得到
         # get_config() 的新值——跟 Tk 版 on_show() 的理由一模一樣。
         self.controller = MailController()
+        # 退信那一個也要跟著換：Gmail 的帳號密碼可能剛在設定頁改過，舊的那份
+        # controller 手上是舊設定，連線會用一組不存在的帳密去登入。
+        self.bounces = BounceController()
         # 開關/每日上限的變更不會呼叫 bump_data_version()（那不是「新增/
         # 刪除/編輯公司」那類寫入），所以固定強制重整，不套用資料版本跳過
         # 機制，跟 Tk 版「每次顯示都整份重整」的行為一致。

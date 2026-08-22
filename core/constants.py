@@ -16,7 +16,7 @@ PROJECT_NAME = "Roster"
 DISPLAY_NAME = "名單匠"
 #: 版本號跟著 CHANGELOG.md 走——那份是「這一版改了什麼」的唯一出處，
 #: 「更新資訊」頁直接讀它，不另外維護一份會過期的副本。
-VERSION = "1.25.0"
+VERSION = "1.26.0"
 
 
 class StrEnum(str, Enum):
@@ -91,6 +91,13 @@ class EmailVerdict(StrEnum):
     DISPOSABLE = "Disposable"
     NO_MX = "No MX"
     VALID = "Valid"              # syntax ok and domain accepts mail
+    BOUNCED = "Bounced"          # 真的寄過，而且被永久退回來了
+    """這是唯一一個**實際寄出去驗證過**的結果。
+
+    MX 檢查證明的是「那個網域收信」，不是「那個信箱存在」——這兩件事差
+    很多，而唯一能分辨的證據就是真的寄一次然後看有沒有退回來。所以它排
+    在 VALID 後面：它比 VALID 更有力，只是方向相反。見 gmail/bounces.py。
+    """
 
 
 class EmailStatus(StrEnum):
@@ -110,6 +117,7 @@ class SkipReason(StrEnum):
     INVALID_EMAIL = "信箱格式不正確"
     UNVERIFIED = "信箱未通過驗證"
     DO_NOT_CONTACT = "已標記為請勿聯絡"
+    BOUNCED = "信箱退過信"
     RECENTLY_CONTACTED = "近期已寄送過"
     DAILY_CAP = "已達今日寄送上限"
 
