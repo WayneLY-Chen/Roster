@@ -20,6 +20,20 @@
 *.ini  text eol=lf
 *.cfg  text eol=lf
 *.txt  text eol=lf
+
+# 例外：貓狗圖案存成 CRLF，而且不讓 git 正規化（-text）。
+#
+# Windows 主控台的 LF 只把游標往下移一行、不會回到第 0 欄。LF-only 的檔案用
+# type 印出來，第二行會從第一行結束的地方開始——九行疊完是一團往右下延伸的
+# 東西，完全看不出是貓跟狗。mac 與 Linux 的終端機會把 LF 當成換行加歸位，
+# 所以同一個檔案在那邊一直是好的，這也是為什麼這個 bug 只在 Windows 出現。
+#
+# 用 -text 而不是 eol=crlf，是因為 eol=crlf 只改「簽出時怎麼轉換」，blob 沒
+# 變——已經 clone 過的人 git pull 之後檔案不會被重寫，bug 還在。-text 讓
+# CRLF 進到 blob 裡，每一份 checkout 都拿得到修好的版本。
+#
+# 多出來的 CR 對 macOS/Linux 沒有影響：終端機看到 CR 就是回第 0 欄。
+assets/pets.txt -text
 *.spec text eol=lf
 
 # 二進位檔不要碰。

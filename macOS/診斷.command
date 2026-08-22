@@ -13,7 +13,8 @@ cd "$root"
 
 line() { printf "\n\033[1m--- %s ---\033[0m\n" "$1"; }
 
-printf "名單匠 Roster — 診斷\n"
+print_pets "$root"
+printf "\n名單匠 Roster — 診斷\n"
 
 line "系統"
 sw_vers 2>/dev/null || echo "(取不到 macOS 版本)"

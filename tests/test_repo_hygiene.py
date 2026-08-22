@@ -329,10 +329,14 @@ def test_the_git_helpers_report_none_outside_a_repository(tmp_path):
     assert git_untracked_unignored_files(tmp_path) is None
 
 
-#: 每個平台的四支啟動腳本。每一支都該印貓跟狗。
+#: 每一支「雙擊之後會開一個終端機視窗」的腳本。每一支都該印貓跟狗。
+#:
+#: 判準是「使用者會不會看到一個黑底視窗」，不是「它算不算啟動器」——診斷與
+#: 建立 App 那兩支也會開視窗，少了圖案就是不一致，而不一致沒有理由。
 LAUNCHERS = (
     "Windows/安裝.bat", "Windows/啟動.bat", "Windows/命令列.bat", "Windows/更新.bat",
     "macOS/安裝.command", "macOS/啟動.command", "macOS/命令列.command", "macOS/更新.command",
+    "macOS/建立App.command", "macOS/診斷.command",
     "Linux/install.sh", "Linux/start.sh", "Linux/console.sh", "Linux/update.sh",
 )
 
@@ -351,7 +355,9 @@ def test_every_launcher_prints_the_mascots(name):
     script = ROOT / name
     assert script.exists(), f"{name} 不見了"
     text = script.read_text(encoding="utf-8", errors="replace")
-    assert "pets.txt" in text, f"{name} 沒有印貓跟狗"
+    # 直接 type/cat 那個檔案，或者呼叫 macOS/_共用.sh 裡的 print_pets——兩種
+    # 都算，重點是「印得出來」而不是用哪一種寫法。
+    assert "pets.txt" in text or "print_pets" in text, f"{name} 沒有印貓跟狗"
 
 
 def test_the_mascots_live_in_exactly_one_file():
@@ -366,6 +372,42 @@ def test_the_mascots_live_in_exactly_one_file():
     for name in LAUNCHERS:
         text = (ROOT / name).read_text(encoding="utf-8", errors="replace")
         assert signature not in text, f"{name} 把圖複製進去了，應該 type/cat 那個檔案"
+
+
+def test_the_mascots_use_crlf():
+    """**這一條是回歸測試。**
+
+    使用者回報 Windows 開起來看不到貓跟狗，mac 看得到。腳本兩邊都有印，圖也
+    兩邊都讀得到——差別在換行字元：這個檔案以前是 LF-only。
+
+    **Windows 主控台的 LF 只把游標往下移一行，不會回到第 0 欄。** 所以第二行
+    會從第一行結束的地方開始畫，第三行再往右一段……九行疊完是一團往右下延伸、
+    還會折行的東西，完全看不出是兩隻動物。macOS 與 Linux 的終端機把 LF 當成
+    換行加歸位，同一個檔案在那邊一直是好的。
+
+    ``.gitattributes`` 用 ``-text`` 把它釘成 CRLF：不是 ``eol=crlf``，因為那個
+    只改「簽出時怎麼轉換」，blob 沒變的話已經 clone 過的人 pull 完檔案不會被
+    重寫，bug 還在。
+    """
+    art = (ROOT / "assets" / "pets.txt").read_bytes()
+    lone_lf = art.count(b"\n") - art.count(b"\r\n")
+    assert art.count(b"\r\n") > 0, (
+        "assets/pets.txt 不是 CRLF——Windows 上會印成一團往右下延伸的東西"
+    )
+    assert lone_lf == 0, f"assets/pets.txt 裡還有 {lone_lf} 個單獨的 LF"
+
+    # 而且 git 不能再把它正規化回 LF，否則下一次 clone 又壞掉。
+    attr = subprocess.run(
+        ["git", "check-attr", "text", "--", "assets/pets.txt"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "text: unset" in attr, (
+        ".gitattributes 要用 -text 把 assets/pets.txt 釘住，"
+        f"現在是：{attr.strip()}"
+    )
 
 
 def test_batch_files_contain_no_non_ascii_bytes(tracked_files):

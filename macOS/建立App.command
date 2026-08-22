@@ -13,6 +13,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 app="$here/Roster.app"
 . "$here/macOS/_共用.sh"
 
+print_pets "$here"
+
 if [ ! -x "$here/.venv/bin/python" ]; then
     echo "[錯誤] 還沒安裝。請先雙擊同一個資料夾裡的「安裝.command」。"
     exit 1
