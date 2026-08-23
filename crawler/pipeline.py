@@ -23,6 +23,7 @@ from core.logging_setup import get_logger
 from core.schemas import CrawlSummary, RawCompany
 from crawler.base import BaseSource, KnownCompanies
 from crawler.fetcher import BaseFetcher, build_fetcher
+from crawler.health import BASELINE_RUNS, Baseline, assess
 from crawler.sources import build_source
 from database.models import now
 from database.repository import CompanyRepository, CrawlJobRepository
@@ -74,63 +75,22 @@ def _keep_only(records: list[RawCompany], keep: set[str] | None) -> None:
                 setattr(record, field, None)
 
 
-#: 抓到的筆數掉到上一次的這個比例以下，就當成「這個網站可能改版了」。
-#:
-#: 0.4 是刻意寬鬆的。名錄本來就會增減，有些站每個月換一批廠商；抓到六成
-#: 還在正常範圍。真正要攔的是 0 筆、以及「240 筆變 12 筆」那種斷崖。
-HEALTH_DROP_RATIO = 0.4
-
-
 def _health_warning(job_repo, source: str, job, summary: CrawlSummary) -> str | None:
-    """跟上一次比，這次是不是掉得不合理。
+    """跟平常比，這次是不是掉得不合理。
 
     這是整套爬取最難發現的一種壞掉：網站改版之後選擇器失效，爬取會「成功」
-    地抓到 0 筆，畫面上寫著完成，而排程是半夜自己跑的，沒有人在看。跟上一次
-    比對是唯一能自動看出來的方式，而每一次的筆數本來就都存著了。
+    地抓到 0 筆，畫面上寫著完成，而排程是半夜自己跑的，沒有人在看。
+
+    判斷本身在 :mod:`crawler.health`——「爬取」頁的來源健康度用的是同一份，
+    兩邊的標準必須一樣。這裡只負責去把要比的數字撈出來。
     """
-    # 失敗與取消本來就有自己的訊息，再加一句「抓得比上次少」只是雜訊。
-    if summary.status not in (CrawlStatus.SUCCESS.value, CrawlStatus.PARTIAL.value):
-        return None
-
-    # 抓到了東西、卻一筆都沒存進去。這跟「抓不到」是完全不同的毛病：頁面讀到
-    # 了、重複區塊也找對了，是「公司名稱」那一欄指到了別的位置（子分類代號、
-    # 表頭、導覽列）。以前這種情形畫面上只寫「找到 21、新增 0、拒絕 21」，
-    # 三個數字擺在一起沒有人看得出那是壞的——這一句要直接講出來。
-    #
-    # 放在「跟上一次比」的前面：第一次跑就抓錯的話根本沒有上一次可以比，而
-    # 那正是最需要被提醒的時候。
-    if summary.records_found and summary.records_new == 0 and summary.records_updated == 0:
-        if summary.records_invalid >= summary.records_found:
-            return (
-                f"抓到 {summary.records_found} 筆，但全部都不是公司資料，一筆都沒有存進去。"
-                "通常是「公司名稱」抓到了別的位置——到日誌頁看它實際抓到什麼文字，"
-                "再重新分析一次這個來源。"
-            )
-
-    # 接續上一次的執行本來就只做剩下的部分，筆數少是正常的。
-    if summary.resumed:
-        return None
-
     try:
-        before = job_repo.last_harvest_for(source, before_id=job.id)
+        counts = job_repo.harvest_history(source, limit=BASELINE_RUNS, before_id=job.id)
     except Exception as exc:                  # noqa: BLE001 - 提醒不該弄壞爬取
-        log.debug("讀不到上一次的筆數：{}", exc)
+        log.debug("讀不到以前的筆數：{}", exc)
         return None
-    if not before:
-        return None                            # 第一次跑，沒有東西可以比
 
-    now_found = summary.records_found
-    if now_found == 0:
-        return (
-            f"這次一筆都沒抓到，上一次有 {before} 筆。"
-            "這個網站很可能改版了，請重新分析一次這個來源。"
-        )
-    if now_found < before * HEALTH_DROP_RATIO:
-        return (
-            f"這次只抓到 {now_found} 筆，上一次有 {before} 筆。"
-            "掉這麼多通常代表網站的版面變了，建議重新分析確認一次。"
-        )
-    return None
+    return assess(source, summary, Baseline(tuple(counts))).warning
 
 
 def _apply_default_industry(records: list[RawCompany], default: str) -> int:

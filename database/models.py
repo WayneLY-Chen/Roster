@@ -372,6 +372,13 @@ class CrawlJob(Base):
     #: 條件時網路斷一下就整批重來，那是白做工——這一欄就是為了不要重來。
     resume_state: Mapped[str | None] = mapped_column(Text)
 
+    #: 這一次是接續上一次沒跑完的地方跑的。
+    #:
+    #: 存它是為了健康度：接續跑的執行本來就只做剩下的一截，筆數不能拿來代表
+    #: 「這個來源平常抓得到多少」。不記下來的話，一次半夜斷線留下的 30 筆會
+    #: 混進基準裡，把「平常有 380 筆」拉成一個沒有意義的數字。
+    resumed: Mapped[bool] = mapped_column(Boolean, default=False)
+
     def __repr__(self) -> str:
         return f"<CrawlJob id={self.id} source={self.source!r} status={self.status!r}>"
 

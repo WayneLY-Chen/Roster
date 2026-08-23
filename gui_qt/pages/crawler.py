@@ -5,13 +5,15 @@
 回呼（保證回到 UI 執行緒）裡碰 widget，遵守 ``gui_qt/tasks.py`` docstring
 說的規則。
 
-## 這頁沒有覆寫 ``on_show()``
+## ``refresh()`` 只做一件事：重算來源健康度
 
-跟公司頁、聯絡人頁不同，這頁的控制項不依賴任何「資料庫目前的狀態」去重繪
-——來源清單只在使用者透過網址精靈新增/刪除自訂來源時才需要重新查詢（見
-``_on_source_saved``），紀錄表格與活動紀錄只在使用者自己按下「開始爬取」
-之後才會有內容。所以沿用 ``BasePage`` 的預設 ``refresh()``（什麼都不做），
-不需要覆寫 ``on_show()``，效果等同 Tk 版的 ``def on_show(self) -> None: pass``。
+這頁大部分的控制項不依賴「資料庫目前的狀態」——來源清單只在使用者透過網址
+精靈新增／刪除自訂來源時才需要重新查詢（見 ``_on_source_saved``），紀錄表格
+與活動紀錄只在使用者自己按下「開始爬取」之後才會有內容。
+
+例外是「來源健康度」那一張表。它講的是**以前**跑出來的結果，而爬取多半是排程
+半夜自己跑的——使用者打開程式的時候那一趟早就結束了，畫面上什麼都沒有。所以
+它必須在每次切到這一頁時重算，不能只在按下「開始爬取」之後才更新。
 
 ## 爬蟲倫理規範
 
@@ -47,6 +49,7 @@ from core.schemas import CrawlSummary, VerifySummary
 from controllers.core import (
     CompletionController,
     CrawlController,
+    CrawlHealthController,
     EnrichController,
     RegistryController,
     VerifyController,
@@ -61,6 +64,19 @@ from gui_qt.widgets import DataTable, LabeledEntry, Section, WideComboBox, capti
 
 #: 來源下拉選單裡「不指定單一來源」的顯示文字。
 ALL_ENABLED = "（全部啟用）"
+
+#: 「來源健康度」表格的欄位。
+#:
+#: 「最近抓到」跟「平常抓到」要並排。單獨一個「12」沒有任何意義，要旁邊擺著
+#: 「380」才看得出那是壞的——這張表存在的全部理由就是那個對比。
+HEALTH_COLUMNS: list[tuple[str, str, int]] = [
+    ("source", "來源", 150),
+    ("state", "狀態", 110),
+    ("found", "最近抓到", 90),
+    ("usual", "平常抓到", 90),
+    ("when", "上次爬取", 130),
+    ("note", "說明", 320),
+]
 
 
 class _LabeledCombo(QWidget):
@@ -97,6 +113,20 @@ class _LabeledCombo(QWidget):
         self.combo.setCurrentText(current if current in values else values[0])
 
 
+def _health_row(report: Any) -> dict[str, Any]:
+    """把一份健康度報告變成表格的一列。"""
+    when = report.last_run_at
+    usual = report.baseline.value
+    return {
+        "source": report.source,
+        "state": report.label,
+        "found": "" if report.found is None else report.found,
+        "usual": "" if usual is None else usual,
+        "when": when.strftime("%Y-%m-%d %H:%M") if when is not None else "",
+        "note": report.note,
+    }
+
+
 class CrawlerPage(BasePage):
     title = "爬取"
     icon = "🕷️"
@@ -104,6 +134,7 @@ class CrawlerPage(BasePage):
     def __init__(self, app: object) -> None:
         super().__init__(app)
         self.crawl_controller = CrawlController()
+        self.health_controller = CrawlHealthController()
         self.verify_controller = VerifyController()
         self.enrich_controller = EnrichController()
         self.registry_controller = RegistryController()
@@ -303,6 +334,26 @@ class CrawlerPage(BasePage):
         notice.setStyleSheet(f"color: {theme.pick(theme.MUTED)};")
         controls.body_layout.addWidget(notice)
 
+        # 來源健康度。
+        #
+        # 爬完那一刻的提醒只活在那一次的畫面上，而爬取多半是排程半夜自己跑的
+        # ——隔天早上打開程式，那句話早就不在了。這張表是它的長期版本：每次
+        # 切到這一頁都重算一次，講的是「這個來源現在健不健康」，不是「這一次
+        # 跑得怎麼樣」。
+        health_section = Section("來源健康度")
+        self.health_summary = QLabel("")
+        self.health_summary.setWordWrap(True)
+        health_section.body_layout.addWidget(self.health_summary)
+        health_section.body_layout.addWidget(
+            caption(
+                "拿最近一次抓到的筆數，跟前幾次的中位數比。網站改版之後選擇器會失效，"
+                "而症狀不是報錯——是抓回 3 筆而畫面上寫著完成。"
+            )
+        )
+        self.health_table = DataTable(columns=HEALTH_COLUMNS, min_rows=2)
+        health_section.body_layout.addWidget(self.health_table)
+        body_column.addWidget(health_section)
+
         log_section = Section("活動紀錄")
         self.log_box = QPlainTextEdit()
         self.log_box.setReadOnly(True)
@@ -331,6 +382,34 @@ class CrawlerPage(BasePage):
         )
         results_section.body_layout.addWidget(self.results_table)
         body_column.addWidget(results_section, 1)
+
+    # --------------------------------------------------------- 來源健康度
+
+    def refresh(self) -> None:
+        """每次切到這一頁時重算來源健康度（理由見這個檔案開頭）。"""
+        self._refresh_health()
+
+    def _refresh_health(self) -> None:
+        try:
+            reports = self.health_controller.check()
+        except Exception as exc:  # noqa: BLE001
+            # 健康度是附加價值。它自己壞掉不該讓整個「爬取」頁打不開——那會
+            # 把一個提醒功能變成一個「連爬都不能爬」的故障。
+            self.health_table.set_rows([])
+            self._set_health_summary(f"讀不到爬取紀錄：{exc}", bad=True)
+            return
+
+        self.health_table.set_rows([_health_row(report) for report in reports])
+        from crawler.health import summarise
+
+        self._set_health_summary(
+            summarise(reports), bad=any(r.needs_attention for r in reports)
+        )
+
+    def _set_health_summary(self, text: str, *, bad: bool) -> None:
+        self.health_summary.setText(text)
+        colour = theme.pick(theme.DANGER if bad else theme.MUTED)
+        self.health_summary.setStyleSheet(f"color: {colour};")
 
     # ------------------------------------------------------------- crawling
 
@@ -468,6 +547,9 @@ class CrawlerPage(BasePage):
             self.status(f"爬取完成，但有 {len(warned)} 個來源需要注意", "warning")
         else:
             self.status("爬取完成", "success")
+        # 剛剛這一趟就是健康度的最新一筆資料，表格要當場跟上。等到下次切頁
+        # 才更新的話，使用者會看到上面寫「一筆都沒抓到」、下面卻剛跑完。
+        self._refresh_health()
         bump_data_version()
 
     def _on_crawl_error(self, exc: Exception) -> None:
@@ -892,6 +974,9 @@ class CrawlerPage(BasePage):
             source_names = []
 
         self.source_combo.set_values([ALL_ENABLED, *source_names])
+        # 健康度是照著「設定裡有哪些來源」列的，新增或刪掉一個之後要跟著變。
+        self.health_controller = CrawlHealthController()
+        self._refresh_health()
 
     # ------------------------------------------------------------------ log
 

@@ -1056,6 +1056,7 @@ class CrawlJobRepository:
         job.records_duplicate = summary.records_duplicate
         job.records_invalid = summary.records_invalid
         job.error = summary.error
+        job.resumed = summary.resumed
         job.finished_at = summary.finished_at or now()
         self.session.flush()
         return job
@@ -1076,22 +1077,34 @@ class CrawlJobRepository:
         stmt = stmt.order_by(CrawlJob.started_at.desc(), CrawlJob.id.desc()).limit(1)
         return self.session.execute(stmt).scalars().first()
 
-    def last_harvest_for(self, source: str, before_id: int | None = None) -> int | None:
-        """這個來源上一次**真的抓到東西**的筆數，沒有就是 None。
+    def harvest_history(
+        self, source: str, limit: int = 5, before_id: int | None = None
+    ) -> list[int]:
+        """這個來源最近幾次**真的抓到東西**的筆數，新的排前面。
 
-        比較的基準要跳過中途取消、失敗、以及本來就抓 0 筆的那些執行——拿一次
-        失敗的執行當基準，等於永遠不會再警告。
+        健康度的基準（見 :mod:`crawler.health`）。四種執行要跳過，理由都一樣
+        ——它們的筆數不代表「這個來源平常抓得到多少」：
+
+        * 失敗與中途取消的：它做到一半就停了。
+        * 本來就抓 0 筆的：拿一次壞掉的執行當基準，等於永遠不會再警告。
+        * 接續跑的：它只做剩下的一截。
+
+        回傳的是一串數字而不是單一個值，因為基準取的是**中位數**——只看上一
+        次的話，壞掉的第二天警告就自己消失了。
         """
         stmt = (
             select(CrawlJob.records_found)
             .where(CrawlJob.source == source)
             .where(CrawlJob.records_found > 0)
             .where(CrawlJob.status.in_([CrawlStatus.SUCCESS.value, CrawlStatus.PARTIAL.value]))
+            # is_not(True)：舊資料庫補上這一欄之前的紀錄是 NULL，用 != True
+            # 會把它們整批濾掉——那等於升級之後所有來源的基準都變成空的。
+            .where(CrawlJob.resumed.is_not(True))
         )
         if before_id is not None:
             stmt = stmt.where(CrawlJob.id != before_id)
-        stmt = stmt.order_by(CrawlJob.started_at.desc(), CrawlJob.id.desc()).limit(1)
-        return self.session.execute(stmt).scalars().first()
+        stmt = stmt.order_by(CrawlJob.started_at.desc(), CrawlJob.id.desc()).limit(limit)
+        return [int(value) for value in self.session.execute(stmt).scalars()]
 
     def clear_resume(self, source: str | None = None) -> int:
         """把「做到哪裡」的紀錄清掉，下一次從頭開始。回傳清了幾筆。
@@ -1126,6 +1139,7 @@ class CrawlJobRepository:
             started_at=job.started_at,
             finished_at=job.finished_at,
             error=job.error,
+            resumed=bool(job.resumed),
         )
 
 

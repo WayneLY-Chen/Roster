@@ -502,3 +502,135 @@ def test_the_new_source_button_opens_an_empty_wizard(qt_app, patch_config):
     assert wizard._editing_source is None
     assert wizard.url_entry.text() == ""
     wizard.close()
+
+
+# ------------------------------------------------------------ 來源健康度
+
+
+def _seed_runs(session, source: str, counts, **kwargs) -> None:
+    """給這個來源塞幾次爬取紀錄，第一個是最近的一次。"""
+    from datetime import timedelta
+
+    from core.constants import CrawlStatus
+    from database.models import CrawlJob, now
+
+    for days_ago, found in enumerate(counts):
+        session.add(
+            CrawlJob(
+                source=source,
+                status=kwargs.get("status", CrawlStatus.SUCCESS.value),
+                records_found=found,
+                started_at=now() - timedelta(days=days_ago),
+                finished_at=now() - timedelta(days=days_ago),
+            )
+        )
+    session.commit()
+
+
+def _health_rows(page) -> dict[str, dict]:
+    return {
+        page.health_table.model.row_at(i)["source"]: page.health_table.model.row_at(i)
+        for i in range(page.health_table.row_count())
+    }
+
+
+def test_the_health_panel_lists_a_source_that_was_never_crawled(
+    qt_app, db_session, patch_config
+):
+    """從來沒爬過的來源要列出來，不是消失。
+
+    看不到它的話，使用者不會知道排程根本沒在跑這個來源。
+    """
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+    page.refresh()
+
+    rows = _health_rows(page)
+    assert "sample" in rows
+    assert rows["sample"]["state"] == "還沒爬過"
+    assert rows["sample"]["found"] == ""
+
+
+def test_the_health_panel_puts_this_time_next_to_what_is_normal(
+    qt_app, db_session, patch_config
+):
+    """單獨一個「2」沒有意義，要旁邊擺著「390」才看得出那是壞的。"""
+    _seed_runs(db_session, "sample", [2, 380, 400])
+
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+    page.refresh()
+
+    row = _health_rows(page)["sample"]
+    assert row["found"] == 2
+    assert row["usual"] == 390
+    assert row["state"] == "抓到的變少了"
+    assert "重新分析" in row["note"]
+    assert "sample" in page.health_summary.text()
+
+
+def test_the_health_panel_says_nothing_is_wrong_when_nothing_is(
+    qt_app, db_session, patch_config
+):
+    _seed_runs(db_session, "sample", [380, 390, 400])
+
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+    page.refresh()
+
+    assert _health_rows(page)["sample"]["state"] == "正常"
+    assert "正常" in page.health_summary.text()
+
+
+def test_a_broken_health_lookup_does_not_break_the_page(qt_app, db_session, patch_config):
+    """健康度是附加價值。它自己壞掉不該讓整個「爬取」頁打不開——那會把一個
+    提醒功能變成一個「連爬都不能爬」的故障。"""
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+
+    def _boom():
+        raise RuntimeError("資料表壞了")
+
+    page.health_controller.check = _boom
+    page.refresh()
+
+    assert page.health_table.row_count() == 0
+    assert "資料表壞了" in page.health_summary.text()
+    assert page.start_button.isEnabled() is True
+
+
+def test_finishing_a_crawl_updates_the_health_panel_right_away(
+    qt_app, db_session, patch_config
+):
+    """剛跑完那一趟就是健康度的最新一筆。
+
+    等到下次切頁才更新的話，使用者會看到上面寫「還沒爬過」、下面卻剛跑完。
+    """
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+    page.refresh()
+    assert _health_rows(page)["sample"]["state"] == "還沒爬過"
+
+    page._start_crawl()
+    _wait_for_task(qt_app, page.crawl_task)
+
+    row = _health_rows(page)["sample"]
+    assert row["found"] > 0
+    assert row["when"], "跑完了卻沒有寫上次爬取的時間"
+
+
+def test_a_disabled_source_still_shows_but_is_not_a_warning(
+    qt_app, db_session, patch_config
+):
+    _seed_runs(db_session, "sample", [0, 380, 400])
+    # SourceConfig 是 frozen 的，換掉整個項目而不是改它的欄位。
+    sources = patch_config.crawler.sources
+    sources[0] = sources[0].model_copy(update={'enabled': False})
+
+    page = CrawlerPage(_FakeApp())
+    page.ensure_built()
+    page.refresh()
+
+    row = _health_rows(page)["sample"]
+    assert row["state"] == "沒有啟用"
+    assert row["note"] == ""

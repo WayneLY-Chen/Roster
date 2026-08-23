@@ -12,7 +12,7 @@ import shutil
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.config import AppConfig, get_config
 from core.constants import (
@@ -47,6 +47,9 @@ from database.repository import (
 )
 from database.session import session_scope
 from core.data_version import bump
+
+if TYPE_CHECKING:  # 只為了型別：crawler/__init__.py 會把整條管線一起拉進來
+    from crawler.health import SourceHealth
 
 log = get_logger(LogCategory.GUI)
 
@@ -314,6 +317,54 @@ class CrawlController:
             page_start=from_page,
             page_end=to_page,
         )
+
+
+class CrawlHealthController:
+    """「這些來源還在正常地抓回東西嗎」。
+
+    健康度的判斷在 :mod:`crawler.health`，這裡只負責去資料庫把要比的數字撈
+    出來。跟爬完那一刻的提醒共用同一份判斷——分成兩份的話，畫面上寫「正常」
+    而紀錄裡是「需要注意」的那一天不會有人發現。
+    """
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config or get_config()
+
+    def check(self) -> list[SourceHealth]:
+        """每一個設定裡的來源一份健康度報告，需要注意的排前面。
+
+        沒有啟用的來源也列出來（狀態寫「沒有啟用」）。使用者停用一個來源之後
+        還是會想知道它上次抓到什麼——少列了它，畫面上就變成「這個來源不見
+        了」。
+        """
+        from crawler.health import BASELINE_RUNS, Baseline, assess
+
+        reports: list[SourceHealth] = []
+        with session_scope() as session:
+            repo = CrawlJobRepository(session)
+            for source in self.config.crawler.sources:
+                # previous_for() 不帶 before_id 就是「最近一次」，包含失敗與
+                # 中途停掉的——半夜排程失敗的話，這是隔天早上唯一的線索。
+                job = repo.previous_for(source.name)
+                latest = repo.to_summary(job) if job is not None else None
+                counts = repo.harvest_history(
+                    source.name,
+                    limit=BASELINE_RUNS,
+                    before_id=job.id if job is not None else None,
+                )
+                reports.append(
+                    assess(
+                        source.name,
+                        latest,
+                        Baseline(tuple(counts)),
+                        enabled=source.enabled,
+                    )
+                )
+
+        # 需要注意的排最上面。使用者設了二十個來源的時候，壞掉的那一個不該
+        # 要捲三頁才看得到。
+        reports.sort(key=lambda r: (not r.needs_attention, r.source))
+        return reports
 
 
 class VerifyController:
