@@ -93,6 +93,38 @@ def daily_sent_count(config: AppConfig | None = None) -> int:
         return _daily_sent_count(session)
 
 
+@dataclass(frozen=True, slots=True)
+class FollowUp:
+    """這一批是追蹤信，規則跟第一封不一樣。
+
+    ``None`` 代表一般的第一封。做成一個物件而不是一個布林值，是因為「幾天之後
+    追」與「最多追幾封」這兩個數字必須跟著一起傳——分開傳的話，之後一定會有人
+    只傳其中一個。
+
+    ## 為什麼追蹤信要有自己的規則
+
+    第一封的規則是「這家還沒收過信」；追蹤信剛好相反，它只寄給**收過但沒回**
+    的人。而「沒回」這件事必須查得準：一個已經回過信的人再收到一封罐頭追蹤
+    信，比完全不追還糟——那等於告訴他「我根本沒在看你的回信」。
+    """
+
+    #: 距離上一封至少幾天。
+    after_days: int
+    #: 同一家公司總共最多幾封（含第一封）。
+    max_emails: int
+
+    @classmethod
+    def from_config(cls, config: AppConfig) -> "FollowUp":
+        return cls(
+            after_days=config.mailer.follow_up_after_days,
+            max_emails=config.mailer.follow_up_max_emails,
+        )
+
+    def cutoff(self, *, now_value: datetime | None = None) -> datetime:
+        """比這個時間還晚寄的就是「還不夠久」。"""
+        return (now_value or now()) - timedelta(days=self.after_days)
+
+
 def _classify(
     company: Company,
     *,
@@ -100,6 +132,8 @@ def _classify(
     require_verified_email: bool,
     remaining_today: int,
     already_planned: int,
+    follow_up: FollowUp | None = None,
+    follow_up_cutoff: datetime | None = None,
 ) -> SkipReason | None:
     """Apply the skip rules, in the mandated order. ``None`` means send it."""
     if company.do_not_contact:
@@ -115,8 +149,25 @@ def _classify(
         return SkipReason.INVALID_EMAIL
     if require_verified_email and company.email_verdict != EmailVerdict.VALID.value:
         return SkipReason.UNVERIFIED
-    if company.last_emailed_at is not None and company.last_emailed_at >= resend_cutoff:
+
+    if follow_up is not None:
+        # 追蹤信：只寄給「收過第一封、而且沒有回」的人。
+        if company.last_emailed_at is None:
+            return SkipReason.NEVER_CONTACTED
+        if company.last_replied_at is not None:
+            # 回過信的人再收到一封罐頭追蹤信，比完全不追還糟——那等於告訴他
+            # 「我根本沒在看你的回信」。這一條排在次數與天數前面，因為它是
+            # 使用者最需要在預覽表上看到的那個理由。
+            return SkipReason.ALREADY_REPLIED
+        if company.email_count >= follow_up.max_emails:
+            # 沒有這個上限的話，一個從來不回信的地址會被無限期追下去——那正是
+            # 垃圾信的定義，而付出代價的是使用者自己的網域信譽。
+            return SkipReason.ENOUGH_FOLLOW_UPS
+        if follow_up_cutoff is not None and company.last_emailed_at > follow_up_cutoff:
+            return SkipReason.TOO_SOON
+    elif company.last_emailed_at is not None and company.last_emailed_at >= resend_cutoff:
         return SkipReason.RECENTLY_CONTACTED
+
     if already_planned >= remaining_today:
         return SkipReason.DAILY_CAP
     return None
@@ -128,11 +179,16 @@ def build_plan(
     campaign_name: str,
     config: AppConfig | None = None,
     attachments: list[str] | None = None,
+    follow_up: FollowUp | None = None,
 ) -> CampaignPlan:
     """Decide who would be emailed, without sending anything or touching SMTP.
 
     ``attachments`` 在這裡就會驗證總大小與檔案是否存在——附件超過上限或檔案
     不見，要在使用者按「預覽」時就知道，而不是按下「開始寄送」之後才炸。
+
+    ``follow_up`` 給了就換成追蹤信的規則（見 :class:`FollowUp`）。刻意走同一個
+    函式而不是另外寫一個：預覽表格、每日上限、稽核紀錄、寄送流程全部共用同一
+    份程式碼。追蹤信跟第一封唯一該不一樣的地方是「誰該收到」。
     """
     config = config or get_config()
     mailer = config.mailer
@@ -145,6 +201,7 @@ def build_plan(
         check_total_size(attachment_names, config)
 
     resend_cutoff = now() - timedelta(days=mailer.resend_after_days)
+    follow_up_cutoff = follow_up.cutoff() if follow_up is not None else None
 
     recipients: list[RecipientPlan] = []
     skip_counts: dict[str, int] = {}
@@ -163,6 +220,8 @@ def build_plan(
                 require_verified_email=mailer.require_verified_email,
                 remaining_today=remaining_today,
                 already_planned=sendable,
+                follow_up=follow_up,
+                follow_up_cutoff=follow_up_cutoff,
             )
 
             if skip_reason is None:

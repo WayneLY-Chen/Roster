@@ -170,6 +170,14 @@ class Company(Base):
     #: sender skips these unconditionally and it is never cleared by a crawl.
     do_not_contact: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     last_emailed_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    #: 這家公司最後一次回信給我們是什麼時候。
+    #:
+    #: 追蹤信靠它決定誰不要再追——**回過信的人再收到一封罐頭追蹤信，比沒追還
+    #: 糟**。不從業務階段推：那個欄位使用者會手動改，而且改的理由不見得跟
+    #: 「有沒有回信」有關。這件事需要一個自己的、程式蓋的章。
+    #:
+    #: 由 :meth:`controllers.mail.ReplyController.apply` 在使用者確認之後寫入。
+    last_replied_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     email_count: Mapped[int] = mapped_column(Integer, default=0)
 
     # --- audit ---

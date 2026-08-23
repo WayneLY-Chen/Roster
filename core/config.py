@@ -786,6 +786,18 @@ class MailerSection(_Base):
     resend_after_days: int = Field(default=30, ge=0)
     #: Only send to addresses that passed MX verification.
     require_verified_email: bool = True
+
+    #: 追蹤信：距離上一封至少要隔幾天。
+    #:
+    #: 七天是「對方休一週假回來還看得到前一封」與「不要煩人」之間的常見取捨。
+    #: 設太短的實際後果不是沒效果，是被當成垃圾信檢舉。
+    follow_up_after_days: int = Field(default=7, ge=1, le=365)
+
+    #: 追蹤信：同一家公司總共最多寄幾封（含第一封）。
+    #:
+    #: 這個上限不是禮貌問題而已。沒有上限的話，一個從來不回信的地址會被無限
+    #: 期地追下去——那正是垃圾信的定義，而付出代價的是使用者自己的網域信譽。
+    follow_up_max_emails: int = Field(default=3, ge=2, le=10)
     #: Appended to every message. Required: recipients must be able to opt out.
     unsubscribe_note: str = (
         "若不希望再收到本信件，請直接回覆本信並註明「取消訂閱」，我們會立即將您移除。"

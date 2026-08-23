@@ -70,6 +70,31 @@ def decode_header_value(raw: object) -> str:
 _decode = decode_header_value
 
 
+def parse_mail_date(raw: object) -> datetime | None:
+    """把信件的 ``Date`` 標頭變成這個專案用的「不帶時區的當地時間」。
+
+    **信件的日期一定帶時區偏移**（``+0800``、``-0500``），而整個資料庫的時間
+    欄位都是 naive 的當地時間（見 :func:`database.models.now`）。兩者直接相比
+    會丟 ``TypeError: can't compare offset-naive and offset-aware datetimes``。
+
+    這個例外很陰險：它只有在「已經有上一次的時間可以比」的時候才會發生。第一
+    次收到回信不會炸，第二次才會——而那時候使用者已經在用了。
+
+    對方的時區要真的**換算**，不是把 ``tzinfo`` 拔掉了事：一封 ``-0500`` 寄出
+    的信直接拔掉偏移，時間會變成比實際早十三個小時。
+    """
+    text = decode_header_value(raw)
+    if not text:
+        return None
+    try:
+        value = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone().replace(tzinfo=None)
+    return value
+
+
 def _extract_body(message: Message) -> str:
     """Best-effort plain-text body, preferring ``text/plain`` over HTML."""
     plain: list[str] = []
@@ -186,13 +211,7 @@ class GmailClient:
         message = email.message_from_bytes(raw)
         sender_name, sender_email = parseaddr(_decode(message.get("From")))
 
-        date_value: datetime | None = None
-        raw_date = message.get("Date")
-        if raw_date:
-            try:
-                date_value = parsedate_to_datetime(raw_date)
-            except (TypeError, ValueError):
-                date_value = None
+        date_value = parse_mail_date(message.get("Date"))
 
         return MailMessage(
             uid=uid,

@@ -66,18 +66,67 @@ class MailController:
         campaign_name: str,
         *,
         attachments: list[str] | None = None,
+        follow_up: bool = False,
+        follow_up_days: int | None = None,
+        follow_up_max: int | None = None,
         report: Callable[[Any], None] | None = None,
         cancel_event: Any = None,
     ) -> CampaignPlan:
-        """Decide who would be emailed. Suitable as a :class:`BackgroundTask` worker."""
+        """Decide who would be emailed. Suitable as a :class:`BackgroundTask` worker.
+
+        ``follow_up=True`` 換成追蹤信的規則：只寄給收過第一封、而且沒有回的人。
+
+        ``follow_up_days``／``follow_up_max`` 給了就用它們，沒給才回頭讀設定。
+        **畫面上那兩個數字要能直接生效**——不然使用者改了數字、按了「產生名
+        單」，結果卻是用設定裡那組舊的，而畫面上完全看不出來。
+        """
         if not (template_name or "").strip():
             raise CRMError("請先選擇一個樣板。")
+        rules = None
+        if follow_up:
+            saved = campaign_module.FollowUp.from_config(self.config)
+            rules = campaign_module.FollowUp(
+                after_days=int(follow_up_days) if follow_up_days else saved.after_days,
+                max_emails=int(follow_up_max) if follow_up_max else saved.max_emails,
+            )
         try:
             return campaign_module.build_plan(
-                criteria, template_name, campaign_name, self.config, attachments
+                criteria,
+                template_name,
+                campaign_name,
+                self.config,
+                attachments,
+                follow_up=rules,
             )
         except CRMError as exc:
             raise CRMError(f"產生寄送名單失敗：{exc}") from exc
+
+    def follow_up_rules(self) -> tuple[int, int]:
+        """``(幾天之後追, 最多追幾封)``，給畫面顯示與編輯用。"""
+        return (
+            self.config.mailer.follow_up_after_days,
+            self.config.mailer.follow_up_max_emails,
+        )
+
+    def set_follow_up_rules(self, after_days: int, max_emails: int) -> None:
+        """存進 ``user_settings.yaml``，跟每日上限走同一條路。
+
+        兩個一起存：``save_user_settings`` 存完會整份重建設定驗證一次，分兩次
+        存的話中間那一刻的設定可能是不合法的而被回滾。
+        """
+        from core.config import get_config, save_user_settings
+
+        try:
+            save_user_settings(
+                "mailer",
+                {
+                    "follow_up_after_days": int(after_days),
+                    "follow_up_max_emails": int(max_emails),
+                },
+            )
+        except CRMError as exc:
+            raise CRMError(f"儲存追蹤信設定失敗：{exc}") from exc
+        self.config = get_config()
 
     # ------------------------------------------------------------- 附件
 
@@ -789,6 +838,18 @@ class ReplyController:
                     )
                     if part
                 )
+                # 蓋章：這家回過信了。追蹤信靠它決定誰不要再追——回過信的人
+                # 再收到一封罐頭追蹤信，比完全不追還糟。
+                #
+                # 不從業務階段推：那個欄位使用者會手動改，而且改的理由不見得跟
+                # 「有沒有回信」有關。這件事需要一個自己的、程式蓋的章。
+                #
+                # 退訂的也要蓋：那同樣是一次真人的回應，而且更不該再被追。
+                stamp = reply.received_at or now()
+                if company.last_replied_at is None or company.last_replied_at < stamp:
+                    company.last_replied_at = stamp
+                    company.updated_at = now()
+
                 if reply.unsubscribe:
                     # unsubscribe_by_email 已經留過紀錄了，這裡不重複寫一則。
                     continue

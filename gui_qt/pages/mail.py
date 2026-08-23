@@ -82,6 +82,7 @@ from gui_qt.widgets import (
     StatCard,
     WideComboBox,
     caption,
+    inline_caption,
 )
 
 
@@ -551,6 +552,46 @@ class MailPage(BasePage):
         self.verified_only_check.setChecked(True)
         section.body_layout.addWidget(self.verified_only_check)
 
+        # 追蹤信。做成勾選框而不是另外一個頁面／另外一顆按鈕：它跟第一封走的
+        # 是同一條路（同一份樣板、同一張預覽表、同一個每日上限、同一份稽核
+        # 紀錄），唯一不同的是「誰該收到」。
+        self.follow_up_check = QCheckBox("這一批是追蹤信（只寄給寄過但沒回的）")
+        self.follow_up_check.toggled.connect(self._on_follow_up_toggled)
+        section.body_layout.addWidget(self.follow_up_check)
+
+        # 說明文字放進 QSpinBox 自己的前後綴，不另外擺兩個 QLabel：這個面板是
+        # 跟「郵件樣板」左右並排的窄欄，多兩個標籤會把整列推出可視範圍。
+        follow_row = QHBoxLayout()
+        self.follow_up_days_spin = QSpinBox()
+        self.follow_up_days_spin.setRange(1, 365)
+        self.follow_up_days_spin.setPrefix("隔 ")
+        self.follow_up_days_spin.setSuffix(" 天再追")
+        follow_row.addWidget(self.follow_up_days_spin, 0)
+        self.follow_up_max_spin = QSpinBox()
+        self.follow_up_max_spin.setRange(2, 10)
+        self.follow_up_max_spin.setPrefix("最多 ")
+        self.follow_up_max_spin.setSuffix(" 封")
+        follow_row.addWidget(self.follow_up_max_spin, 0)
+        # 「記住」只是把現在這兩個數字存成下一次的預設值。產生名單一律用畫面
+        # 上當下的數字——改了就生效，不必先按這一顆。
+        self.follow_up_save_button = QPushButton("記住")
+        self.follow_up_save_button.clicked.connect(self._save_follow_up_rules)
+        follow_row.addWidget(self.follow_up_save_button, 0)
+        follow_row.addStretch(1)
+        section.body_layout.addLayout(follow_row)
+
+        self.follow_up_hint = QLabel(
+            "回過信的、退訂的、退信的<b>一律不追</b>。"
+            "「同一家最多幾封」含第一封在內——沒有這個上限的話，"
+            "一個從來不回信的地址會被無限期追下去。"
+        )
+        self.follow_up_hint.setTextFormat(Qt.TextFormat.RichText)
+        self.follow_up_hint.setObjectName("MutedLabel")
+        self.follow_up_hint.setWordWrap(True)
+        section.body_layout.addWidget(self.follow_up_hint)
+        # 沒勾就把那兩個數字關起來——它們只在追蹤模式下有意義。
+        self._on_follow_up_toggled(False)
+
         campaign_row = QHBoxLayout()
         self.campaign_name_entry = LabeledEntry(
             "活動名稱", value=f"開發信-{date.today().isoformat()}"
@@ -910,6 +951,7 @@ class MailPage(BasePage):
 
     def refresh(self) -> None:
         self._refresh_templates()
+        self._refresh_follow_up_rules()
         self._refresh_status()
 
     # -------------------------------------------------------------- 樣板
@@ -1183,8 +1225,52 @@ class MailPage(BasePage):
         self.status("正在產生寄送名單...", "normal")
 
         self.build_task.start(
-            criteria, template_name, campaign_name, attachments=attachments
+            criteria,
+            template_name,
+            campaign_name,
+            attachments=attachments,
+            follow_up=self.follow_up_check.isChecked(),
+            follow_up_days=self.follow_up_days_spin.value(),
+            follow_up_max=self.follow_up_max_spin.value(),
         )
+
+    def _on_follow_up_toggled(self, checked: bool) -> None:
+        """切換模式就把上一次的名單清掉。
+
+        留著的話畫面上會是「第一封」的名單配「追蹤信」的勾選狀態，而下面那顆
+        「開始寄送」寄的是留著的那一份——使用者以為自己寄的是追蹤信。
+        """
+        for widget in (
+            self.follow_up_days_spin,
+            self.follow_up_max_spin,
+            self.follow_up_save_button,
+        ):
+            widget.setEnabled(checked)
+        if self.plan is not None:
+            self.plan = None
+            self.table.clear()
+            self.summary_label.setText("換了模式，請重新產生名單。")
+
+    def _refresh_follow_up_rules(self) -> None:
+        days, most = self.controller.follow_up_rules()
+        for spin, value in (
+            (self.follow_up_days_spin, days),
+            (self.follow_up_max_spin, most),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self._on_follow_up_toggled(self.follow_up_check.isChecked())
+
+    def _save_follow_up_rules(self) -> None:
+        try:
+            self.controller.set_follow_up_rules(
+                self.follow_up_days_spin.value(), self.follow_up_max_spin.value()
+            )
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.status("記住了，以後打開這一頁就是這組數字", "success")
 
     def _on_build_plan_done(self, plan: Any) -> None:
         self.plan = plan
@@ -1210,7 +1296,11 @@ class MailPage(BasePage):
         reason_summary = "；".join(
             f"{reason}：{count} 家" for reason, count in plan.skip_counts.items()
         )
-        summary = f"共 {len(plan.recipients)} 家，可寄送 {plan.sendable} 家，略過 {plan.skipped} 家。"
+        kind = "追蹤信" if self.follow_up_check.isChecked() else "第一封"
+        summary = (
+            f"「{kind}」共 {len(plan.recipients)} 家，"
+            f"可寄送 {plan.sendable} 家，略過 {plan.skipped} 家。"
+        )
         if reason_summary:
             summary += f"（{reason_summary}）"
         summary += f" 今日寄送額度剩餘 {plan.daily_remaining} 封。"

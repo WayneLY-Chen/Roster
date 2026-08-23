@@ -459,3 +459,116 @@ def test_a_reply_knows_how_to_describe_itself():
     assert Reply("a@b.example", unsubscribe=True).kind == "要求不要再寄"
     assert Reply("a@b.example", automatic=True).kind == "自動回覆"
     assert Reply("a@b.example").kind == "回覆"
+
+
+# ------------------------------------------------------ 回信要留下一個章
+
+
+def test_applying_a_reply_stamps_when_they_replied(reply_world, db_session):
+    """**追蹤信靠這個章決定誰不要再追。**
+
+    不從業務階段推：那個欄位使用者會手動改，而且改的理由不見得跟「有沒有回
+    信」有關。這件事需要一個自己的、程式蓋的章。
+    """
+    made, use = reply_world
+    controller = use({"1": REPLY})
+
+    controller.apply(controller.scan().hits)
+
+    db_session.expire_all()
+    assert db_session.get(Company, made["r1"].id).last_replied_at is not None
+
+
+def test_an_unsubscribe_also_counts_as_having_replied(reply_world, db_session):
+    """叫我們別再寄，同樣是一次真人的回應——而且更不該再被追。"""
+    made, use = reply_world
+    controller = use({"1": UNSUBSCRIBE})
+
+    controller.apply(controller.scan().hits)
+
+    db_session.expire_all()
+    assert db_session.get(Company, made["r2"].id).last_replied_at is not None
+
+
+def test_the_stamp_never_moves_backwards(reply_world, db_session):
+    """收到一封比較舊的信，不該把「最後回信時間」往回撥。
+
+    ``REPLY`` 那封信的日期是 2026-08-19；資料庫裡先放一個更晚的時間，採用之後
+    它必須留著。
+    """
+    later = datetime(2026, 12, 31, 0, 0)
+    made, use = reply_world
+    company = db_session.get(Company, made["r1"].id)
+    company.last_replied_at = later
+    db_session.commit()
+
+    controller = use({"1": REPLY})
+    controller.apply(controller.scan().hits)
+
+    db_session.expire_all()
+    assert db_session.get(Company, made["r1"].id).last_replied_at == later
+
+
+def test_the_scan_alone_stamps_nothing(reply_world, db_session):
+    made, use = reply_world
+
+    use({"1": REPLY}).scan()
+
+    db_session.expire_all()
+    assert db_session.get(Company, made["r1"].id).last_replied_at is None
+
+
+# --------------------------------------------------------------- 時區
+
+def test_the_reply_time_has_no_timezone_on_it():
+    """**這一條是回歸測試。**
+
+    信件的 ``Date`` 一定帶時區偏移，而整個資料庫的時間欄位都是 naive 的當地
+    時間。兩者相比會丟 ``TypeError: can't compare offset-naive and offset-aware
+    datetimes``——而它只在「已經有上一次的時間可以比」的時候才會發生，所以第
+    一次收到回信不會炸，第二次才會。
+    """
+    reply = parse_reply(_message(REPLY), sent_to=["ming@factory.example"])
+
+    assert reply is not None and reply.received_at is not None
+    assert reply.received_at.tzinfo is None
+
+
+def test_a_foreign_timezone_is_converted_not_truncated():
+    """對方的時區要真的換算。
+
+    直接把 ``tzinfo`` 拔掉的話，一封 ``-0500`` 寄出的信會變成比實際早十三個
+    小時——而那個誤差不會有任何提示，只會讓「最後回信時間」悄悄地不對。
+    """
+    from datetime import timezone
+
+    from gmail.client import parse_mail_date
+
+    both = (
+        parse_mail_date("Tue, 19 Aug 2026 10:05:00 +0800"),
+        parse_mail_date("Tue, 19 Aug 2026 10:05:00 -0500"),
+    )
+    assert all(value is not None and value.tzinfo is None for value in both)
+    # 同一個瞬間換算到當地時間應該一致。
+    utc = datetime(2026, 8, 19, 2, 5, tzinfo=timezone.utc)
+    assert both[0] == utc.astimezone().replace(tzinfo=None)
+
+
+def test_a_date_we_cannot_read_is_just_missing():
+    from gmail.client import parse_mail_date
+
+    assert parse_mail_date("昨天下午") is None
+    assert parse_mail_date(None) is None
+
+
+def test_stamping_twice_does_not_crash(reply_world, db_session):
+    """第一次蓋章、第二次比較——這就是那個例外實際會發生的時機。"""
+    made, use = reply_world
+    controller = use({"1": REPLY})
+
+    controller.apply(controller.scan().hits)
+    db_session.expire_all()
+    controller.apply(controller.scan().hits)
+
+    db_session.expire_all()
+    assert db_session.get(Company, made["r1"].id).last_replied_at is not None

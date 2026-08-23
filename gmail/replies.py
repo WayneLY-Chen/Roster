@@ -41,12 +41,12 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from email.message import Message
-from email.utils import getaddresses, parsedate_to_datetime
+from email.utils import getaddresses
 
 from core.constants import LogCategory
 from core.logging_setup import get_logger
 from gmail.bounces import looks_like_bounce
-from gmail.client import decode_header_value
+from gmail.client import decode_header_value, parse_mail_date
 
 log = get_logger(LogCategory.CRAWL)
 
@@ -226,13 +226,7 @@ def parse_reply(
     subject = decode_header_value(message.get("Subject"))
     body = _plain_body(message, UNSUBSCRIBE_BODY_CHARS)
 
-    received: datetime | None = None
-    raw_date = decode_header_value(message.get("Date"))
-    if raw_date:
-        try:
-            received = parsedate_to_datetime(raw_date)
-        except (TypeError, ValueError):
-            received = None
+    received = parse_mail_date(message.get("Date"))
 
     return Reply(
         address=address,

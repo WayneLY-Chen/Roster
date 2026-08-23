@@ -16,7 +16,7 @@ PROJECT_NAME = "Roster"
 DISPLAY_NAME = "名單匠"
 #: 版本號跟著 CHANGELOG.md 走——那份是「這一版改了什麼」的唯一出處，
 #: 「更新資訊」頁直接讀它，不另外維護一份會過期的副本。
-VERSION = "1.28.1"
+VERSION = "1.29.0"
 
 
 class StrEnum(str, Enum):
@@ -120,6 +120,11 @@ class SkipReason(StrEnum):
     BOUNCED = "信箱退過信"
     RECENTLY_CONTACTED = "近期已寄送過"
     DAILY_CAP = "已達今日寄送上限"
+    #: 以下只有追蹤信那條路會用到。見 :mod:`gmail.campaign` 的 FollowUp。
+    NEVER_CONTACTED = "還沒寄過第一封"
+    TOO_SOON = "距離上一封還不夠久"
+    ALREADY_REPLIED = "已經回過信了"
+    ENOUGH_FOLLOW_UPS = "已經追到上限"
 
 
 class CrawlStatus(StrEnum):

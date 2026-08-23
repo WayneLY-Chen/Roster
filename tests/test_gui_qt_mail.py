@@ -930,3 +930,98 @@ def test_a_new_scan_clears_the_previous_reply_table(qt_app, db_session, mail_con
 
     assert page.reply_table.row_count() == 0
     assert not page.reply_apply_button.isEnabled()
+
+
+# ------------------------------------------------------------------ 追蹤信
+#
+# 規則本身在 tests/test_gmail_followup.py。這裡只驗 Qt 這一段的接線。
+
+
+def test_follow_up_is_off_by_default(qt_app, db_session, mail_config):
+    """預設是第一封。追蹤信要使用者自己說。"""
+    page = _built_page(qt_app)
+
+    assert not page.follow_up_check.isChecked()
+    assert not page.follow_up_days_spin.isEnabled()
+
+
+def test_ticking_it_turns_the_two_numbers_on(qt_app, db_session, mail_config):
+    page = _built_page(qt_app)
+
+    page.follow_up_check.setChecked(True)
+
+    assert page.follow_up_days_spin.isEnabled()
+    assert page.follow_up_max_spin.isEnabled()
+
+
+def test_the_mode_is_passed_through_to_the_plan(qt_app, db_session, mail_config, monkeypatch):
+    page = _built_page(qt_app)
+    page._refresh_templates()
+    sent: list = []
+    monkeypatch.setattr(page.build_task, "start", lambda *a, **k: sent.append(k))
+    monkeypatch.setattr(page.template_combo, "currentText", lambda: "樣板")
+
+    page.follow_up_check.setChecked(True)
+    page._start_build_plan()
+
+    assert sent and sent[0]["follow_up"] is True
+
+
+def test_switching_mode_throws_the_previous_list_away(qt_app, db_session, mail_config):
+    """留著的話畫面上會是「第一封」的名單配「追蹤信」的勾選狀態，而下面那顆
+    「開始寄送」寄的是留著的那一份——使用者以為自己寄的是追蹤信。
+    """
+    page = _built_page(qt_app)
+    page.plan = object()
+    page.table.set_rows([{"company_name": "上一次的", "to_address": "a@b.c", "status": "會寄送"}])
+
+    page.follow_up_check.setChecked(True)
+
+    assert page.plan is None
+    assert page.table.row_count() == 0
+    assert "重新產生" in page.summary_label.text()
+
+
+def test_the_summary_says_which_kind_this_batch_is(qt_app, db_session, mail_config):
+    """兩種名單長得一模一樣，不寫出來使用者分不出手上這份是哪一種。"""
+    from gmail.campaign import CampaignPlan
+
+    page = _built_page(qt_app)
+    # 用真的型別，不要自己拼一個少欄位的假物件——少的那幾欄正好是畫面會讀的。
+    plan = CampaignPlan(
+        name="追蹤-1",
+        recipients=[],
+        sendable=0,
+        skipped=0,
+        skip_counts={},
+        daily_remaining=100,
+    )
+
+    page.follow_up_check.setChecked(True)
+    page._on_build_plan_done(plan)
+
+    assert "追蹤信" in page.summary_label.text()
+
+
+def test_the_numbers_on_screen_take_effect_without_pressing_remember(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    """**這一條是走查抓到的。**
+
+    「記住」只是存下一次的預設值。使用者把天數改成 3 之後直接按「產生名單」，
+    用的必須是 3——不是設定檔裡那組舊的。不然畫面上寫著一個數字、實際用的是
+    另一個，而他完全看不出來。
+    """
+    page = _built_page(qt_app)
+    page._refresh_templates()
+    sent: list = []
+    monkeypatch.setattr(page.build_task, "start", lambda *a, **k: sent.append(k))
+    monkeypatch.setattr(page.template_combo, "currentText", lambda: "樣板")
+
+    page.follow_up_check.setChecked(True)
+    page.follow_up_days_spin.setValue(3)
+    page.follow_up_max_spin.setValue(5)
+    page._start_build_plan()
+
+    assert sent[0]["follow_up_days"] == 3
+    assert sent[0]["follow_up_max"] == 5

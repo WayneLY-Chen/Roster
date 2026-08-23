@@ -40,11 +40,10 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from email.message import Message
-from email.utils import parsedate_to_datetime
 
 from core.constants import LogCategory
 from core.logging_setup import get_logger
-from gmail.client import decode_header_value
+from gmail.client import decode_header_value, parse_mail_date
 
 log = get_logger(LogCategory.CRAWL)
 
@@ -237,13 +236,7 @@ def parse_bounce(
         return []
 
     subject = decode_header_value(message.get("Subject"))
-    received: datetime | None = None
-    raw_date = decode_header_value(message.get("Date"))
-    if raw_date:
-        try:
-            received = parsedate_to_datetime(raw_date)
-        except (TypeError, ValueError):
-            received = None
+    received = parse_mail_date(message.get("Date"))
 
     rows = _from_dsn(message) or _from_text(message, sent_to=sent_to)
     seen: set[str] = set()
