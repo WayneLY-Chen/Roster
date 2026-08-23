@@ -184,6 +184,64 @@ def test_load_missing_template_raises_gmail_error(mail_config):
         templates.load_template("does-not-exist", mail_config)
 
 
+# --------------------------------------------------- 樣板名稱不能組出外面的路徑
+#
+# 樣板名稱是使用者在郵件頁打的字，會被直接拿去組檔案路徑。跟 gmail.attachments
+# 與 database.backup 同一條規則：不能假設它乾淨。這裡特別要守的是**寫入**那一
+# 邊——讀到資料夾外面已經不好，寫到外面更糟。
+
+
+@pytest.mark.parametrize(
+    "dangerous",
+    ["../../PROBE_OUTSIDE", "..\\..\\PROBE_OUTSIDE", "/tmp/PROBE_OUTSIDE",
+     "C:\\Windows\\PROBE_OUTSIDE"],
+)
+def test_saving_a_template_cannot_write_outside_the_templates_folder(
+    mail_config, dangerous
+):
+    directory = mail_config.mailer.resolved_templates_dir.resolve()
+
+    written = templates.save_template(dangerous, "主旨", "內文", mail_config)
+
+    assert written.parent == directory, f"{dangerous} 寫到了 {written.parent}"
+    # 反向確認：資料夾外面不可以多出任何東西。斷言「寫在裡面」還不夠——
+    # 真的漏出去的時候，那個檔案會安靜地躺在別的地方。
+    for outside in (directory.parent, directory.parent.parent):
+        assert not (outside / "PROBE_OUTSIDE.txt").exists()
+
+
+def test_loading_a_template_cannot_reach_a_file_outside_the_folder(mail_config):
+    """`../../secret` 只能拿到樣板資料夾裡的 `secret`，不是外面那一份。"""
+    directory = mail_config.mailer.resolved_templates_dir.resolve()
+    outside = directory.parent.parent / "secret.txt"
+    outside.write_text("Subject: 外面那一份\n\n不該被讀到\n", encoding="utf-8")
+    templates.save_template("secret", "裡面那一份", "這才對", mail_config)
+
+    loaded = templates.load_template("../../secret", mail_config)
+
+    assert loaded.subject == "裡面那一份"
+    assert "不該被讀到" not in loaded.body
+
+
+@pytest.mark.parametrize("name", ["", "   ", "..", "/", "../.."])
+def test_a_name_with_no_usable_filename_is_refused(mail_config, name):
+    """整理完之後什麼都不剩的名稱要當場拒絕。
+
+    放行的話會寫出一個叫 `.txt` 的檔案，而它在 `list_templates()` 的清單上
+    顯示成一個空字串——使用者看到一個點不開、也刪不掉的空項目。
+    """
+    with pytest.raises(GmailError):
+        templates.save_template(name, "主旨", "內文", mail_config)
+
+
+def test_an_ordinary_template_name_still_works(mail_config):
+    """圍堵不能把正常的名字一起擋掉——中文、空格、連字號都要照樣存得起來。"""
+    for name in ("開發信", "2026 春季-第一波", "follow_up"):
+        templates.save_template(name, f"主旨 {name}", "內文", mail_config)
+        assert templates.load_template(name, mail_config).subject == f"主旨 {name}"
+        assert name in templates.list_templates(mail_config)
+
+
 # ------------------------------------------------------------------- build_plan
 
 
