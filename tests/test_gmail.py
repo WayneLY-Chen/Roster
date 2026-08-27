@@ -213,7 +213,8 @@ def test_harvest_inbox_creates_company_and_primary_contact(db_session, tmp_confi
     assert contacts[0].is_primary is True
 
     activities = ActivityRepository(db_session).for_company(company.id)
-    assert any(a.subject == "Imported from Gmail" for a in activities)
+    # 活動紀錄是使用者在公司詳細視窗裡會看到的字，所以是中文的。
+    assert any(a.subject == "從收件匣挖到的" for a in activities)
 
 
 def test_harvest_inbox_skips_ignored_domains(db_session, tmp_config):
@@ -481,3 +482,202 @@ def test_gmail_session_context_manager(monkeypatch, tmp_config):
     with gmail_session(tmp_config) as client:
         assert client._connection is fake
     assert fake.logged_out is True
+
+
+# --------------------------------------------------- 挖跟存是分開的兩步
+
+
+SIGNATURE = (
+    "Best regards,\n"
+    "王大明\n"
+    "宏達精密機械股份有限公司\n"
+    "Manager\n"
+    "TEL: 02-2723-1234\n"
+)
+
+
+OTHER_SIGNATURE = (
+    "Best regards,\n"
+    "李小美\n"
+    "元利工業股份有限公司\n"
+    "Sales\n"
+)
+
+
+def _mail(uid="1", email="sales@hongda-precision.com.tw", subject="詢價", body=SIGNATURE):
+    return MailMessage(
+        uid=uid,
+        subject=subject,
+        sender_name="David Wang",
+        sender_email=email,
+        body=body,
+    )
+
+
+def _scan(messages, config, **kwargs):
+    from gmail.harvester import scan_for_contacts
+
+    return scan_for_contacts(config=config, client=FakeGmailClient(messages), **kwargs)
+
+
+def test_a_scan_does_not_write_a_single_row(db_session, tmp_config):
+    """**這是整個做法的前提。**
+
+    使用者看到的那張預覽表如果是「已經存進去了」的事後報告，那顆「存進名單」
+    按鈕就是裝飾品。掃描要一個字都不寫。
+    """
+    scan = _scan([_mail()], tmp_config)
+
+    assert len(scan.candidates) == 1
+    assert scan.messages_scanned == 1
+    assert CompanyRepository(db_session).all() == []
+    assert ContactRepository(db_session).count() == 0
+
+
+def test_a_scan_says_this_one_would_be_new(db_session, tmp_config):
+    candidate = _scan([_mail()], tmp_config).candidates[0]
+
+    assert candidate.existing is None
+    assert candidate.action == "新增一家公司"
+    assert candidate.storable is True
+    assert candidate.company_name == "宏達精密機械股份有限公司"
+    assert candidate.person == "David Wang"
+    assert candidate.title == "Manager"
+
+
+def test_a_scan_names_the_company_it_would_merge_into(db_session, tmp_config):
+    """「會做什麼」要指名道姓。
+
+    只寫「併入」的話，使用者不知道併到哪一家去——而併錯的那一筆會安靜地把
+    兩家公司的資料混在一起。
+    """
+    from gmail.harvester import store_candidates
+
+    store_candidates(_scan([_mail()], tmp_config).candidates, tmp_config)
+
+    candidate = _scan([_mail(uid="2")], tmp_config).candidates[0]
+
+    assert candidate.existing == "宏達精密機械股份有限公司"
+    assert "併入" in candidate.action and "宏達精密機械" in candidate.action
+
+
+def test_the_preview_is_exactly_what_happens(db_session, tmp_config):
+    """預覽說「新增」，存下去就必須真的是新增。
+
+    兩邊各自判斷的話遲早會不一樣，而使用者看到的是第一次那個——他按下去
+    之後拿到的東西跟他看的那張表不同，卻不會有任何提示。
+    """
+    from gmail.harvester import store_candidates
+
+    scan = _scan(
+        [
+            _mail(),
+            _mail(uid="2", email="ok@another-factory.com.tw", body=OTHER_SIGNATURE),
+            # 同一家公司的第二個人：地址不一樣，去重那一關分不出來，但存下去
+            # 是併入。預覽也必須這樣說。
+            _mail(uid="3", email="eric@hongda-precision.com.tw"),
+        ],
+        tmp_config,
+    )
+    expected_new = sum(1 for c in scan.candidates if c.storable and not c.existing)
+    expected_merge = sum(1 for c in scan.candidates if c.storable and c.existing)
+    assert (expected_new, expected_merge) == (2, 1)
+
+    summary = store_candidates(scan.candidates, tmp_config)
+
+    assert summary.records_new == expected_new
+    assert summary.records_merged == expected_merge
+
+
+def test_only_the_ones_handed_over_get_stored(db_session, tmp_config):
+    """使用者勾掉的那幾筆不會偷偷進去。"""
+    from gmail.harvester import store_candidates
+
+    scan = _scan([_mail(), _mail(uid="2", email="ok@another-factory.com.tw")], tmp_config)
+    assert len(scan.candidates) == 2
+
+    store_candidates(scan.candidates[:1], tmp_config)
+
+    stored = [c.company_name for c in CompanyRepository(db_session).all()]
+    assert stored == ["宏達精密機械股份有限公司"]
+
+
+def test_a_record_that_cannot_be_stored_is_still_listed_with_a_reason(db_session, tmp_config):
+    """挖不出公司名稱的那一封要列出來，不是消失。
+
+    使用者的下一個問題一定是「那封信呢」。不列出來的話，他只會覺得程式漏了。
+    """
+    from gmail.harvester import store_candidates
+
+    scan = _scan([_mail(email="hi@x.com", body="")], tmp_config)
+
+    assert len(scan.candidates) == 1
+    candidate = scan.candidates[0]
+    assert candidate.storable is False
+    assert candidate.rejected and candidate.action == candidate.rejected
+
+    summary = store_candidates(scan.candidates, tmp_config)
+    assert summary.records_new == 0
+    assert summary.records_rejected == 1
+    assert CompanyRepository(db_session).all() == []
+
+
+def test_the_same_sender_twice_in_one_batch_counts_as_one(db_session, tmp_config):
+    scan = _scan([_mail(), _mail(uid="2")], tmp_config)
+
+    assert len(scan.candidates) == 1
+    assert scan.duplicates == 1
+
+
+def test_a_free_mail_sender_is_skipped_and_said_so(db_session, tmp_config):
+    config = tmp_config.model_copy(
+        update={"gmail": tmp_config.gmail.model_copy(update={"ignore_domains": ["gmail.com"]})}
+    )
+    scan = _scan([_mail(email="someone@gmail.com")], config)
+
+    assert scan.candidates == []
+    assert scan.messages_skipped == 1
+    assert "略過" in scan.describe()
+
+
+def test_cancelling_a_scan_stops_and_writes_nothing(db_session, tmp_config):
+    import threading
+
+    from core.errors import CRMError
+
+    cancelled = threading.Event()
+    cancelled.set()
+
+    with pytest.raises(CRMError):
+        _scan([_mail()], tmp_config, cancel_event=cancelled)
+
+    assert CompanyRepository(db_session).all() == []
+
+
+def test_the_command_line_still_does_both_in_one_go(db_session, tmp_config):
+    """``python main.py gmail`` 沒有一雙眼睛可以看那張表，所以它維持一次做完。"""
+    summary = harvest_inbox(config=tmp_config, client=FakeGmailClient([_mail()]))
+
+    assert summary.messages_scanned == 1
+    assert summary.records_new == 1
+    assert CompanyRepository(db_session).count() == 1
+
+
+def test_two_people_from_the_same_company_show_as_one_new_and_one_merge(
+    db_session, tmp_config
+):
+    """同一家公司的兩個人各寄一封信（業務跟他的助理），地址不一樣。
+
+    去重那一關分不出來——它比的是地址。而存下去是一家新增、一家併入。預覽
+    必須這樣說：對兩列都寫「新增一家公司」的預覽，比沒有預覽更糟，因為使用者
+    會相信它。
+    """
+    scan = _scan(
+        [_mail(), _mail(uid="2", email="eric@hongda-precision.com.tw")], tmp_config
+    )
+
+    assert [candidate.action for candidate in scan.candidates] == [
+        "新增一家公司",
+        "併入「宏達精密機械股份有限公司」",
+    ]
+

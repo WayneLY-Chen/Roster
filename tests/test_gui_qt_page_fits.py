@@ -137,6 +137,83 @@ def test_page_does_not_demand_more_height_than_a_small_laptop_has(page_class, qt
         qt_app.processEvents()
 
 
+# ---------------------------------------------- 元件不可以疊在一起
+
+#: 除了很矮的那個尺寸，再量一個「寬度不夠、高度夠」的——重疊是寬度不足造成
+#: 的，只量矮視窗會漏掉它。
+SQUEEZED_WINDOW = (1100, 700)
+
+
+def _overlaps(page):
+    """同一個父層底下、彼此重疊超過 2px 的元件。
+
+    只比**直接子元件**：父子重疊是正常的（子元件本來就畫在父元件裡面），
+    不同父層之間的座標系也不一樣。
+    """
+    from PySide6.QtWidgets import QAbstractButton, QLabel, QWidget
+
+    def name(widget):
+        text = widget.text() if isinstance(widget, (QLabel, QAbstractButton)) else ""
+        return f"{type(widget).__name__}({text[:16]!r})"
+
+    found = []
+    for parent in [page, *page.findChildren(QWidget)]:
+        kids = [
+            kid
+            for kid in parent.children()
+            if isinstance(kid, QWidget) and kid.isVisible()
+        ]
+        for index, first in enumerate(kids):
+            for second in kids[index + 1 :]:
+                shared = first.geometry().intersected(second.geometry())
+                if shared.width() > 2 and shared.height() > 2:
+                    found.append(
+                        f"{name(first)} 與 {name(second)} 重疊 "
+                        f"{shared.width()}×{shared.height()}px"
+                    )
+    return found
+
+
+@pytest.mark.parametrize("size", [NARROW_WINDOW, SQUEEZED_WINDOW], ids=lambda s: f"{s[0]}x{s[1]}")
+@pytest.mark.parametrize("page_class", PAGES, ids=lambda cls: cls.__name__)
+def test_no_two_widgets_end_up_on_top_of_each_other(page_class, size, qt_app, db_session):
+    """視窗變窄時，元件要縮、要換行、要捲動——就是不可以疊在一起。
+
+    ## 這條測試在防什麼
+
+    「郵件」頁的「插入變數」下拉框有一個 220px 的硬性最小寬度，而它在的是
+    左右並排的**窄面板**。視窗一窄，那一列就分不到「說明 + 220px + 按鈕」
+    那麼寬——Qt 這時候會給每個元件它的最小值，然後讓它們重疊：下拉框直接蓋
+    住「插入游標處」那顆按鈕（900×600 就會發生，重疊 61px）。
+
+    使用者看到的是一顆按不到的按鈕，而且畫面上沒有任何線索說明為什麼。
+
+    上面那兩條測的是「有沒有東西掉出去」，這條測的是「留下來的有沒有互相
+    蓋住」。兩件事都會讓功能實際上按不到，成因卻不一樣：前者是高度不夠，
+    後者是寬度不夠。
+
+    ## 為什麼縮不下去比被切掉更糟
+
+    一個被截短的選項還讀得懂，一顆被蓋住的按鈕按不到。所以要填滿版面的下拉
+    框請用 ``WideComboBox.fill_row()``——它讓版面決定寬度，而不是反過來。
+    """
+    page = page_class(_FakeApp())
+    page.ensure_built()
+    page.resize(*size)
+    page.show()
+    qt_app.processEvents()
+    try:
+        problems = _overlaps(page)
+        assert not problems, (
+            f"{page_class.__name__} 在 {size[0]}×{size[1]} 底下有元件疊在一起："
+            + "；".join(problems[:3])
+        )
+    finally:
+        page.hide()
+        page.deleteLater()
+        qt_app.processEvents()
+
+
 # 這裡刻意**不**加一條「每一頁都必須有 QScrollArea」。
 #
 # 捲軸是修法，不是規則。「公司」頁整頁幾乎就是一張表格，表格本來就縮得動，

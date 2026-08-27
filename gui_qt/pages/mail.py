@@ -68,7 +68,13 @@ from core.constants import EmailVerdict
 from core.errors import CRMError
 from core.schemas import CompanyFilter
 from controllers.core import CompanyController
-from controllers.mail import BounceController, MailController, ReplyController, scan_inbox
+from controllers.mail import (
+    BounceController,
+    HarvestController,
+    MailController,
+    ReplyController,
+    scan_inbox,
+)
 from core.i18n import ALL_OPTION, STAGE_LABELS, stage_labels, to_value
 from gui_qt import theme
 from gui_qt.composer import RichTextEditor, edit_body, populate_preview
@@ -116,6 +122,22 @@ REPLY_COLUMNS: tuple[tuple[str, str, int], ...] = (
 )
 
 
+#: 「從收件匣挖名單」那張表的欄位。
+#:
+#: 「會做什麼」擺在中間而不是最後：使用者掃這張表的時候要找的就是那一欄
+#: ——哪幾家是新的、哪幾家只是併進去。主旨與收到時間是給他認出「這是誰寄
+#: 來的信」用的，順序上排在後面。
+HARVEST_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("company_name", "公司名稱", 200),
+    ("person", "聯絡人", 100),
+    ("email", "信箱", 200),
+    ("phone", "電話", 120),
+    ("action", "會做什麼", 180),
+    ("subject", "主旨", 200),
+    ("received", "收到", 90),
+)
+
+
 class MailPage(BasePage):
     title = "郵件"
     icon = "✉"
@@ -126,9 +148,12 @@ class MailPage(BasePage):
         self.company_controller = CompanyController()
         self.bounces = BounceController()
         self.replies = ReplyController()
+        self.harvest = HarvestController()
         #: 上一次掃出來的退信與回信。兩張表的每一列都對應這裡面的一筆。
         self._bounce_hits: list = []
         self._reply_hits: list = []
+        #: 上一次從收件匣挖出來、還沒存的那些。
+        self._harvest_candidates: list = []
         self.plan: Any = None
         self._mailer_ready = False
         self._loaded_template_name: str | None = None
@@ -180,6 +205,21 @@ class MailPage(BasePage):
             on_done=self._on_replies_applied,
             on_error=self._on_reply_mark_error,
         )
+        # 挖名單也是分開的兩步，理由同上：讀信箱是唯讀的，寫進名單是另一件事。
+        self.harvest_task = BackgroundTask(
+            self,
+            self._harvest_worker,
+            on_progress=self._on_harvest_progress,
+            on_done=self._on_harvest_scan,
+            on_error=self._on_harvest_error,
+        )
+        self.harvest_store_task = BackgroundTask(
+            self,
+            self._harvest_store_worker,
+            on_progress=self._on_harvest_progress,
+            on_done=self._on_harvest_stored,
+            on_error=self._on_harvest_store_error,
+        )
 
     # ------------------------------------------------------------- 建立元件
 
@@ -215,6 +255,7 @@ class MailPage(BasePage):
         body_column.addWidget(panels, 1)
         self._build_bounce_section(body_column)
         self._build_reply_section(body_column)
+        self._build_harvest_section(body_column)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -322,8 +363,13 @@ class MailPage(BasePage):
         # 下拉選單取代 Tk 版那 8 顆會被切掉的變數按鈕。
         insert_row = QHBoxLayout()
         insert_row.addWidget(caption("插入變數"))
-        self.placeholder_combo = WideComboBox()
-        self.placeholder_combo.setMinimumWidth(220)
+        # fill_row()：這一格要填滿版面分給它的寬度，而且**要縮得下去**。
+        #
+        # 以前這裡是一個 220px 的硬性最小寬度，而「郵件樣板」是左右並排的窄
+        # 面板——視窗一窄，這一列就分不到「說明 + 220px + 按鈕」那麼寬，Qt
+        # 於是給每個元件它的最小值、讓它們重疊：下拉框直接蓋住「插入游標處」
+        # 那顆按鈕（實測 900×600 就會發生，重疊 61px）。
+        self.placeholder_combo = WideComboBox().fill_row(min_chars=10)
         insert_row.addWidget(self.placeholder_combo, 1)
         insert_button = QPushButton("插入游標處")
         insert_button.clicked.connect(self._insert_selected_placeholder)
@@ -894,6 +940,169 @@ class MailPage(BasePage):
         self._handle_error(exc)
 
 
+    # ------------------------------------------------------ 從收件匣挖名單
+
+    def _build_harvest_section(self, column: QVBoxLayout) -> None:
+        """把來信簽名檔裡的公司與聯絡人挖出來，變成名單。
+
+        放在這一頁而不是「匯入」頁：它要的是同一組 Gmail 帳密、走的是同一條
+        唯讀 IMAP 連線，而且跟上面兩段一樣是「讀信箱 → 看過 → 才寫」。匯入頁
+        講的是檔案。
+        """
+        section = Section("從收件匣挖名單")
+
+        intro = QLabel(
+            "跟你往來過的廠商，簽名檔裡就寫著公司、姓名、職稱、電話。"
+            "這一步把它們挖出來變成名單——<b>你已經有的關係，不必再去爬一次</b>。"
+            "信箱全程<b>唯讀</b>：不標已讀、不刪信、不搬信。"
+        )
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setObjectName("MutedLabel")
+        intro.setWordWrap(True)
+        section.body_layout.addWidget(intro)
+
+        row = QHBoxLayout()
+        self.harvest_scan_button = QPushButton("讀信箱找聯絡人")
+        self.harvest_scan_button.clicked.connect(self._scan_harvest)
+        row.addWidget(self.harvest_scan_button)
+
+        # 「最多看幾封」而不是「從哪一封開始」：信是新的排前面，使用者要的
+        # 是「看最近這一批」。數字大一點就是久一點，沒有別的差別。
+        self.harvest_limit_spin = QSpinBox()
+        self.harvest_limit_spin.setRange(10, 1000)
+        self.harvest_limit_spin.setPrefix("最多看 ")
+        self.harvest_limit_spin.setSuffix(" 封")
+        self.harvest_limit_spin.setValue(self.controller.config.gmail.max_messages)
+        self.harvest_limit_spin.setToolTip(
+            "從最新的信開始往回看幾封。信箱很大的話這一步會花一點時間。"
+        )
+        row.addWidget(self.harvest_limit_spin)
+
+        self.harvest_apply_button = QPushButton("存進名單")
+        self.harvest_apply_button.clicked.connect(self._apply_harvest)
+        self.harvest_apply_button.setEnabled(False)
+        row.addWidget(self.harvest_apply_button)
+        row.addStretch(1)
+        section.body_layout.addLayout(row)
+
+        self.harvest_status = QLabel("")
+        self.harvest_status.setObjectName("MutedLabel")
+        self.harvest_status.setWordWrap(True)
+        section.body_layout.addWidget(self.harvest_status)
+
+        self.harvest_table = DataTable(HARVEST_COLUMNS, min_rows=3, checkable=True)
+        section.body_layout.addWidget(self.harvest_table)
+
+        note = QLabel(
+            "「會做什麼」那一欄就是按下去之後實際發生的事。"
+            "<b>併入</b>只會補上空著的欄位，不會蓋掉你已經填好的資料。"
+            "免費信箱（gmail.com 那類）的寄件者會直接略過——那種網域說不出是哪家公司；"
+            "要調整跳過哪些網域，改設定檔的 <code>gmail.ignore_domains</code>。"
+        )
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setObjectName("MutedLabel")
+        note.setWordWrap(True)
+        section.body_layout.addWidget(note)
+
+        column.addWidget(section)
+
+    def _harvest_worker(self, limit, *, report=None, cancel_event=None):
+        """在背景執行緒裡讀一次信箱找聯絡人。
+
+        每次都建一份新的 controller，理由跟 ``_scan_worker`` 一樣：綁住建立
+        當下那一份的話，使用者剛在設定頁改完 Gmail 密碼時會拿舊的去登入。
+        """
+        return HarvestController(self.controller.config).scan(
+            limit, report=report, cancel_event=cancel_event
+        )
+
+    def _harvest_store_worker(self, candidates, *, report=None, cancel_event=None):
+        return self.harvest.apply(candidates, report=report, cancel_event=cancel_event)
+
+    def _scan_harvest(self) -> None:
+        if self.harvest_task.running:
+            return
+        self.harvest_scan_button.setEnabled(False)
+        self.harvest_apply_button.setEnabled(False)
+        self.harvest_table.clear()
+        self._harvest_candidates = []
+        self.harvest_status.setText("正在連你的信箱…")
+        self.harvest_task.start(self.harvest_limit_spin.value())
+
+    def _on_harvest_progress(self, message: object) -> None:
+        self.harvest_status.setText(str(message))
+
+    def _on_harvest_scan(self, scan) -> None:
+        self.harvest_scan_button.setEnabled(True)
+        self._harvest_candidates = list(scan.candidates)
+        rows = []
+        for index, candidate in enumerate(scan.candidates):
+            rows.append(
+                {
+                    "company_name": candidate.company_name,
+                    "person": candidate.person or "",
+                    "email": candidate.email or "",
+                    "phone": candidate.phone or "",
+                    "action": candidate.action,
+                    "subject": candidate.subject or "（沒有主旨）",
+                    # ISO 字串前十個字就是日期。刻意不解析成 datetime——
+                    # 信件標頭給什麼就顯示什麼，解析失敗不該讓整列消失。
+                    "received": (candidate.received or "")[:10],
+                    # 存不了的那幾筆列出來但不勾：使用者有權知道「這一封為什麼
+                    # 沒進來」，而預設勾起來只會讓「存了幾筆」那個數字騙人。
+                    CHECK_KEY: candidate.storable,
+                    "_index": index,
+                }
+            )
+        self.harvest_table.set_rows(rows)
+        self.harvest_apply_button.setEnabled(bool(rows))
+        self.harvest_status.setText(scan.describe())
+        self.status(scan.describe(), "success" if rows else "normal")
+
+    def _on_harvest_error(self, exc: Exception) -> None:
+        self.harvest_scan_button.setEnabled(True)
+        self.harvest_status.setText(str(exc).splitlines()[0])
+        self._handle_error(exc)
+
+    def _apply_harvest(self) -> None:
+        chosen = [
+            self._harvest_candidates[row["_index"]]
+            for row in self.harvest_table.checked_rows()
+            if 0 <= row.get("_index", -1) < len(self._harvest_candidates)
+        ]
+        chosen = [candidate for candidate in chosen if candidate.storable]
+        if not chosen:
+            self.status("一筆都沒有勾", "warning")
+            return
+        merging = sum(1 for candidate in chosen if candidate.existing)
+        confirmed = QMessageBox.question(
+            self,
+            "要把這幾筆存進名單嗎？",
+            f"勾起來的 {len(chosen)} 筆會做這些事：\n\n"
+            f"・{len(chosen) - merging} 家新增到名單裡\n"
+            f"・{merging} 家併進已經有的資料裡"
+            "（只補空著的欄位，不會蓋掉你已經填好的）\n"
+            "・挖到的姓名與職稱會存成聯絡人",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        self.harvest_apply_button.setEnabled(False)
+        self.harvest_store_task.start(chosen)
+
+    def _on_harvest_stored(self, summary) -> None:
+        self.harvest_status.setText(summary.describe())
+        self.status(summary.describe(), "success")
+        self.harvest_table.clear()
+        self._harvest_candidates = []
+        bump_data_version()
+        self.refresh()
+
+    def _on_harvest_store_error(self, exc: Exception) -> None:
+        self.harvest_apply_button.setEnabled(True)
+        self._handle_error(exc)
+
     def _build_footer(self, outer: QVBoxLayout) -> None:
         footer = QHBoxLayout()
 
@@ -939,6 +1148,7 @@ class MailPage(BasePage):
         # controller 手上是舊設定，連線會用一組不存在的帳密去登入。
         self.bounces = BounceController()
         self.replies = ReplyController()
+        self.harvest = HarvestController()
         # 開關/每日上限的變更不會呼叫 bump_data_version()（那不是「新增/
         # 刪除/編輯公司」那類寫入），所以固定強制重整，不套用資料版本跳過
         # 機制，跟 Tk 版「每次顯示都整份重整」的行為一致。

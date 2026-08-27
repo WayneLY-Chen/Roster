@@ -883,6 +883,69 @@ def _outranks(candidate: Any, current: Any) -> bool:
     return rank(candidate) > rank(current)
 
 
+class HarvestController:
+    """從收件匣的簽名檔挖出公司與聯絡人：讀一次信箱 → 預覽 → 存。
+
+    跟 :class:`BounceController` 分開成兩顆按鈕，因為它們讀的東西差很多：退信
+    只看退信通知（通常幾封），這一個要看每一封來信的內文。合成一顆的話，本來
+    幾秒鐘的「讀信箱」會變成幾分鐘，而使用者多半只想做其中一件事。
+
+    寫入的那一步在 :func:`gmail.harvester.store`，而且只寫使用者勾起來的那幾
+    筆。掃描完全不寫。
+    """
+
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self.config = config or get_config()
+
+    def scan(
+        self,
+        limit: int | None = None,
+        *,
+        query: str | None = None,
+        client: Any = None,
+        report: Callable[[object], None] | None = None,
+        cancel_event: Any = None,
+    ):
+        """連一次信箱，把挖得到的公司列出來。**唯讀，什麼都不寫。**
+
+        預設看的是最近的信（``ALL``，新的排前面），不是設定檔裡那個
+        ``gmail.search``。那個預設值是 ``UNSEEN``，給排程用的——「只看還沒讀
+        過的」對自動執行是對的，但使用者在畫面上按下「讀信箱找聯絡人」時，
+        期待的是挖他信箱裡的東西，而他信箱裡的信幾乎都讀過了。
+        """
+        from gmail.harvester import scan_for_contacts
+
+        if report is not None:
+            report("正在連你的信箱…")
+        try:
+            return scan_for_contacts(
+                query or "ALL",
+                limit or self.config.gmail.max_messages,
+                self.config,
+                client,
+                report=report,
+                cancel_event=cancel_event,
+            )
+        except CRMError:
+            raise
+        except Exception as exc:
+            raise CRMError(f"讀信箱時出錯：{exc}") from exc
+
+    def apply(
+        self,
+        candidates,
+        *,
+        report: Callable[[object], None] | None = None,
+        cancel_event: Any = None,
+    ):
+        """把勾起來的那幾筆存進名單。"""
+        from gmail.harvester import store_candidates
+
+        return store_candidates(
+            candidates, self.config, report=report, cancel_event=cancel_event
+        )
+
+
 @dataclass(slots=True)
 class InboxScan:
     """讀一次信箱的完整結果：退信 + 回覆。"""

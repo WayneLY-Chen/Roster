@@ -1025,3 +1025,161 @@ def test_the_numbers_on_screen_take_effect_without_pressing_remember(
 
     assert sent[0]["follow_up_days"] == 3
     assert sent[0]["follow_up_max"] == 5
+
+
+# ------------------------------------------------------ 從收件匣挖名單
+
+
+def _candidate(name="宏達精密", email="sales@hongda.example", existing=None, storable=True):
+    from core.schemas import CleanCompany
+    from gmail.harvester import HarvestCandidate
+
+    record = None
+    if storable:
+        record = CleanCompany(
+            company_name=name,
+            name_key=name,
+            dedupe_key=f"mail:{email}",
+            email=email,
+        )
+    return HarvestCandidate(
+        company_name=name,
+        email=email,
+        person="王大明",
+        title="經理",
+        subject="詢價",
+        received="2026-08-19T10:05:00",
+        record=record,
+        existing=existing,
+        rejected=None if storable else "不會存：看起來不是公司資料",
+    )
+
+
+def _harvest_scan(*candidates, messages: int = 5):
+    from gmail.harvester import HarvestScan
+
+    return HarvestScan(
+        candidates=list(candidates), messages_scanned=messages, messages_skipped=1
+    )
+
+
+def test_the_harvest_table_says_what_each_row_will_do(qt_app, db_session, mail_config):
+    page = _built_page(qt_app)
+
+    page._on_harvest_scan(
+        _harvest_scan(
+            _candidate(),
+            _candidate("已經有的", "old@b.example", existing="已經有的公司"),
+        )
+    )
+
+    actions = [
+        page.harvest_table.model.row_at(i)["action"]
+        for i in range(page.harvest_table.row_count())
+    ]
+    assert actions == ["新增一家公司", "併入「已經有的公司」"]
+    # 日期那一欄是 ISO 字串切出來的，不解析——標頭給什麼就顯示什麼。
+    assert page.harvest_table.model.row_at(0)["received"] == "2026-08-19"
+
+
+def test_a_row_that_cannot_be_stored_is_listed_but_not_ticked(qt_app, db_session, mail_config):
+    """列出來讓使用者知道「這封信為什麼沒進來」，但預設不勾——勾起來只會讓
+    「存了幾筆」那個數字騙人。"""
+    page = _built_page(qt_app)
+
+    page._on_harvest_scan(_harvest_scan(_candidate(storable=False)))
+
+    assert page.harvest_table.row_count() == 1
+    assert page.harvest_table.checked_rows() == []
+
+
+def test_nothing_storable_ticked_means_nothing_is_written(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    page = _built_page(qt_app)
+    page._on_harvest_scan(_harvest_scan(_candidate(storable=False)))
+
+    monkeypatch.setattr(
+        page.harvest_store_task, "start", lambda *a: pytest.fail("不該寫任何東西")
+    )
+    page._apply_harvest()
+
+    assert page.app.messages[-1][1] == "warning"
+
+
+def test_saying_no_to_the_harvest_confirmation_writes_nothing(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    """看過才寫——而且「看過」包含最後那一下。"""
+    page = _built_page(qt_app)
+    page._on_harvest_scan(_harvest_scan(_candidate()))
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    monkeypatch.setattr(
+        page.harvest_store_task, "start", lambda *a: pytest.fail("按了取消卻寫了")
+    )
+    page._apply_harvest()
+
+
+def test_saying_yes_hands_over_exactly_the_ticked_rows(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    page = _built_page(qt_app)
+    page._on_harvest_scan(
+        _harvest_scan(
+            _candidate(),
+            _candidate("不要這家", "no@c.example"),
+        )
+    )
+    # 使用者把第二列勾掉。
+    page.harvest_table.model.row_at(1)[CHECK_KEY] = False
+
+    sent = []
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    monkeypatch.setattr(page.harvest_store_task, "start", lambda rows: sent.append(rows))
+    page._apply_harvest()
+
+    assert [c.company_name for c in sent[0]] == ["宏達精密"]
+
+
+def test_the_scan_really_reads_the_mailbox_through_the_real_controller(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    """一路走真的 controller、真的背景執行緒、真的資料庫，只有 IMAP 是假的。"""
+    import gmail.harvester as harvester_module
+    from gmail.client import MailMessage
+
+    class _FakeClient:
+        def __init__(self, config=None) -> None:
+            self.connected = False
+
+        def connect(self) -> None:
+            self.connected = True
+
+        def close(self) -> None:
+            pass
+
+        def iter_messages(self, query=None, limit=None):
+            assert query == "ALL", "畫面上按下去要看的是最近的信，不是只看未讀"
+            yield MailMessage(
+                uid="1",
+                subject="詢價",
+                sender_name="王大明",
+                sender_email="sales@hongda-precision.com.tw",
+                body="Best regards,\n王大明\n宏達精密機械股份有限公司\nManager\n",
+            )
+
+    monkeypatch.setattr(harvester_module, "GmailClient", _FakeClient)
+
+    page = _built_page(qt_app)
+    page._scan_harvest()
+    _wait_for(qt_app, page.harvest_task)
+
+    assert page.harvest_table.row_count() == 1
+    assert page.harvest_table.model.row_at(0)["company_name"] == "宏達精密機械股份有限公司"
+    # 掃描完仍然一個字都沒寫。
+    assert CompanyRepository(db_session).all() == []

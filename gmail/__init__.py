@@ -14,8 +14,12 @@ from gmail.campaign import (
 from gmail.client import GmailClient, MailMessage, gmail_session
 from gmail.harvester import (
     GmailHarvestSummary,
+    HarvestCandidate,
+    HarvestScan,
     harvest_inbox,
     message_to_record,
+    scan_for_contacts,
+    store_candidates,
 )
 from gmail.sender import SmtpSender
 from gmail.templates import (
@@ -32,6 +36,8 @@ __all__ = [
     "CampaignResult",
     "GmailClient",
     "GmailHarvestSummary",
+    "HarvestCandidate",
+    "HarvestScan",
     "MailMessage",
     "MailTemplate",
     "RecipientPlan",
@@ -47,6 +53,8 @@ __all__ = [
     "message_to_record",
     "render",
     "save_template",
+    "scan_for_contacts",
     "send_campaign",
+    "store_candidates",
     "unsubscribe_by_email",
 ]

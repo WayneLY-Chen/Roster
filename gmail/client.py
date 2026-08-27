@@ -138,8 +138,8 @@ class GmailClient:
         address, password = self.settings.address, self.settings.app_password
         if not address or not password:
             raise GmailError(
-                "GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set in .env. "
-                "Create an App Password at https://myaccount.google.com/apppasswords"
+                "還沒有設定 Gmail。請到「設定」頁填入 Gmail 帳號與應用程式密碼"
+                "（在 https://myaccount.google.com/apppasswords 產生）。"
             )
         try:
             connection = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port)

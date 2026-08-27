@@ -437,6 +437,8 @@ class WideComboBox(QComboBox):
         super().__init__(parent)
         # 內容變了就重新量寬度，不是只量第一次。
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        #: 有沒有呼叫過 :meth:`fill_row`。見 :meth:`minimumSizeHint`。
+        self._fills_row = False
 
     def _digit(self) -> int:
         return max(QFontMetrics(self.font()).horizontalAdvance("0"), 1)
@@ -464,6 +466,12 @@ class WideComboBox(QComboBox):
         # 版面在空間不足時會縮到 minimumSizeHint。預設值只夠顯示幾個字，
         # 於是文字被切掉——而使用者看不出自己選的是什麼。寧可讓這一列擠一點。
         hint = super().minimumSizeHint()
+        if self._fills_row:
+            # 除非這一格是「填滿版面分給我的寬度」那一種。那種下拉框縮不下去
+            # 的代價不是文字被切掉，是**它直接疊到隔壁的按鈕上**：版面沒有
+            # 足夠的寬度可以分，Qt 就給每個元件它的最小值，然後讓它們重疊。
+            # 一個被截短的選項還讀得懂，一顆被蓋住的按鈕按不到。
+            return hint
         hint.setWidth(max(hint.width(), self._needed_width()))
         return hint
 
@@ -482,6 +490,7 @@ class WideComboBox(QComboBox):
 
         回傳自己，方便 ``combo = WideComboBox().fill_row()`` 這樣接著寫。
         """
+        self._fills_row = True
         self.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )

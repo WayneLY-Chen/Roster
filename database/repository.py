@@ -494,7 +494,8 @@ class CompanyRepository:
     def upsert(self, record: CleanCompany) -> tuple[Company, bool]:
         """Insert, or merge into the existing record with the same identity.
 
-        Returns ``(company, created)``. On merge only *empty* fields are filled
+        Returns ``(company, merged)`` -- ``merged`` is True when an existing
+        row was updated. On merge only *empty* fields are filled
         in -- a crawl never overwrites data a user has already curated, except
         for provenance and verification fields which always reflect the latest
         run.
