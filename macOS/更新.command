@@ -133,8 +133,8 @@ if [ ! -x "$here/.venv/bin/python" ]; then
 fi
 if ! "$here/.venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 14) else 1)'; then
     printf "\n新版本已經下載好了，但它需要 Python 3.14，這裡的 .venv 是舊版 Python 建的。\n"
-    printf "1. 到 https://www.python.org/downloads/ 安裝 Python 3.14\n"
-    printf "2. 雙擊同一個資料夾裡的「安裝.command」，它會重建 .venv，資料庫、附件與設定都不會動。\n"
+    printf "請雙擊同一個資料夾裡的「安裝.command」：它會自動裝好 Python 3.14 並重建 .venv，\n"
+    printf "資料庫、附件與設定都不會動。\n"
     wait_then_close
     exit 1
 fi

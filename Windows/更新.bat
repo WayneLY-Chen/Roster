@@ -236,9 +236,9 @@ exit /b 1
 echo.
 echo  The new version is downloaded, but it needs Python 3.14 and the
 echo  .venv here was built by an older one.
-echo  1. Install Python 3.14 from https://www.python.org/downloads/
-echo  2. Double-click the setup file in this same folder. It rebuilds
-echo     .venv; your database, attachments and settings are not touched.
+echo  Double-click the setup file in this same folder: it installs
+echo  Python 3.14 if needed and rebuilds .venv. Your database,
+echo  attachments and settings are not touched.
 echo.
 popd
 pause

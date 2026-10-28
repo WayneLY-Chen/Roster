@@ -38,23 +38,55 @@ fi
 # ---------------------------------------------------------------- Python
 say "1/5  檢查 Python"
 
-python_bin=""
-for candidate in python3.14 python3; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-        version="$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "0.0")"
-        major="${version%%.*}"
-        minor="${version##*.}"
-        if [ "$major" -eq 3 ] && [ "$minor" -ge 14 ]; then
-            python_bin="$candidate"
-            break
+#: 找不到 Python 3.14 時自動安裝的版本。官方安裝檔，由 Python 軟體基金會簽章。
+PYTHON_PKG_VERSION="3.14.7"
+
+# 把第一個 3.14 以上的 Python 放進 python_bin。後面三個是直接寫路徑：剛裝好
+# 的時候這個終端機視窗的 PATH 還沒更新，用名稱找不到。
+find_python() {
+    python_bin=""
+    for candidate in python3.14 python3 \
+            /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14 \
+            /opt/homebrew/bin/python3.14 /usr/local/bin/python3.14; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            version="$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "0.0")"
+            major="${version%%.*}"
+            minor="${version##*.}"
+            if [ "$major" -eq 3 ] && [ "$minor" -ge 14 ]; then
+                python_bin="$candidate"
+                return
+            fi
         fi
+    done
+}
+
+# 有 Homebrew 就用 Homebrew；沒有的話下載 python.org 的官方安裝檔。
+install_python() {
+    if command -v brew >/dev/null 2>&1; then
+        printf "   找不到 Python 3.14，用 Homebrew 安裝⋯\n"
+        brew install python@3.14
+        return
     fi
-done
+    local pkg
+    pkg="$(mktemp -d)/python-$PYTHON_PKG_VERSION-macos11.pkg"
+    printf "   找不到 Python 3.14，從 python.org 下載官方安裝檔（約 80 MB）⋯\n"
+    curl -fL --progress-bar -o "$pkg" \
+        "https://www.python.org/ftp/python/$PYTHON_PKG_VERSION/python-$PYTHON_PKG_VERSION-macos11.pkg" \
+        || return
+    printf "   接下來要輸入這台 Mac 的登入密碼（輸入時畫面不會顯示），安裝程式需要這個權限。\n"
+    sudo installer -pkg "$pkg" -target /
+}
+
+find_python
+if [ -z "$python_bin" ]; then
+    install_python
+    find_python
+fi
 
 if [ -z "$python_bin" ]; then
-    fail "找不到 Python 3.14 或更新的版本。
+    fail "找不到 Python 3.14 或更新的版本，自動安裝也沒有成功。
 
-macOS 內建的 Python 版本通常太舊。請先安裝：
+請自己安裝一次：
   * 到 https://www.python.org/downloads/ 下載安裝，或
   * 已經有 Homebrew 的話執行：brew install python@3.14
 

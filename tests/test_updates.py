@@ -256,3 +256,19 @@ def test_update_reports_the_version_from_disk_not_memory(monkeypatch):
     monkeypatch.setattr("core.updates._local_version", lambda: "9.9.9")
 
     assert apply_update().version == "9.9.9"
+
+
+def test_an_old_python_gets_told_to_run_the_installer():
+    """程式內的更新換不了 Python。舊的 .venv 只有開程式時講得到。"""
+    from core.updates import python_upgrade_notice
+
+    notice = python_upgrade_notice((3, 13))
+    assert "3.14" in notice and "3.13" in notice
+    assert "安裝" in notice
+
+
+def test_a_new_enough_python_gets_no_notice():
+    from core.updates import python_upgrade_notice
+
+    assert python_upgrade_notice((3, 14)) == ""
+    assert python_upgrade_notice((3, 15)) == ""

@@ -14,8 +14,17 @@ Python 3.14+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / 
 
 ## 安裝
 
-需要 **Python 3.14 或更新版本**（[官方下載](https://www.python.org/downloads/)。
-Windows 安裝時記得勾選 *Add python.exe to PATH*）。
+需要 **Python 3.14 或更新版本**。電腦裡沒有的話，Windows 與 macOS 的安裝程式
+會**自己裝好**：
+
+- **Windows**：用系統內建的 winget 安裝 python.org 的官方版本，裝在你的使用者
+  資料夾，不需要系統管理員權限。
+- **macOS**：有 Homebrew 就用 Homebrew；沒有的話下載 python.org 的官方安裝檔
+  （約 80 MB），過程中會請你輸入這台 Mac 的登入密碼（輸入時畫面不會顯示）。
+- **Linux**：請先用套件管理員安裝（例如 `sudo apt install python3.14 python3.14-venv`）。
+
+自動安裝不成功的話，到 [python.org](https://www.python.org/downloads/) 自己裝一次
+（Windows 安裝時記得勾選 *Add python.exe to PATH*），再雙擊「安裝」。
 
 打開你的作業系統對應的資料夾，**雙擊「安裝」**，剩下的它會自己做完：
 
@@ -40,6 +49,13 @@ macOS 還會順便產生 `Roster.app`。可以重複執行，已經裝好的部�
 
 **不用重新 clone 一次**，雙擊「更新」就好。它會抓最新版、補裝新增的套件，
 最後告訴你從哪一版更新到哪一版。
+
+> **從 Python 3.12／3.13 升級到 3.14（只要做一次）**
+>
+> 這一版開始需要 Python 3.14。更新完之後，**再雙擊一次「安裝」**：它會自動裝好
+> Python 3.14，並用它重建 `.venv`。資料庫、附件與設定都不會動。
+>
+> 忘了做也沒關係：程式開啟時發現 Python 太舊，會跳一個視窗提醒你。
 
 你的東西一個都不會動——資料庫、附件、匯出的檔案、備份、信件範本、
 `user_settings.yaml` 全都不在 git 的管轄範圍內。`config.yaml` 有進 git，

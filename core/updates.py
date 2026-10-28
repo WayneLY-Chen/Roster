@@ -58,6 +58,31 @@ CHECK_INTERVAL = timedelta(days=1)
 _LAST_CHECK_SECTION = "app"
 _LAST_CHECK_KEY = "last_update_check"
 
+#: 這一版需要的 Python。跟安裝腳本（``Windows/安裝.bat`` 等）檢查的版本一致。
+REQUIRED_PYTHON = (3, 14)
+
+
+def python_upgrade_notice(running: tuple[int, int] | None = None) -> str:
+    """現在跑的 Python 比這一版需要的舊時，要跟使用者講的話；夠新就回空字串。
+
+    程式裡的「更新」只會 git pull 與補裝套件，換不了 Python。用舊版 Python
+    建的 ``.venv`` 會一直沿用下去，所以開程式時要講，使用者才知道要去雙擊
+    「安裝」——那一支會自己裝好新版 Python 並重建 ``.venv``。
+    """
+    running = running or sys.version_info[:2]
+    if running >= REQUIRED_PYTHON:
+        return ""
+    need = ".".join(map(str, REQUIRED_PYTHON))
+    have = ".".join(map(str, running))
+    return (
+        f"這一版的名單匠需要 Python {need}，你現在用的是 {have}。\n\n"
+        "程式還可以用，但請找時間關掉程式，到名單匠的資料夾雙擊「安裝」"
+        "（Windows 是 Windows/安裝.bat，Mac 是 macOS/安裝.command）。"
+        f"它會自動裝好 Python {need} 並重建執行環境，"
+        "資料庫、附件與設定都不會動。"
+    )
+
+
 _HEADING = re.compile(r"^##\s+(\d+(?:\.\d+)*)\s*(?:—|-|–)?\s*(.*)$")
 
 
@@ -271,6 +296,11 @@ def apply_update(*, report=None, cancel_event=None) -> UpdateResult:
                     "它沒有不見：開啟「命令列」執行 git stash pop 自己處理。"
                 ),
             )
+
+    notice = python_upgrade_notice()
+    if notice:
+        # 新版要的 Python 比現在這個新，在舊的 .venv 裡補裝套件沒有意義。
+        return UpdateResult(ok=False, message="新版本已經下載好了。\n\n" + notice)
 
     say("補裝新增的套件…")
     pip = _run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"], timeout=900)

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -168,6 +168,15 @@ class MainWindow(QMainWindow):
 
         self.updater = UpdateHelper(self)
         self.updater.check_on_startup()
+
+        from core.updates import python_upgrade_notice
+
+        notice = python_upgrade_notice()
+        if notice:
+            # 等主視窗畫出來再跳，不然提醒視窗會比程式本身先出現。
+            QTimer.singleShot(
+                0, lambda: QMessageBox.information(self, "需要更新 Python", notice)
+            )
 
     # ------------------------------------------------------------- 排程
 

@@ -44,17 +44,19 @@ echo.
 REM ------------------------------------------------------------ Python
 echo [1/4] Checking Python...
 
-set "PY="
-for %%C in ("py -3.14" "py" "python") do (
-    if not defined PY (
-        %%~C -c "import sys; sys.exit(0 if sys.version_info >= (3,14) else 1)" >nul 2>&1
-        if not errorlevel 1 set "PY=%%~C"
-    )
+call :find_python
+if not defined PY (
+    REM  winget ships with Windows 10/11. The package is the official
+    REM  python.org installer; --scope user needs no administrator rights.
+    echo       Python 3.14 not found, installing it with winget...
+    winget install --exact --id Python.Python.3.14 --scope user --silent --accept-package-agreements --accept-source-agreements
+    call :find_python
 )
 
 if not defined PY (
     echo.
-    echo  [ERROR] Python 3.14 or newer was not found.
+    echo  [ERROR] Python 3.14 or newer was not found, and installing it
+    echo  automatically did not work.
     echo.
     echo  Install it from https://www.python.org/downloads/
     echo  IMPORTANT: tick "Add python.exe to PATH" in the installer.
@@ -154,3 +156,18 @@ if exist "%ROOT%\.venv\Scripts\pythonw.exe" (
 :done
 popd
 endlocal
+exit /b 0
+
+REM ------------------------------------------------------- subroutines
+REM  Sets PY to the first Python 3.14+ found. The last candidate is where
+REM  a fresh per-user install lands: PATH in this window is not refreshed
+REM  after winget installs, so the new python is not reachable by name yet.
+:find_python
+set "PY="
+for %%C in ("py -3.14" "py" "python" "%LOCALAPPDATA%\Programs\Python\Python314\python.exe") do (
+    if not defined PY (
+        %%~C -c "import sys; sys.exit(0 if sys.version_info >= (3,14) else 1)" >nul 2>&1
+        if not errorlevel 1 set "PY=%%~C"
+    )
+)
+exit /b 0
