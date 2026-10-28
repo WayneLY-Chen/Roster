@@ -69,10 +69,16 @@ class MailController:
         follow_up: bool = False,
         follow_up_days: int | None = None,
         follow_up_max: int | None = None,
+        subject: str | None = None,
+        body: str | None = None,
         report: Callable[[Any], None] | None = None,
         cancel_event: Any = None,
     ) -> CampaignPlan:
         """Decide who would be emailed. Suitable as a :class:`BackgroundTask` worker.
+
+        ``subject``／``body`` 給了就用它們，不讀硬碟上的樣板檔：郵件頁傳的是
+        畫面上正在編輯的內容。以前讀的是檔案，改了樣板沒按儲存，寄出去的就是
+        舊內容——測試信、預覽、真的寄出去全部一樣錯。
 
         ``follow_up=True`` 換成追蹤信的規則：只寄給收過第一封、而且沒有回的人。
 
@@ -89,6 +95,9 @@ class MailController:
                 after_days=int(follow_up_days) if follow_up_days else saved.after_days,
                 max_emails=int(follow_up_max) if follow_up_max else saved.max_emails,
             )
+        template = None
+        if subject is not None and body is not None:
+            template = templates_module.MailTemplate(template_name, subject, body)
         try:
             return campaign_module.build_plan(
                 criteria,
@@ -97,6 +106,7 @@ class MailController:
                 self.config,
                 attachments,
                 follow_up=rules,
+                template=template,
             )
         except CRMError as exc:
             raise CRMError(f"產生寄送名單失敗：{exc}") from exc
@@ -196,35 +206,33 @@ class MailController:
         return self.config.mailer.max_attachment_bytes
 
     def preview_first(self, plan: CampaignPlan) -> tuple[str, str] | None:
-        """Subject and full body (with the unsubscribe note) for the first
-        sendable recipient -- exactly what :meth:`send` would hand to SMTP.
-
-        Returns ``None`` when the plan has no sendable recipient.
-        """
+        """第一家可寄的那一封：主旨與實際寄出去的內文。沒有可寄的回 ``None``。"""
         sendable = [recipient for recipient in plan.recipients if recipient.will_send]
-        if not sendable:
-            return None
-        recipient = sendable[0]
-        note = self.config.mailer.unsubscribe_note
-        return recipient.subject, campaign_module.with_unsubscribe_note(recipient.body, note)
+        return self.preview(sendable[0]) if sendable else None
+
+    def preview(self, recipient: Any) -> tuple[str, str]:
+        """某一位收件人的那一封：主旨與實際寄出去的內文，跟 :meth:`send` 交給 SMTP 的一樣。"""
+        return recipient.subject, campaign_module.final_body(recipient.body, self.config.mailer)
 
     def send_test(
         self,
-        template_name: str,
+        subject: str,
+        body: str,
         plan: CampaignPlan | None = None,
         attachments: list[str] | None = None,
         *,
         report: Callable[[Any], None] | None = None,
         cancel_event: Any = None,
     ) -> str:
-        """寄一封測試信給自己。回傳寄到的地址。
+        """把 ``subject``／``body`` 這份樣板寄一封給自己。回傳寄到的地址。
 
-        內容跟真的寄出去的一樣：有名單就用第一家可寄的公司代入，沒有就用範例
-        公司。只寄到寄件帳號自己、不動任何一家公司，所以不受「啟用郵件寄送」
-        那個總開關管。
+        用的是傳進來的樣板內容（郵件頁傳畫面上正在編輯的），不是名單產生當下
+        的那份——名單產生之後改過樣板，測試信也要是改過的樣子。變數用名單裡
+        第一家可寄的公司代入，沒有名單就用範例公司。
 
-        **會算進今日已寄**：Google 的每日額度算的是帳號實際寄出的每一封，測試信
-        也是。不算的話這裡的數字會比 Google 的少，快到上限時就會超過而被停權。
+        只寄到寄件帳號自己、不動任何一家公司，所以不受「啟用郵件寄送」那個
+        總開關管。**會算進今日已寄**：Google 的每日額度算的是帳號實際寄出的每
+        一封，測試信也是。
         """
         from types import SimpleNamespace
 
@@ -233,18 +241,15 @@ class MailController:
         address = self.config.mailer.address
         if not address:
             raise CRMError("尚未設定 Gmail 寄件帳號，請先到「設定」頁填好。")
-        preview = self.preview_first(plan) if plan is not None else None
-        if preview is None:
-            if not (template_name or "").strip():
-                raise CRMError("請先選擇一個樣板。")
-            template = templates_module.load_template(template_name, self.config)
-            sample = {"company_name": "範例股份有限公司", "contact_person": "王小明"}
-            body = templates_module.render(template.body, sample)
-            preview = (
-                templates_module.render(template.subject, sample),
-                campaign_module.with_unsubscribe_note(body, self.config.mailer.unsubscribe_note),
-            )
-        subject, body = preview
+        if not (subject or body or "").strip():
+            raise CRMError("樣板是空的，先寫主旨與內文。")
+        company = _first_sendable_company(plan) or {
+            "company_name": "範例股份有限公司", "contact_person": "王小明",
+        }
+        subject = templates_module.render(subject, company)
+        body = campaign_module.final_body(
+            templates_module.render(body, company), self.config.mailer
+        )
 
         loaded: list = []
         if attachments:
@@ -283,6 +288,7 @@ class MailController:
                 return
             report(
                 {
+                    "company_id": recipient.company_id,
                     "company_name": recipient.company_name,
                     "to_address": recipient.to_address,
                     "status": getattr(status, "value", str(status)),
@@ -328,6 +334,16 @@ class MailController:
         # controller too, or mailer_status() would keep reporting the old one.
         self.config = get_config()
 
+    def set_append_unsubscribe_note(self, value: bool) -> None:
+        """寄出時要不要自動在信尾加退訂說明（``mailer.append_unsubscribe_note``）。"""
+        from core.config import save_user_setting
+
+        try:
+            save_user_setting("mailer", "append_unsubscribe_note", bool(value))
+        except CRMError as exc:
+            raise CRMError(f"儲存設定失敗：{exc}") from exc
+        self.config = get_config()
+
     def set_delay_seconds(self, value: int) -> None:
         """儲存每封信之間的間隔秒數（``mailer.delay_seconds``）。做法同 :meth:`set_daily_limit`。"""
         from core.config import save_user_setting
@@ -355,6 +371,7 @@ class MailController:
             "daily_sent": str(sent_today),
             "daily_limit": str(mailer.daily_limit),
             "delay_seconds": str(mailer.delay_seconds),
+            "append_unsubscribe_note": "是" if mailer.append_unsubscribe_note else "否",
             "sender_name": mailer.sender_name or "",
         }
 
@@ -383,6 +400,21 @@ class MailController:
             return campaign_module.mark_do_not_contact(company_id)
         except CRMError as exc:
             raise CRMError(f"標記請勿聯絡失敗：{exc}") from exc
+
+
+def _first_sendable_company(plan: CampaignPlan | None):
+    """名單裡第一家可寄的公司（給樣板代入變數用）。沒有就回 ``None``。"""
+    if plan is None:
+        return None
+    recipient = next((r for r in plan.recipients if r.will_send), None)
+    if recipient is None:
+        return None
+    from database.repository import CompanyRepository
+    from database.session import session_scope
+
+    with session_scope() as session:
+        company = CompanyRepository(session).get(recipient.company_id)
+        return CompanyRepository.to_view(company) if company is not None else None
 
 
 def _record_test_email(message: Any, attachments: list[str] | None) -> None:

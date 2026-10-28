@@ -368,8 +368,12 @@ def test_the_send_button_really_sends_even_when_the_config_says_dry_run(
     assert len(sent) == 1
 
 
-def test_preview_first_includes_unsubscribe_note(mail_config, db_session):
+def test_preview_first_includes_unsubscribe_note_when_switched_on(mail_config, db_session):
     from gmail import templates
+
+    mail_config = mail_config.model_copy(
+        update={"mailer": mail_config.mailer.model_copy(update={"append_unsubscribe_note": True})}
+    )
 
     templates.save_template(
         "camp-template", subject="Hi {company_name}", body="內容", config=mail_config
@@ -496,7 +500,7 @@ def test_a_test_email_goes_only_to_yourself_and_leaves_no_trace(
     controller = MailController(mail_config)
     plan = controller.build_plan(CompanyFilter(), "camp-template", "camp")
 
-    address = controller.send_test("camp-template", plan)
+    address = controller.send_test("您好 {company_name}", "內容", plan)
 
     assert address == "me@example.com"
     [message] = recording_smtp.sent
@@ -514,8 +518,7 @@ def test_a_test_email_is_never_mistaken_for_outreach(mail_config, db_session, re
     from controllers.mail import BounceController, ReplyController
     from gmail import templates
 
-    templates.save_template("camp-template", subject="s", body="b", config=mail_config)
-    MailController(mail_config).send_test("camp-template")
+    MailController(mail_config).send_test("s", "b")
 
     assert BounceController(mail_config)._sent_addresses() == set()
     assert ReplyController(mail_config)._sent_index() == (set(), {})
@@ -524,11 +527,7 @@ def test_a_test_email_is_never_mistaken_for_outreach(mail_config, db_session, re
 def test_a_test_email_works_before_any_list_is_built(mail_config, db_session, recording_smtp):
     from gmail import templates
 
-    templates.save_template(
-        "camp-template", subject="您好 {company_name}", body="內容", config=mail_config
-    )
-
-    MailController(mail_config).send_test("camp-template")
+    MailController(mail_config).send_test("您好 {company_name}", "內容")
 
     assert "範例股份有限公司" in recording_smtp.sent[0]["Subject"]
 
@@ -557,9 +556,44 @@ def test_set_delay_seconds_persists_and_refreshes_controller_config(mail_config,
     assert controller.config.mailer.delay_seconds == 15.0
 
 
-def test_the_sample_template_does_not_carry_its_own_unsubscribe_line():
-    """程式寄信時會自動補退訂說明。樣板自己再寫一句（字不一樣）就會變成兩句。"""
+def test_the_sample_template_writes_its_own_unsubscribe_line():
+    """程式預設不自動加退訂說明，所以範例樣板要自己示範怎麼寫。"""
     from pathlib import Path
 
     sample = Path(__file__).resolve().parent.parent / "templates" / "mail" / "範例-初次開發信.txt"
-    assert "取消訂閱" not in sample.read_text(encoding="utf-8")
+    assert "取消訂閱" in sample.read_text(encoding="utf-8")
+
+
+
+def test_a_list_built_from_the_editor_sends_what_is_on_screen_not_the_saved_file(
+    mail_config, db_session
+):
+    """以前名單讀的是硬碟上的樣板檔：改了沒按儲存，寄出去的就是舊內容。"""
+    from gmail import templates
+
+    templates.save_template("camp-template", subject="舊主旨", body="舊內容", config=mail_config)
+    _make_company(db_session)
+    controller = MailController(mail_config)
+
+    plan = controller.build_plan(
+        CompanyFilter(), "camp-template", "camp", subject="新主旨 {company_name}", body="新內容"
+    )
+
+    subject, body = controller.preview_first(plan)
+    assert subject.startswith("新主旨")
+    assert body == "新內容"
+
+
+def test_a_test_email_uses_the_text_passed_in_not_the_list(mail_config, db_session, recording_smtp):
+    """名單產生之後又改了樣板，測試信也要是改過的樣子。"""
+    company = _make_company(db_session)
+    controller = MailController(mail_config)
+    plan = controller.build_plan(
+        CompanyFilter(), "camp-template", "camp", subject="舊", body="舊內容"
+    )
+
+    controller.send_test("改過的 {company_name}", "改過的內容", plan)
+
+    message = recording_smtp.sent[0]
+    assert message["Subject"] == f"[測試] 改過的 {company.company_name}"
+    assert "改過的內容" in message.get_content()

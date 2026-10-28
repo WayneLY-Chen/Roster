@@ -144,6 +144,16 @@ class SmtpSender:
 
         try:
             self._connection.send_message(mime)
+        except smtplib.SMTPServerDisconnected:
+            # Gmail 會把閒置一陣子的連線關掉（每封間隔設得長的時候最常見），
+            # 之後每一封都會是「Server not connected」。重連一次再試；還是不行
+            # 才算這一封失敗。
+            log.info("SMTP 連線被關掉了，重新連線後再寄一次")
+            self.connect()
+            try:
+                self._connection.send_message(mime)
+            except smtplib.SMTPException as exc:
+                raise GmailError(f"寄送給 {to_address} 失敗：{exc}") from exc
         except smtplib.SMTPException as exc:
             raise GmailError(f"寄送給 {to_address} 失敗：{exc}") from exc
         return rfc_message_id

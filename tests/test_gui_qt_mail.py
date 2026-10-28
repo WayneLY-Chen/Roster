@@ -1252,3 +1252,130 @@ def test_the_scan_really_reads_the_mailbox_through_the_real_controller(
     assert page.harvest_table.model.row_at(0)["company_name"] == "宏達精密機械股份有限公司"
     # 掃描完仍然一個字都沒寫。
     assert CompanyRepository(db_session).all() == []
+
+
+# ------------------------------------------------------- 演練 → 測試信 → 真的寄
+
+
+class _RecordingSMTP:
+    sent: list = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    def ehlo(self):
+        pass
+
+    def starttls(self, *, context=None):
+        pass
+
+    def login(self, *a):
+        pass
+
+    def send_message(self, message):
+        _RecordingSMTP.sent.append(message)
+
+    def quit(self):
+        pass
+
+
+def test_dry_run_then_test_email_then_real_send_all_work(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    """使用者回報過：按過演練之後，其他寄送都怪怪的。整條路走一次。"""
+    import gmail.sender as sender_module
+
+    monkeypatch.setattr(config_module, "load_config", lambda path=None: mail_config.model_copy(
+        update={"mailer": mail_config.mailer.model_copy(update={"enabled": True})}
+    ))
+    config_module.reset_config()
+    _RecordingSMTP.sent = []
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", _RecordingSMTP)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    _save_template(mail_config)
+    company = _make_company(db_session)
+
+    app = _FakeApp()
+    page = MailPage(app)
+    page.ensure_built()
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+    page.template_combo.setCurrentText("test-template")
+    page.body_editor.set_body("畫面上改過、還沒存的內容")
+    page._start_build_plan()
+    _wait_for(qt_app, page.build_task)
+    sendable = page.plan.sendable
+    assert sendable >= 1
+
+    # 1. 演練：沒有寄出任何一封，但名單表上看得到每一封的結果。
+    page._start_send(dry_run=True)
+    _wait_for(qt_app, page.send_task)
+    _wait_for(qt_app, page.status_task)
+    assert _RecordingSMTP.sent == []
+    assert any(row["status"] == "演練（沒寄出）" for row in page._rows)
+
+    # 2. 測試信：寄給自己，內容是畫面上的，不是存檔的。
+    page._send_test()
+    _wait_for(qt_app, page.test_task)
+    _wait_for(qt_app, page.status_task)
+    assert _RecordingSMTP.sent[-1]["To"] == "me@example.com"
+    assert "畫面上改過" in _RecordingSMTP.sent[-1].get_content()
+
+    # 3. 真的寄：同一份名單、寄出去的也是畫面上的內容。
+    before = len(_RecordingSMTP.sent)
+    assert page.send_button.isEnabled()
+    page._start_send(dry_run=False)
+    _wait_for(qt_app, page.send_task, timeout=10)
+    assert len(_RecordingSMTP.sent) - before == sendable
+    assert "畫面上改過" in _RecordingSMTP.sent[-1].get_content()
+    assert any(row["status"] == "已寄出" for row in page._rows)
+    db_session.refresh(company)
+    assert app.messages and not any(tone == "error" for _m, tone in app.messages)
+
+
+def test_editing_the_template_after_building_a_list_asks_for_a_new_one(
+    qt_app, db_session, mail_config
+):
+    _save_template(mail_config)
+    _make_company(db_session)
+    app = _FakeApp()
+    page = MailPage(app)
+    page.ensure_built()
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+    page.template_combo.setCurrentText("test-template")
+    page._start_build_plan()
+    _wait_for(qt_app, page.build_task)
+    assert page.plan is not None
+
+    page.body_editor.set_body("又改了一個字")
+
+    assert page.plan is None
+    assert not page.dry_run_button.isEnabled()
+    assert "重新產生名單" in page.summary_label.text()
+
+
+
+def test_saving_a_builtin_sample_template_asks_for_your_own_name(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    """內建範例跟著程式更新，直接蓋掉的話更新時會撞在一起，樣板看起來就不見了。"""
+    from PySide6.QtWidgets import QInputDialog
+
+    from gmail import templates
+
+    templates.save_template("範例-初次開發信", subject="s", body="b", config=mail_config)
+    app = _FakeApp()
+    page = MailPage(app)
+    page.ensure_built()
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+    page.template_combo.setCurrentText("範例-初次開發信")
+    page.body_editor.set_body("我自己的內容")
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("我的開發信", True))
+
+    page._save_template()
+
+    assert templates.load_template("範例-初次開發信", mail_config).body == "b"
+    assert "我自己的內容" in templates.load_template("我的開發信", mail_config).body
+    assert page.template_combo.currentText() == "我的開發信"

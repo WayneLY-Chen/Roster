@@ -31,7 +31,7 @@ from database.types import email_equals
 from database.repository import ActivityRepository, CompanyRepository
 from database.session import session_scope
 from gmail.sender import SmtpSender
-from gmail.templates import load_template, render
+from gmail.templates import MailTemplate, load_template, render
 from verifier.validators import is_valid_email
 
 
@@ -180,8 +180,12 @@ def build_plan(
     config: AppConfig | None = None,
     attachments: list[str] | None = None,
     follow_up: FollowUp | None = None,
+    template: MailTemplate | None = None,
 ) -> CampaignPlan:
     """Decide who would be emailed, without sending anything or touching SMTP.
+
+    ``template`` 給了就用它，不去讀硬碟上的樣板檔。郵件頁傳的是畫面上正在
+    編輯的內容——使用者看到什麼、寄出去就是什麼，不必先按「儲存樣板」。
 
     ``attachments`` 在這裡就會驗證總大小與檔案是否存在——附件超過上限或檔案
     不見，要在使用者按「預覽」時就知道，而不是按下「開始寄送」之後才炸。
@@ -192,7 +196,7 @@ def build_plan(
     """
     config = config or get_config()
     mailer = config.mailer
-    template = load_template(template_name, config)
+    template = template or load_template(template_name, config)
 
     attachment_names = list(attachments or [])
     if attachment_names:
@@ -263,6 +267,16 @@ def build_plan(
         daily_remaining=max(remaining_today - sendable, 0),
         attachments=attachment_names,
     )
+
+
+def final_body(body: str, mailer) -> str:  # noqa: ANN001 - MailerSection
+    """實際寄出去的內文：設定要自動加退訂說明的話就加上，否則原樣。
+
+    寄送、預覽、測試信都走這一支，三者看到的才會一樣。
+    """
+    if not mailer.append_unsubscribe_note:
+        return body
+    return with_unsubscribe_note(body, mailer.unsubscribe_note)
 
 
 def with_unsubscribe_note(body: str, note: str) -> str:
@@ -336,7 +350,7 @@ def send_campaign(
             if cancel_event is not None and cancel_event.is_set():
                 break
 
-            body = with_unsubscribe_note(recipient.body, mailer.unsubscribe_note)
+            body = final_body(recipient.body, mailer)
 
             with session_scope() as session:
                 message = EmailMessage(

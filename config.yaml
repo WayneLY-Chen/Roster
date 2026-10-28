@@ -306,6 +306,9 @@ mailer:
   delay_seconds: 8.0      # 每封信之間的間隔秒數，避免被 Gmail 判定為垃圾郵件來源
   resend_after_days: 30   # 同一間公司在這麼多天內寄過信，就不會重複寄送
   require_verified_email: true   # 只寄給通過 MX 驗證（Valid）的信箱
+  # 寄出時要不要自動在信尾加上下面那句退訂說明。預設關閉：自己寫在樣板裡。
+  # 不管開不開，每封信都帶 List-Unsubscribe 標頭，收信軟體會顯示「取消訂閱」。
+  append_unsubscribe_note: false
   unsubscribe_note: >-
     若不希望再收到本信件，請直接回覆本信並註明「取消訂閱」，我們會立即將您移除。
   templates_dir: "./templates/mail"

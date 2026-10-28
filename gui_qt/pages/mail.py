@@ -156,6 +156,8 @@ class MailPage(BasePage):
         #: 上一次從收件匣挖出來、還沒存的那些。
         self._harvest_candidates: list = []
         self.plan: Any = None
+        #: 名單表的每一列，寄送進度會寫回這裡。
+        self._rows: list[dict[str, Any]] = []
         self._mailer_ready = False
         #: Gmail 帳號與應用程式密碼都填好了。寄測試信只需要這個。
         self._account_ready = False
@@ -302,6 +304,14 @@ class MailPage(BasePage):
         self.live_check = QCheckBox("排程自動寄信時實際寄出（關閉＝排程只演練）")
         self.live_check.toggled.connect(self._on_live_toggled)
         switches_row.addWidget(self.live_check)
+
+        self.note_check = QCheckBox("寄出時自動在信尾加上退訂說明")
+        self.note_check.setToolTip(
+            "關閉時由你自己在樣板裡寫退訂方式。不管開不開，每封信都帶有讓收信軟體"
+            "顯示「取消訂閱」的標頭。"
+        )
+        self.note_check.toggled.connect(self._on_note_toggled)
+        switches_row.addWidget(self.note_check)
         switches_row.addStretch(1)
         section.body_layout.addLayout(switches_row)
 
@@ -399,6 +409,10 @@ class MailPage(BasePage):
         self.body_editor = RichTextEditor(self.controller.config, show_toolbar=False)
         self.body_editor.setMinimumHeight(120)
         section.body_layout.addWidget(self.body_editor, 1)
+        # 名單是用產生當下的樣板內容算好的。之後改了樣板，那份名單寄出去的就是
+        # 舊內容——所以一改就作廢，請使用者重新產生。
+        self.subject_entry.entry.textChanged.connect(self._on_template_edited)
+        self.body_editor.edit.textChanged.connect(self._on_template_edited)
 
         toolbar_hint = caption("需要粗體／清單／圖片等格式，請按上面「放大編輯」")
         section.body_layout.addWidget(toolbar_hint)
@@ -714,6 +728,7 @@ class MailPage(BasePage):
                 ("status", "狀態", 60),
             ],
             min_rows=6,
+            on_activate=self._preview_row,
         )
         section.body_layout.addWidget(self.table, 1)
 
@@ -1290,12 +1305,28 @@ class MailPage(BasePage):
             return
         subject = self.subject_entry.get()
         body = self.body_editor.to_body_string()
+        if name.startswith(BUILTIN_TEMPLATE_PREFIX):
+            # 內建的範例樣板跟著程式更新。直接蓋掉的話，下一次更新會跟你的修改
+            # 撞在一起，你的版本會被收進 git 的暫存區，看起來就像樣板不見了。
+            name, ok = QInputDialog.getText(
+                self,
+                "另存成你自己的樣板",
+                "「範例-」開頭的是內建樣板，更新程式時會被換掉。\n請取一個新名字，存成你自己的樣板：",
+                text=name.removeprefix(BUILTIN_TEMPLATE_PREFIX),
+            )
+            name = name.strip()
+            if not ok or not name:
+                return
+            if name.startswith(BUILTIN_TEMPLATE_PREFIX):
+                self.status("自己的樣板不能用「範例-」開頭", "error")
+                return
         try:
             self.controller.save(name, subject, body)
         except CRMError as exc:
             self.report_error(exc)
             return
         self._loaded_template_name = name
+        self._refresh_templates(select=name)
         self.status(f"已儲存樣板「{name}」", "success")
 
     def _insert_selected_placeholder(self) -> None:
@@ -1347,6 +1378,7 @@ class MailPage(BasePage):
 
         self._set_checked_silently(self.enabled_check, enabled)
         self._set_checked_silently(self.live_check, not dry_run)
+        self._set_checked_silently(self.note_check, status["append_unsubscribe_note"] == "是")
 
         self.daily_limit_spin.blockSignals(True)
         self.daily_limit_spin.setValue(int(status["daily_limit"]))
@@ -1452,6 +1484,20 @@ class MailPage(BasePage):
         self.status(message, "success")
         self._refresh_status()
 
+    def _on_note_toggled(self, checked: bool) -> None:
+        if self._updating_switches:
+            return
+        try:
+            self.controller.set_append_unsubscribe_note(checked)
+        except CRMError as exc:
+            self._set_checked_silently(self.note_check, not checked)
+            self.report_error(exc)
+            return
+        self.status(
+            "寄出時會自動在信尾加上退訂說明" if checked else "不再自動加退訂說明，記得在樣板裡自己寫",
+            "success",
+        )
+
     def _save_delay(self) -> None:
         self._delay_timer.stop()
         value = self.delay_spin.value()
@@ -1533,6 +1579,8 @@ class MailPage(BasePage):
             follow_up=self.follow_up_check.isChecked(),
             follow_up_days=self.follow_up_days_spin.value(),
             follow_up_max=self.follow_up_max_spin.value(),
+            subject=self.subject_entry.get(),
+            body=self.body_editor.to_body_string(),
         )
 
     def _on_follow_up_toggled(self, checked: bool) -> None:
@@ -1549,8 +1597,18 @@ class MailPage(BasePage):
             widget.setEnabled(checked)
         if self.plan is not None:
             self.plan = None
+            self._rows = []
             self.table.clear()
             self.summary_label.setText("換了模式，請重新產生名單。")
+
+    def _on_template_edited(self, *_args: object) -> None:
+        if self.plan is None or self.build_task.running:
+            return
+        self.plan = None
+        self._rows = []
+        self.table.clear()
+        self.summary_label.setText("樣板改過了，請重新產生名單，寄出去的才會是改過的內容。")
+        self._update_action_buttons()
 
     def _refresh_follow_up_rules(self) -> None:
         days, most = self.controller.follow_up_rules()
@@ -1579,7 +1637,7 @@ class MailPage(BasePage):
         self.app.status_bar.stop_progress()
 
         rows = []
-        for recipient in plan.recipients:
+        for index, recipient in enumerate(plan.recipients):
             if recipient.will_send:
                 status_text = "會寄送"
             else:
@@ -1590,8 +1648,11 @@ class MailPage(BasePage):
                     "company_name": recipient.company_name,
                     "to_address": recipient.to_address,
                     "status": status_text,
+                    "_index": index,
+                    "_company_id": recipient.company_id,
                 }
             )
+        self._rows = rows
         self.table.set_rows(rows)
 
         reason_summary = "；".join(
@@ -1604,7 +1665,7 @@ class MailPage(BasePage):
         )
         if reason_summary:
             summary += f"（{reason_summary}）"
-        summary += f" 今日寄送額度剩餘 {plan.daily_remaining} 封。"
+        summary += f" 今日寄送額度剩餘 {plan.daily_remaining} 封。點兩下任一列可以看那一封的內容。"
         # 附件寫進名單摘要，使用者按「開始寄送」前看得到自己到底要寄出什麼。
         if getattr(plan, "attachments", None):
             summary += f" 附件：{('、'.join(plan.attachments))}。"
@@ -1635,6 +1696,17 @@ class MailPage(BasePage):
         subject, body = preview
         dialog = PreviewDialog(self, subject, body, self.controller.config)
         dialog.exec()
+
+    def _preview_row(self, row: dict[str, Any]) -> None:
+        """名單表上點兩下：看寄給這一家的那一封。"""
+        if self.plan is None:
+            return
+        recipient = self.plan.recipients[row["_index"]]
+        if not recipient.will_send:
+            self.status(f"{recipient.company_name} 不會寄送：{row.get('status', '')}", "normal")
+            return
+        subject, body = self.controller.preview(recipient)
+        PreviewDialog(self, subject, body, self.controller.config, title=recipient.company_name).exec()
 
     # -------------------------------------------------------------- 寄送
 
@@ -1693,7 +1765,12 @@ class MailPage(BasePage):
             return
         self.test_button.setEnabled(False)
         self.status("正在寄測試信給你自己…", "normal")
-        self.test_task.start(template_name, self.plan, self.selected_attachments())
+        self.test_task.start(
+            self.subject_entry.get(),
+            self.body_editor.to_body_string(),
+            self.plan,
+            self.selected_attachments(),
+        )
 
     def _on_test_sent(self, address: str) -> None:
         self._update_action_buttons()
@@ -1711,16 +1788,22 @@ class MailPage(BasePage):
             self.cancel_send_button.setEnabled(False)
 
     def _on_send_progress(self, payload: dict[str, Any]) -> None:
-        self.status(
-            f"已處理 {payload.get('company_name', '')}（{payload.get('status', '')}）", "normal"
-        )
+        status = _SEND_STATUS_TEXT.get(payload.get("status", ""), payload.get("status", ""))
+        self.status(f"已處理 {payload.get('company_name', '')}（{status}）", "normal")
+        # 寫回名單表那一列：演練完也看得到每一封的結果，點兩下就是內容。
+        for row in self._rows:
+            if row.get("_company_id") == payload.get("company_id"):
+                row["status"] = status
+                break
+        self.table.set_rows(self._rows)
 
     def _on_send_done(self, result: Any) -> None:
         self._finish_send()
         mode = "演練" if result.dry_run else "寄送"
+        done = "產生" if result.dry_run else "成功"
         message = (
-            f"{mode}完成：成功 {result.sent} 封，失敗 {result.failed} 封，"
-            f"略過 {result.skipped} 封。"
+            f"{mode}完成：{done} {result.sent} 封，失敗 {result.failed} 封，"
+            f"略過 {result.skipped} 封。點兩下名單裡任一列可以看那一封的內容。"
         )
         if result.errors:
             shown = "；".join(result.errors[:3])
@@ -1748,10 +1831,10 @@ class PreviewDialog(QDialog):
     ``PreviewDialog``。"""
 
     def __init__(
-        self, parent: QWidget | None, subject: str, body: str, config=None
+        self, parent: QWidget | None, subject: str, body: str, config=None, title: str = ""
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("預覽第一封")
+        self.setWindowTitle(f"預覽：寄給 {title}" if title else "預覽第一封")
         self.resize(560, 540)
         self.setMinimumSize(420, 360)
 
@@ -1774,6 +1857,18 @@ class PreviewDialog(QDialog):
         close_button.clicked.connect(self.accept)
         footer.addWidget(close_button)
         layout.addLayout(footer)
+
+
+#: 內建範例樣板的檔名開頭。這些檔案有進 git，會跟著程式更新（見 .gitignore）。
+BUILTIN_TEMPLATE_PREFIX = "範例-"
+
+
+#: 寄送進度裡的狀態代碼 -> 名單表上顯示的字。
+_SEND_STATUS_TEXT = {
+    "Sent": "已寄出",
+    "Dry Run": "演練（沒寄出）",
+    "Failed": "失敗",
+}
 
 
 def _new_campaign_name() -> str:

@@ -803,7 +803,13 @@ class MailerSection(_Base):
     #: 這個上限不是禮貌問題而已。沒有上限的話，一個從來不回信的地址會被無限
     #: 期地追下去——那正是垃圾信的定義，而付出代價的是使用者自己的網域信譽。
     follow_up_max_emails: int = Field(default=3, ge=2, le=10)
-    #: Appended to every message. Required: recipients must be able to opt out.
+    #: 寄出時要不要自動在信尾加上 :attr:`unsubscribe_note`。
+    #:
+    #: 預設關閉：退訂說明由使用者自己寫在樣板裡。自動加的那句跟樣板裡自己寫的
+    #: 字不一樣時，收件人會看到兩句。不管開不開，每封信都帶 ``List-Unsubscribe``
+    #: 標頭（見 gmail/sender.py），收信軟體會據此顯示「取消訂閱」。
+    append_unsubscribe_note: bool = False
+    #: 打開 :attr:`append_unsubscribe_note` 時加在信尾的那句話。
     unsubscribe_note: str = (
         "若不希望再收到本信件，請直接回覆本信並註明「取消訂閱」，我們會立即將您移除。"
     )

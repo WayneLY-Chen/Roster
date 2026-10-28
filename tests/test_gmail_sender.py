@@ -363,7 +363,8 @@ def test_dry_run_never_calls_smtp(db_session, mail_config, monkeypatch):
     assert not FakeSMTP.instances  # RefusingSMTP would have raised if constructed
 
 
-def test_unsubscribe_note_always_present_in_stored_body(db_session, mail_config):
+def test_unsubscribe_note_is_not_added_unless_switched_on(db_session, mail_config):
+    """預設由使用者自己在樣板裡寫退訂方式，程式不另外加一句。"""
     _save_template(mail_config)
     _make_company(db_session)
     plan = campaign.build_plan(CompanyFilter(), "test-template", "camp", mail_config)
@@ -371,10 +372,26 @@ def test_unsubscribe_note_always_present_in_stored_body(db_session, mail_config)
 
     stored = db_session.execute(select(EmailMessage)).scalars().first()
     assert stored is not None
+    assert mail_config.mailer.unsubscribe_note not in stored.body
+
+
+def test_unsubscribe_note_is_added_when_switched_on(db_session, mail_config):
+    mail_config = mail_config.model_copy(
+        update={"mailer": mail_config.mailer.model_copy(update={"append_unsubscribe_note": True})}
+    )
+    _save_template(mail_config)
+    _make_company(db_session)
+    plan = campaign.build_plan(CompanyFilter(), "test-template", "camp", mail_config)
+    campaign.send_campaign(plan, mail_config)
+
+    stored = db_session.execute(select(EmailMessage)).scalars().first()
     assert mail_config.mailer.unsubscribe_note in stored.body
 
 
 def test_unsubscribe_note_not_duplicated_when_already_present(db_session, mail_config):
+    mail_config = mail_config.model_copy(
+        update={"mailer": mail_config.mailer.model_copy(update={"append_unsubscribe_note": True})}
+    )
     note = mail_config.mailer.unsubscribe_note
     templates.save_template(
         "with-note",
@@ -599,3 +616,34 @@ def test_scraped_tags_cannot_turn_a_plain_text_template_into_html():
 def test_plain_text_values_keep_ordinary_angle_brackets():
     rendered = templates.render("規格：{products}", {"company_name": "測試", "products": "孔徑 < 3mm"})
     assert rendered == "規格：孔徑 < 3mm"
+
+
+
+def test_a_dropped_smtp_connection_is_reconnected_once(mail_config, monkeypatch):
+    """Gmail 會把閒置的連線關掉，之後每一封都是「Server not connected」。"""
+    connects: list[int] = []
+
+    class DroppingSMTP(FakeSMTP):
+        def __init__(self, host, port, timeout=None):
+            super().__init__(host, port, timeout)
+            connects.append(1)
+            self.dropped = len(connects) == 1  # 第一條連線寄的時候已經斷了
+
+        def send_message(self, message):
+            if self.dropped:
+                raise smtplib.SMTPServerDisconnected("Server not connected")
+            super().send_message(message)
+
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", DroppingSMTP)
+
+    class Msg:
+        to_address = "target@example.com"
+        subject = "主旨"
+        body = "內容"
+
+    sender = SmtpSender(mail_config)
+    sender.connect()
+    sender.send(Msg())
+
+    assert len(connects) == 2
+    assert FakeSMTP.instances[-1].sent_messages
