@@ -1,56 +1,56 @@
 # Roster（名單匠）- runtime dependencies
-# Python 3.12+
+# Python 3.14+
 
 # --- crawling ---
-playwright>=1.47.0
-beautifulsoup4>=4.12.3
-lxml>=5.2.0
-httpx>=0.27.0
-tenacity>=8.3.0
+playwright>=1.64.1
+beautifulsoup4>=4.15.0
+lxml>=6.1.3
+httpx>=0.28.1
+tenacity>=9.2.1
 # Verify HTTPS against the OS trust store. Many Taiwanese sites use TWCA
 # certificates that Python's bundled store rejects but Windows accepts.
-truststore>=0.9.0
+truststore>=0.10.5
 
 # --- data / export ---
 # 上限是刻意的：pandas 3.0 是有破壞性變更的大版本（寫時複製、字串 dtype
 # 等），本專案的測試從未在上面跑過，不要讓 pip 自動跳上去。要升級請先
 # 把整套測試在 3.0 跑過一次再放寬。
-pandas>=2.2.0,<3.0
-openpyxl>=3.1.2
+pandas>=2.3.3,<3.0
+openpyxl>=3.1.5
 
 # --- 文件檔裡的名單 ---
 # 不少公協會把會員名冊做成 PDF 或 Word 掛在網站上，而不是做成網頁。
 # pdfplumber 除了文字之外還讀得出表格結構，那正是名冊最常見的排版。
-pdfplumber>=0.11.0
-python-docx>=1.1.0
-python-pptx>=1.0.0
+pdfplumber>=0.11.10
+python-docx>=1.2.0
+python-pptx>=1.0.2
 
 # --- persistence ---
-SQLAlchemy>=2.0.30
+SQLAlchemy>=2.1.6
 
 # --- validation / config ---
-pydantic>=2.7.0
-PyYAML>=6.0.1
-python-dotenv>=1.0.1
-dnspython>=2.6.1
+pydantic>=2.14.1
+PyYAML>=6.0.3
+python-dotenv>=1.2.4
+dnspython>=2.9.0
 
 # --- secrets ---
 # Stores the Gmail app password in the OS credential vault (Windows Credential
 # Manager / macOS Keychain) instead of a plaintext .env in the project folder.
-keyring>=25.0.0
+keyring>=25.7.0
 
 # 資料庫欄位加密（AES-GCM），見 core/crypto.py。
 # 這行以前也漏掉了，而且失敗方式很安靜：缺了它 core/crypto.py 會丟
 # EncryptionUnavailable，程式照常啟動、只是 database.encrypt 形同虛設。
-cryptography>=42.0.0
+cryptography>=50.0.2
 
 # --- cli / logging ---
-typer>=0.12.3
-rich>=13.7.0
-loguru>=0.7.2
+typer>=0.27.3
+rich>=15.0.0
+loguru>=0.7.3
 
 # --- 桌面介面 ---
-# 介面全部在 gui_qt/。開發與測試用的是 6.11.1（Qt 6.11.1）。
+# 介面全部在 gui_qt/。開發與測試用的是 6.12.0（Python 3.14）。
 # 這行以前漏掉了：舊介面是 customtkinter，換成 PySide6 之後忘了一起改，
 # 結果照著 requirements.txt 裝完會缺 PySide6、start.bat 直接 ImportError。
-PySide6>=6.11.0
+PySide6>=6.12.0

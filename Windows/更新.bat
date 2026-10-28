@@ -92,6 +92,8 @@ REM ------------------------------------------------------------ [3/3]
 echo.
 echo [3/3] Installing anything newly required...
 if not exist "%ROOT%\.venv\Scripts\python.exe" goto :no_venv
+"%ROOT%\.venv\Scripts\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3,14) else 1)" >nul 2>&1
+if errorlevel 1 goto :old_python
 REM  No --upgrade on purpose. requirements.txt uses lower bounds, so a plain
 REM  install adds what is missing and leaves working versions alone; with
 REM  --upgrade every package would jump to its newest release, which is a
@@ -225,6 +227,18 @@ exit /b 1
 echo.
 echo  The new version is downloaded, but there is no .venv here yet.
 echo  Double-click the setup file in this same folder to finish.
+echo.
+popd
+pause
+exit /b 1
+
+:old_python
+echo.
+echo  The new version is downloaded, but it needs Python 3.14 and the
+echo  .venv here was built by an older one.
+echo  1. Install Python 3.14 from https://www.python.org/downloads/
+echo  2. Double-click the setup file in this same folder. It rebuilds
+echo     .venv; your database, attachments and settings are not touched.
 echo.
 popd
 pause

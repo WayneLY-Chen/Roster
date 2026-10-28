@@ -60,6 +60,27 @@ _UUID_LOCAL_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
 )
 
+#: 免費信箱與 ISP 信箱的網域：任何人都能申請，不是公司自己的網域。
+#:
+#: 這些**不算無效**——台灣很多小公司、工作室根本沒有自己的網域，官網上放的
+#: 就是 gmail 或 hinet。但同一個網站上同時有公司網域的信箱時，免費信箱多半
+#: 是某個員工的私人信箱，應該讓位。怎麼處理由 ``verifier.free_mail`` 決定。
+#:
+#: 用結尾比對，所以 ``ms1.hinet.net``、``ms12.url.com.tw`` 這類子網域都算。
+FREE_MAIL_DOMAINS = (
+    # 國際
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com",
+    "hotmail.com", "outlook.com", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com", "aol.com",
+    "protonmail.com", "proton.me", "gmx.com", "zoho.com",
+    # 台灣
+    "yahoo.com.tw", "hotmail.com.tw", "kimo.com", "hinet.net",
+    "seed.net.tw", "so-net.net.tw", "pchome.com.tw", "url.com.tw",
+    "giga.net.tw", "tfn.net.tw", "ebtnet.net", "kbtelecom.net",
+    # 中國
+    "qq.com", "foxmail.com", "163.com", "126.com", "yeah.net", "sina.com",
+)
+
 #: 圖檔名稱常被誤認成信箱（``logo@2x.png``）。
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp")
 
@@ -136,6 +157,14 @@ def is_role_address(value: str | None) -> bool:
         return False
     local = value.partition("@")[0].lower()
     return local in _ROLE_LOCAL_PARTS
+
+
+def is_free_mail(value: str | None) -> bool:
+    """這是 gmail、hinet 這類免費／ISP 信箱，不是公司自己網域的嗎？"""
+    if not value or "@" not in value:
+        return False
+    domain = value.strip().lower().rpartition("@")[2]
+    return any(domain == free or domain.endswith("." + free) for free in FREE_MAIL_DOMAINS)
 
 
 def is_disposable_email(value: str | None, disposable_domains: set[str] | None) -> bool:

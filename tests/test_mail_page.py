@@ -248,7 +248,7 @@ def test_send_wraps_smtp_authentication_failure_in_chinese(
         def ehlo(self):
             pass
 
-        def starttls(self):
+        def starttls(self, *, context=None):
             pass
 
         def login(self, address, password):

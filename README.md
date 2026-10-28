@@ -3,7 +3,7 @@
 蒐集**公開**的台灣 B2B 廠商聯絡資料，清理、驗證、建檔、匯出，
 並可透過你自己的 Gmail 寄送開發信。
 
-Python 3.12+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / macOS / Linux ｜ 也可用命令列操作
+Python 3.14+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / macOS / Linux ｜ 也可用命令列操作
 
 最新版本 **v1.31.0** — 這一版改了什麼見 [`CHANGELOG.md`](CHANGELOG.md)
 
@@ -14,7 +14,7 @@ Python 3.12+ ｜ 桌面應用程式（PySide6）｜ 本機 SQLite ｜ Windows / 
 
 ## 安裝
 
-需要 **Python 3.12 或更新版本**（[官方下載](https://www.python.org/downloads/)。
+需要 **Python 3.14 或更新版本**（[官方下載](https://www.python.org/downloads/)。
 Windows 安裝時記得勾選 *Add python.exe to PATH*）。
 
 打開你的作業系統對應的資料夾，**雙擊「安裝」**，剩下的它會自己做完：

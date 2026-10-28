@@ -326,8 +326,9 @@ def _needs_a_check(company, recheck_after_days: int) -> bool:
 def apply_registration(company, registration: Registration) -> bool:
     """把登記資料寫進一家公司。回傳有沒有真的改到東西。
 
-    只補空的欄位，不覆蓋使用者已經有的資料——除了登記狀態與資本額，那兩個
-    本來就是這一步負責維護的，官方紀錄一定比舊值準。
+    只補空的欄位，不覆蓋使用者已經有的資料——除了登記狀態、資本額與負責人。
+    前兩個本來就是這一步負責維護的，官方紀錄一定比舊值準；負責人是開發信
+    要找的決策者，名錄或官網上抓到的業務窗口只在查不到登記時才拿來用。
 
     :mod:`crawler.complete` 也用這一支。同一件事只該有一份實作：「哪些欄位
     可以覆蓋、哪些只能補空的」是這個專案對使用者的承諾，兩邊各寫一份遲早
@@ -342,7 +343,7 @@ def apply_registration(company, registration: Registration) -> bool:
         company.capital_amount = registration.capital_amount
         changed = True
 
-    if registration.responsible_name and not (company.contact_person or "").strip():
+    if registration.responsible_name and company.contact_person != registration.responsible_name:
         company.contact_person = registration.responsible_name
         changed = True
     if registration.location and not (company.address or "").strip():

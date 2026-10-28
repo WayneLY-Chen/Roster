@@ -31,7 +31,7 @@ else
 fi
 
 line "Python"
-for candidate in python3.14 python3.13 python3.12 python3; do
+for candidate in python3.14 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
         printf "%-10s %s\n" "$candidate" "$("$candidate" --version 2>&1)"
     fi

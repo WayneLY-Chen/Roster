@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import email
 import imaplib
+import ssl
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -142,7 +143,13 @@ class GmailClient:
                 "（在 https://myaccount.google.com/apppasswords 產生）。"
             )
         try:
-            connection = imaplib.IMAP4_SSL(self.settings.imap_host, self.settings.imap_port)
+            # 一定要傳 ssl_context。不傳的話 imaplib 用的是**不驗證憑證**的
+            # 預設值，公共 Wi-Fi 上的中間人就能拿到應用程式密碼。
+            connection = imaplib.IMAP4_SSL(
+                self.settings.imap_host,
+                self.settings.imap_port,
+                ssl_context=ssl.create_default_context(),
+            )
             connection.login(address, password)
             connection.select(self.settings.mailbox, readonly=True)
         except imaplib.IMAP4.error as exc:

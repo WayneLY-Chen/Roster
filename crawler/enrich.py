@@ -53,7 +53,10 @@ from verifier.normalize import (
     normalize_person_name,
     normalize_phone,
 )
+from verifier.mx import MXChecker
+from verifier.service import CleaningService
 from verifier.validators import (
+    is_free_mail,
     is_role_address,
     is_tracking_address,
     is_valid_email,
@@ -135,13 +138,25 @@ def _is_own_domain(email: str, host: str) -> bool:
     return domain == host or domain.endswith("." + host) or host.endswith("." + domain)
 
 
+def _domain_rank(email: str, host: str) -> int:
+    """公司自己的網域 0、其他公司網域 1、gmail／hinet 這類免費信箱 2。"""
+    if _is_own_domain(email, host):
+        return 0
+    return 2 if is_free_mail(email) else 1
+
+
 def _rank(email: str, host: str) -> tuple[int, int, str]:
-    """排序用：同網域優先，其次是 info@ 這類公開窗口。"""
+    """排序用：公司網域優先、免費信箱最後，同一級裡 info@ 這類公開窗口優先。"""
     return (
-        0 if _is_own_domain(email, host) else 1,
+        _domain_rank(email, host),
         0 if is_role_address(email) else 1,
         email,
     )
+
+
+def _is_company_email(email: str | None) -> bool:
+    """找到的是公司網域的信箱，不必再往下一頁找了嗎？"""
+    return bool(email) and not is_free_mail(email)
 
 
 def _usable(email: str | None) -> bool:
@@ -149,6 +164,8 @@ def _usable(email: str | None) -> bool:
         return False
     local = email.partition("@")[0].lower()
     if local in _JUNK_LOCAL_PARTS:
+        return False
+    if get_config().verifier.free_mail == "reject" and is_free_mail(email):
         return False
     # 機器產生的識別碼（Sentry 的 DSN、圖檔名）。這裡就要擋掉，不能只靠存進
     # 資料庫前那一關：擋在這裡它才不會**排在真正的信箱前面被選走**——用 Wix
@@ -199,7 +216,8 @@ def find_email_for_site(
 ) -> tuple[str | None, int]:
     """在一個公司網站上找公開信箱。回傳 ``(信箱, 實際請求次數)``。
 
-    找到就立刻停止，不會把整站走完。
+    找到公司網域的信箱就立刻停止，不會把整站走完。只找到 gmail 這類免費信箱
+    時會先記著、繼續看聯絡頁，頁數用完還是沒有公司網域的才拿它交差。
     """
     requests_made = 0
     try:
@@ -212,8 +230,9 @@ def find_email_for_site(
     requests_made += 1
 
     emails = emails_from_page(first.html, first.url)
-    if emails:
+    if emails and _is_company_email(emails[0]):
         return emails[0], requests_made
+    fallback = emails[0] if emails else None
 
     # 首頁沒有，改看聯絡頁。先用頁面上真的存在的連結，再退回常見路徑。
     targets = _contact_links(first.html, first.url)
@@ -232,10 +251,11 @@ def find_email_for_site(
             continue
         requests_made += 1
         emails = emails_from_page(page.html, page.url)
-        if emails:
+        if emails and _is_company_email(emails[0]):
             return emails[0], requests_made
+        fallback = fallback or (emails[0] if emails else None)
 
-    return None, requests_made
+    return fallback, requests_made
 
 
 #: 聯絡人姓名再長就不是姓名了，是把一整句話收進來。
@@ -274,14 +294,26 @@ class SiteContacts:
         """把自己還空著的欄位用 ``other`` 補起來。已經有值的不動。
 
         逐頁累積用：首頁只有電話、聯絡頁才有信箱是很常見的排版。
+
+        唯一的例外是信箱：手上只有 gmail 這類免費信箱、而 ``other`` 有公司
+        網域的信箱時換成公司的。
         """
         for field_name in HARVESTABLE_FIELDS:
             if self.get(field_name) is None:
                 setattr(self, field_name, other.get(field_name))
+        if not _is_company_email(self.email) and _is_company_email(other.email):
+            self.email = other.email
 
     def satisfies(self, wanted: Iterable[str]) -> bool:
-        """``wanted`` 裡的每一個欄位都已經有值了嗎？"""
-        return all(self.get(field_name) is not None for field_name in wanted)
+        """``wanted`` 裡的每一個欄位都已經有值了嗎？
+
+        只有免費信箱不算找到信箱，還要再看下一頁有沒有公司網域的。
+        """
+        return all(
+            _is_company_email(self.email) if field_name == "email"
+            else self.get(field_name) is not None
+            for field_name in wanted
+        )
 
     def is_empty(self) -> bool:
         return all(self.get(field_name) is None for field_name in HARVESTABLE_FIELDS)
@@ -441,6 +473,27 @@ def harvest_site_contacts(
     return found, requests_made
 
 
+def email_screener(config: AppConfig, session) -> CleaningService:
+    """寫入信箱前過關用的 :class:`CleaningService`，設定有開就含 MX 檢查。"""
+    mx = MXChecker(config, session) if config.verifier.check_mx else None
+    return CleaningService(config, mx)
+
+
+def store_email(company, email: str | None, cleaner: CleaningService) -> bool:
+    """把網站上找到的信箱過完關卡再寫進公司。回傳有沒有寫入。
+
+    寄不到的、設定為不收的在這裡就丟掉，不進資料庫。判定跟著信箱一起寫，
+    不然存進去的信箱會帶著前一個地址（或「沒有信箱」）的判定。
+    """
+    email, verdict, checked_at = cleaner.screen_email(email)
+    if not email:
+        return False
+    company.email = email
+    company.email_verdict = verdict.value
+    company.email_checked_at = checked_at
+    return True
+
+
 def enrich_missing_emails(
     limit: int | None = None,
     config: AppConfig | None = None,
@@ -462,6 +515,7 @@ def enrich_missing_emails(
     try:
         with session_scope() as session:
             repo = CompanyRepository(session)
+            cleaner = email_screener(config, session)
 
             if company_ids is not None:
                 targets = [c for c in (repo.get(i) for i in company_ids) if c is not None]
@@ -506,8 +560,7 @@ def enrich_missing_emails(
                     continue
 
                 summary.emails_found += 1
-                if not company.email:
-                    company.email = email
+                if not company.email and store_email(company, email, cleaner):
                     company.updated_at = now()
                     summary.updated += 1
                     log.info("{} -> {}", company.company_name, email)

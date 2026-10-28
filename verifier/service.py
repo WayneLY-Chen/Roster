@@ -37,6 +37,7 @@ from verifier.normalize import (
 )
 from verifier.validators import (
     is_disposable_email,
+    is_free_mail,
     is_tracking_address,
     is_valid_company_name,
     is_valid_email,
@@ -52,6 +53,14 @@ log = get_logger(LogCategory.CRAWL)
 #: 就是一個超長的欄位；截斷比讓詳細資料視窗塞不下好。
 _MAX_EXTRA_FIELDS = 30
 _MAX_EXTRA_VALUE_CHARS = 500
+
+#: 這些判定代表信箱寄不到，直接不存。
+#:
+#: 退信（BOUNCED）不在這裡：那個標記本身就是「別再寄」的紀錄，清掉信箱的話
+#: 下一次爬回同一個地址就會被當成新的再寄一次。
+UNDELIVERABLE_VERDICTS = frozenset(
+    {EmailVerdict.INVALID_SYNTAX, EmailVerdict.DISPOSABLE, EmailVerdict.NO_MX}
+)
 
 
 def _clean_extra_fields(values: dict[str, str]) -> dict[str, str]:
@@ -105,14 +114,7 @@ class CleaningService:
                 log.info("略過疑似廣告：{!r}（{}）", name[:40], verdict.reason)
                 return None
 
-        email = normalize_email(raw.email)
-        if email and not is_valid_email(email):
-            log.debug("discarding malformed email {!r} for {}", raw.email, name)
-            email = None
-        if email and is_tracking_address(email):
-            # 語法完全合法，所以上面那一關放它過。見 is_tracking_address()。
-            log.info("略過機器產生的位址 {!r}（{}）", email, name[:30])
-            email = None
+        email, verdict, checked_at = self.screen_email(raw.email)
 
         phone = normalize_phone(raw.phone)
         if phone and not is_valid_phone(phone):
@@ -125,8 +127,6 @@ class CleaningService:
         tax_id = normalize_tax_id(raw.tax_id)
         if tax_id and not is_valid_tax_id(tax_id):
             log.debug("tax id {} fails its checksum; keeping it unverified", tax_id)
-
-        verdict, checked_at = self.verify_email(email)
 
         return CleanCompany(
             company_name=name,
@@ -173,6 +173,36 @@ class CleaningService:
         cleaned, dropped = self.clean_batch(records)
         return cleaned, len(dropped)
 
+    def rejects_free_mail(self, email: str | None) -> bool:
+        """設定是「免費信箱一律不收」，而這個正是免費信箱嗎？"""
+        return self.config.verifier.free_mail == "reject" and is_free_mail(email)
+
+    def screen_email(
+        self, raw: str | None
+    ) -> tuple[str | None, EmailVerdict, datetime | None]:
+        """一個信箱進資料庫前的所有關卡。回傳 ``(能存的信箱, 判定, 檢查時間)``。
+
+        不能存的信箱回 ``(None, EMPTY, None)``：機器產生的位址、設定為不收的
+        免費信箱、以及寄不到的（語法錯、拋棄式、網域不收信）。
+
+        每一條會寫入信箱的路（爬名錄、匯入、補抓、補齊）都走這一支，規則只有
+        這一份。
+        """
+        email = normalize_email(raw)
+        if email and is_tracking_address(email):
+            # 語法完全合法，所以語法檢查攔不住。見 is_tracking_address()。
+            log.info("略過機器產生的位址 {!r}", email)
+            return None, EmailVerdict.EMPTY, None
+        if self.rejects_free_mail(email):
+            log.info("略過個人信箱 {!r}", email)
+            return None, EmailVerdict.EMPTY, None
+
+        verdict, checked_at = self.verify_email(email)
+        if verdict in UNDELIVERABLE_VERDICTS:
+            log.info("略過寄不到的信箱 {!r}（{}）", email, verdict.value)
+            return None, EmailVerdict.EMPTY, None
+        return email, verdict, checked_at
+
     def verify_email(self, email: str | None) -> tuple[EmailVerdict, datetime | None]:
         """Grade an address from cheapest check to most expensive."""
         if not email:
@@ -207,6 +237,8 @@ class VerificationService:
         self.cleaner = CleaningService(self.config, self.mx)
         #: 這一趟清掉了幾個機器產生的位址。由 :meth:`_renormalize` 累加。
         self._tracking_removed = 0
+        #: 這一趟清掉了幾個寄不到、或設定為不收的個人信箱。
+        self._unusable_removed = 0
 
     def run(
         self,
@@ -224,6 +256,7 @@ class VerificationService:
         summary = VerifySummary()
         total = len(targets)
         self._tracking_removed = 0
+        self._unusable_removed = 0
 
         for index, company in enumerate(targets, start=1):
             summary.checked += 1
@@ -240,11 +273,24 @@ class VerificationService:
                 # 這個標記唯一的解除方式是把信箱改掉（見 CompanyRepository.update）。
                 verdict = EmailVerdict.BOUNCED
                 checked_at = None
-            if company.email_verdict != verdict.value:
-                company.email_verdict = verdict.value
+            if verdict in UNDELIVERABLE_VERDICTS:
+                # 跟收集端同一條規則：寄不到的信箱不留。統計照樣算進對應的
+                # 類別，使用者才看得出清掉的是哪一種。
+                log.info(
+                    "清掉寄不到的信箱 {!r}（{}，{}）",
+                    company.email, verdict.value, (company.company_name or "")[:30],
+                )
+                company.email = None
+                company.email_verdict = EmailVerdict.EMPTY.value
+                company.email_checked_at = None
+                self._unusable_removed += 1
                 changed = True
-            if checked_at is not None:
-                company.email_checked_at = checked_at
+            else:
+                if company.email_verdict != verdict.value:
+                    company.email_verdict = verdict.value
+                    changed = True
+                if checked_at is not None:
+                    company.email_checked_at = checked_at
 
             match verdict:
                 case EmailVerdict.VALID:
@@ -268,6 +314,7 @@ class VerificationService:
                 progress(index, total)
 
         summary.tracking_removed = self._tracking_removed
+        summary.unusable_removed = self._unusable_removed
         self.session.flush()
         log.info(
             "verified {} companies: {} valid, {} no-mx, {} bad syntax, {} empty,"
@@ -295,6 +342,13 @@ class VerificationService:
             )
             company.email = None
             self._tracking_removed += 1
+        if self.cleaner.rejects_free_mail(company.email):
+            log.info(
+                "清掉個人信箱 {!r}（{}）",
+                company.email, (company.company_name or "")[:30],
+            )
+            company.email = None
+            self._unusable_removed += 1
 
         updates = {
             "company_name": normalize_company_name(company.company_name)

@@ -282,16 +282,22 @@ def test_a_defunct_company_is_counted_so_the_user_hears_about_it(db_session):
     assert summary.defunct == 1
 
 
-def test_existing_details_are_not_overwritten(db_session):
-    """官方登記的負責人不一定是使用者談的窗口。使用者填過的東西不能被蓋掉。"""
-    company = _add(
-        db_session, tax_id="22099131", contact_person="陳採購", address="使用者填的地址"
-    )
+def test_the_registered_officer_takes_priority_over_an_existing_contact(db_session):
+    """開發信要找的是負責人。名錄上抓到的業務窗口讓位給登記的負責人。"""
+    company = _add(db_session, tax_id="22099131", contact_person="陳採購")
 
     enrich_registrations(fetcher=_Fetcher(TSMC_JSON))
 
     db_session.refresh(company)
-    assert company.contact_person == "陳採購"
+    assert company.contact_person == "魏哲家"
+
+
+def test_existing_address_is_not_overwritten(db_session):
+    company = _add(db_session, tax_id="22099131", address="使用者填的地址")
+
+    enrich_registrations(fetcher=_Fetcher(TSMC_JSON))
+
+    db_session.refresh(company)
     assert company.address == "使用者填的地址"
 
 

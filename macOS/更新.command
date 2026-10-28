@@ -131,6 +131,13 @@ if [ ! -x "$here/.venv/bin/python" ]; then
     wait_then_close
     exit 1
 fi
+if ! "$here/.venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 14) else 1)'; then
+    printf "\n新版本已經下載好了，但它需要 Python 3.14，這裡的 .venv 是舊版 Python 建的。\n"
+    printf "1. 到 https://www.python.org/downloads/ 安裝 Python 3.14\n"
+    printf "2. 雙擊同一個資料夾裡的「安裝.command」，它會重建 .venv，資料庫、附件與設定都不會動。\n"
+    wait_then_close
+    exit 1
+fi
 # 刻意不加 --upgrade。requirements.txt 寫的是「最低版本」，不加的話只會補上
 # 缺的套件、原本能跑的維持原樣；加了則是每一個套件都跳到最新版，那是比
 # 「更新 Roster」大得多的改動。

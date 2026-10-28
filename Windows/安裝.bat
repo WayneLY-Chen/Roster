@@ -45,16 +45,16 @@ REM ------------------------------------------------------------ Python
 echo [1/4] Checking Python...
 
 set "PY="
-for %%C in (py python) do (
+for %%C in ("py -3.14" "py" "python") do (
     if not defined PY (
-        %%C -c "import sys; sys.exit(0 if sys.version_info >= (3,12) else 1)" >nul 2>&1
-        if not errorlevel 1 set "PY=%%C"
+        %%~C -c "import sys; sys.exit(0 if sys.version_info >= (3,14) else 1)" >nul 2>&1
+        if not errorlevel 1 set "PY=%%~C"
     )
 )
 
 if not defined PY (
     echo.
-    echo  [ERROR] Python 3.12 or newer was not found.
+    echo  [ERROR] Python 3.14 or newer was not found.
     echo.
     echo  Install it from https://www.python.org/downloads/
     echo  IMPORTANT: tick "Add python.exe to PATH" in the installer.
@@ -70,6 +70,15 @@ for /f "delims=" %%V in ('%PY% --version') do echo       Using %%V
 REM -------------------------------------------------------------- venv
 echo.
 echo [2/4] Creating the virtual environment...
+REM  A .venv built by an older Python is rebuilt. It only holds downloaded
+REM  packages -- your database, attachments and settings live elsewhere.
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3,14) else 1)" >nul 2>&1
+    if errorlevel 1 (
+        echo       .venv was built by an older Python, rebuilding it
+        rmdir /s /q .venv
+    )
+)
 if exist ".venv\Scripts\python.exe" (
     echo       .venv already exists, skipping
 ) else (

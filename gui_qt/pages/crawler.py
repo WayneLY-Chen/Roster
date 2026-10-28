@@ -598,6 +598,11 @@ class CrawlerPage(BasePage):
                 f"　清掉 {summary.tracking_removed} 個機器產生的位址"
                 "（網頁原始碼裡的錯誤追蹤識別碼，長得像信箱但沒有人收信）。"
             )
+        if getattr(summary, "unusable_removed", 0):
+            self._append_log(
+                f"　清掉 {summary.unusable_removed} 個寄不到或不收的信箱"
+                "（語法錯誤、拋棄式、網域不收信，或設定為不收的個人信箱）。"
+            )
         self.status("驗證完成", "success")
         bump_data_version()
 

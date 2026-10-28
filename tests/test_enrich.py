@@ -17,6 +17,7 @@ from crawler.enrich import (
     SiteContacts,
     contacts_from_page,
     emails_from_page,
+    find_email_for_site,
     harvest_site_contacts,
     page_mentions_company,
 )
@@ -287,3 +288,60 @@ def test_without_a_name_to_confirm_nothing_is_rejected():
     fetcher = _Fetcher({BASE: "<html><body>02-2723-1234</body></html>"})
     contacts, _ = harvest_site_contacts(BASE, fetcher)
     assert contacts.confirmed is True
+
+
+# --------------------------------------------------------- 免費信箱降為備選
+
+#: 首頁只放了老闆的 gmail，聯絡頁才有公司網域的信箱。
+GMAIL_HOME = """
+<html><body>
+  <h1>測試精密機械股份有限公司</h1>
+  <a href="mailto:boss@gmail.com">boss@gmail.com</a>
+  <a href="/contact">聯絡我們</a>
+</body></html>
+"""
+COMPANY_CONTACT = '<html><body><a href="mailto:sales@example.com.tw">sales@example.com.tw</a></body></html>'
+
+
+def test_a_company_domain_email_ranks_before_free_mail():
+    html = (
+        '<a href="mailto:boss@gmail.com">x</a>'
+        '<a href="mailto:a@ms12.hinet.net">x</a>'
+        '<a href="mailto:sales@example.com.tw">x</a>'
+    )
+    assert emails_from_page(html, BASE)[0] == "sales@example.com.tw"
+
+
+def test_free_mail_on_the_homepage_does_not_stop_the_search():
+    fetcher = _Fetcher({BASE: GMAIL_HOME, BASE + "contact": COMPANY_CONTACT})
+
+    contacts, _ = harvest_site_contacts(BASE, fetcher, wanted=["email"])
+    email, _ = find_email_for_site(BASE, fetcher)
+
+    assert contacts.email == "sales@example.com.tw"
+    assert email == "sales@example.com.tw"
+
+
+def test_free_mail_is_kept_when_it_is_all_the_site_has():
+    """很多小公司沒有自己的網域。只有 gmail 時就用 gmail，不要讓它變成沒有信箱。"""
+    fetcher = _Fetcher({BASE: GMAIL_HOME})
+
+    contacts, _ = harvest_site_contacts(BASE, fetcher, wanted=["email"])
+    email, _ = find_email_for_site(BASE, fetcher)
+
+    assert contacts.email == "boss@gmail.com"
+    assert email == "boss@gmail.com"
+
+
+def test_free_mail_is_ignored_when_set_to_reject(tmp_config, monkeypatch):
+    import crawler.enrich as enrich_module
+
+    config = tmp_config.model_copy(
+        update={"verifier": tmp_config.verifier.model_copy(update={"free_mail": "reject"})}
+    )
+    monkeypatch.setattr(enrich_module, "get_config", lambda: config)
+    fetcher = _Fetcher({BASE: GMAIL_HOME})
+
+    email, _ = find_email_for_site(BASE, fetcher)
+
+    assert email is None

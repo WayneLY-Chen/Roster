@@ -735,7 +735,9 @@ def test_create_db_engine_builds_for_an_in_memory_sqlite_url(tmp_config):
 
     engine = session_module.create_db_engine(tmp_config, url="sqlite:///:memory:")
     try:
-        assert str(engine.url) == "sqlite:///:memory:"
+        # 比 database 欄位，不比 str(url)：SQLAlchemy 2.1 會把冒號編碼成 %3A。
+        assert engine.url.drivername == "sqlite"
+        assert engine.url.database == ":memory:"
     finally:
         engine.dispose()
 

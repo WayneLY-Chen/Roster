@@ -23,6 +23,10 @@ from core.schemas import CompanyView
 
 _PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
+#: 代入純文字樣板的值裡，任何長得像 HTML 標籤的片段（``<a href=…>``、``</b>``）。
+#: 只認「``<`` 後面緊接英文字母或 ``/``」，所以 ``<3``、``< 100`` 不受影響。
+_VALUE_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
+
 # Placeholder name -> Chinese description shown in the GUI's helper panel.
 _PLACEHOLDERS: dict[str, str] = {
     "company_name": "公司名稱",
@@ -102,7 +106,11 @@ def render(template: str, company: CompanyView | dict) -> str:
 
     def _replace(match: re.Match[str]) -> str:
         value = fields.get(match.group(1), "")
-        return html.escape(value) if escape_values else value
+        if escape_values:
+            return html.escape(value)
+        # 純文字樣板：代入的值多半是名錄上爬來的。值裡的標籤不拿掉的話，
+        # 寄出時會被當成 HTML 信，等於讓刊登者在你的信裡放連結或追蹤圖片。
+        return _VALUE_TAG_RE.sub("", value)
 
     return _PLACEHOLDER_RE.sub(_replace, template)
 

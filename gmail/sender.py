@@ -11,6 +11,7 @@ resend windows) belongs to :mod:`gmail.campaign`, not here.
 from __future__ import annotations
 
 import smtplib
+import ssl
 from email.message import EmailMessage as MimeMessage
 from email.utils import formataddr, make_msgid
 from pathlib import Path
@@ -63,7 +64,9 @@ class SmtpSender:
             connection = smtplib.SMTP(self.settings.smtp_host, self.settings.smtp_port, timeout=30)
             connection.ehlo()
             if self.settings.use_tls:
-                connection.starttls()
+                # 一定要傳 context。不傳的話 smtplib 用的是**不驗證憑證**的
+                # 預設值，公共 Wi-Fi 上的中間人就能拿到應用程式密碼。
+                connection.starttls(context=ssl.create_default_context())
                 connection.ehlo()
             connection.login(address, password)
         except smtplib.SMTPAuthenticationError as exc:

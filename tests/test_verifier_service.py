@@ -85,11 +85,42 @@ def test_clean_sets_invalid_syntax_is_never_reached_for_clean_alone(tmp_config):
     assert cleaned.email_verdict == EmailVerdict.EMPTY
 
 
-def test_clean_sets_disposable_verdict(tmp_config):
+def test_clean_drops_a_disposable_email(tmp_config):
+    """拋棄式信箱寄了也沒有人收，直接不存。公司本身照樣留著。"""
     service = CleaningService(tmp_config)
     cleaned = service.clean(RawCompany(company_name="Foo Co", email="a@mailinator.com"))
-    assert cleaned.email == "a@mailinator.com"
-    assert cleaned.email_verdict == EmailVerdict.DISPOSABLE
+    assert cleaned is not None
+    assert cleaned.email is None
+    assert cleaned.email_verdict == EmailVerdict.EMPTY
+
+
+def test_clean_drops_an_email_whose_domain_takes_no_mail(tmp_config):
+    config = tmp_config.model_copy(
+        update={"verifier": tmp_config.verifier.model_copy(update={"check_mx": True})}
+    )
+    service = CleaningService(config, mx_checker=StubMXChecker({"dead.tw": False}))
+    cleaned = service.clean(RawCompany(company_name="Foo Co", email="a@dead.tw"))
+    assert cleaned.email is None
+    assert cleaned.email_verdict == EmailVerdict.EMPTY
+
+
+def test_clean_keeps_free_mail_by_default(tmp_config):
+    """很多小公司沒有自己的網域，gmail 就是它們唯一的信箱。"""
+    service = CleaningService(tmp_config)
+    cleaned = service.clean(RawCompany(company_name="Foo Co", email="foo@gmail.com"))
+    assert cleaned.email == "foo@gmail.com"
+
+
+def test_clean_drops_free_mail_when_set_to_reject(tmp_config):
+    config = tmp_config.model_copy(
+        update={"verifier": tmp_config.verifier.model_copy(update={"free_mail": "reject"})}
+    )
+    service = CleaningService(config)
+    for address in ("foo@gmail.com", "foo@ms12.hinet.net", "foo@yahoo.com.tw"):
+        cleaned = service.clean(RawCompany(company_name="Foo Co", email=address))
+        assert cleaned.email is None, address
+    kept = service.clean(RawCompany(company_name="Foo Co", email="sales@foo.com.tw"))
+    assert kept.email == "sales@foo.com.tw"
 
 
 def test_clean_many_counts_rejected_and_cleaned(tmp_config):
@@ -223,12 +254,34 @@ def test_verification_service_run_transitions_verdicts(db_session, tmp_config):
     assert summary.invalid_syntax == 1
     assert summary.empty == 1
 
+    assert summary.unusable_removed == 3
+
     assert good.email_verdict == EmailVerdict.VALID.value
-    assert dead.email_verdict == EmailVerdict.NO_MX.value
-    assert disposable.email_verdict == EmailVerdict.DISPOSABLE.value
-    assert invalid.email_verdict == EmailVerdict.INVALID_SYNTAX.value
-    assert empty.email_verdict == EmailVerdict.EMPTY.value
     assert good.email_checked_at is not None
+    assert empty.email_verdict == EmailVerdict.EMPTY.value
+    # 寄不到的三種：統計照樣分類，但信箱本身清掉。
+    for company in (dead, disposable, invalid):
+        assert company.email is None
+        assert company.email_verdict == EmailVerdict.EMPTY.value
+
+
+def test_verification_service_clears_free_mail_only_when_set_to_reject(db_session, tmp_config):
+    repo = CompanyRepository(db_session)
+    company = repo.create(
+        company_name="Gmail Co", name_key="gmail", dedupe_key="mail:a@gmail.com",
+        email="a@gmail.com",
+    )
+    db_session.commit()
+
+    VerificationService(db_session, config=tmp_config).run()
+    assert company.email == "a@gmail.com"
+
+    config = tmp_config.model_copy(
+        update={"verifier": tmp_config.verifier.model_copy(update={"free_mail": "reject"})}
+    )
+    summary = VerificationService(db_session, config=config).run()
+    assert company.email is None
+    assert summary.unusable_removed == 1
 
 
 def test_verification_service_mx_unavailable_keeps_unknown_not_false_negative(

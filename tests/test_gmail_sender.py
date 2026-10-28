@@ -47,8 +47,8 @@ class FakeSMTP:
     def ehlo(self):
         pass
 
-    def starttls(self):
-        pass
+    def starttls(self, *, context=None):
+        self.tls_context = context
 
     def login(self, address, password):  # noqa: ANN001
         if password != "good-app-password":
@@ -569,3 +569,33 @@ def test_unknown_mime_type_falls_back_to_octet_stream(mail_config, monkeypatch):
     part = next(iter(FakeSMTP.instances[0].sent_messages[0].iter_attachments()))
     assert part.get_filename() == "怪檔.qwerty"
     assert part.get_content_type() == "application/octet-stream"
+
+
+def test_starttls_verifies_the_server_certificate(mail_config, monkeypatch):
+    """不驗證憑證的話，公共 Wi-Fi 上的中間人就能拿到應用程式密碼。"""
+    import ssl
+
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", FakeSMTP)
+    SmtpSender(mail_config).connect()
+
+    context = FakeSMTP.instances[-1].tls_context
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname
+
+
+def test_scraped_tags_cannot_turn_a_plain_text_template_into_html():
+    """名錄上的「主要產品」寫 <a href=…>，不能讓純文字信變成夾帶連結的 HTML 信。"""
+    from gmail.richtext import looks_like_html
+
+    rendered = templates.render(
+        "您好，看到貴公司的產品：{products}",
+        {"company_name": "測試", "products": '<a href="https://phish.example">螺絲</a>'},
+    )
+
+    assert rendered == "您好，看到貴公司的產品：螺絲"
+    assert not looks_like_html(rendered)
+
+
+def test_plain_text_values_keep_ordinary_angle_brackets():
+    rendered = templates.render("規格：{products}", {"company_name": "測試", "products": "孔徑 < 3mm"})
+    assert rendered == "規格：孔徑 < 3mm"

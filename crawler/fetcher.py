@@ -32,6 +32,12 @@ from core.config import AppConfig, get_config
 from core.constants import LogCategory
 from core.errors import CrawlError, RobotsDisallowedError
 from core.logging_setup import get_logger
+from crawler.netguard import (
+    PrivateAddressError,
+    ensure_public_url,
+    guard_httpx_request,
+    is_public_url,
+)
 from crawler.robots import RobotsPolicy
 
 log = get_logger(LogCategory.CRAWL)
@@ -768,6 +774,7 @@ class HttpxFetcher(BaseFetcher):
         self._client = client or httpx.Client(
             timeout=self.config.crawler.request_timeout,
             follow_redirects=True,
+            event_hooks={"request": [guard_httpx_request]},
             headers={
                 "User-Agent": self.user_agent,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -864,6 +871,19 @@ class HttpxFetcher(BaseFetcher):
         super().close()
 
 
+#: 瀏覽器回報「請求被攔下」時錯誤訊息裡的字樣。
+_BLOCKED_BY_GUARD = "ERR_BLOCKED_BY_CLIENT"
+
+
+def _guard_browser_request(route: Any) -> None:
+    """Playwright 的 route handler：指向內網或本機的請求一律攔下。"""
+    if is_public_url(route.request.url):
+        route.continue_()
+    else:
+        log.warning("略過指向內網或本機的網址：{}", route.request.url)
+        route.abort("blockedbyclient")
+
+
 class PlaywrightFetcher(BaseFetcher):
     """Headless-browser fetcher for JavaScript-rendered listings.
 
@@ -898,6 +918,8 @@ class PlaywrightFetcher(BaseFetcher):
             locale="zh-TW",
         )
         self._context.set_default_navigation_timeout(self._settings.nav_timeout_ms)
+        # 頁面本身、轉址、頁面裡的圖片與腳本，每一個請求都要過內網檢查。
+        self._context.route("**/*", _guard_browser_request)
 
     def _fetch_once(
         self,
@@ -921,6 +943,7 @@ class PlaywrightFetcher(BaseFetcher):
                 "Playwright 引擎不支援 method='POST'；此來源請改用 engine: httpx"
             )
 
+        ensure_public_url(url)
         page = self._context.new_page()
         try:
             response = page.goto(url, wait_until=self._settings.wait_until)
@@ -945,6 +968,9 @@ class PlaywrightFetcher(BaseFetcher):
         except PlaywrightTimeout as exc:
             raise TransientFetchError(f"timeout loading {url}") from exc
         except PlaywrightError as exc:
+            if _BLOCKED_BY_GUARD in str(exc):
+                # 轉址到內網被 _guard_browser_request 擋下。重試也一樣會被擋。
+                raise PrivateAddressError(url) from exc
             raise TransientFetchError(f"browser error loading {url}: {exc}") from exc
         finally:
             page.close()

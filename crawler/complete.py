@@ -73,7 +73,13 @@ from core.config import AppConfig, get_config
 from core.constants import LogCategory
 from core.errors import CrawlError, RobotsDisallowedError
 from core.logging_setup import get_logger
-from crawler.enrich import HARVESTABLE_FIELDS, SiteContacts, harvest_site_contacts
+from crawler.enrich import (
+    HARVESTABLE_FIELDS,
+    SiteContacts,
+    email_screener,
+    harvest_site_contacts,
+    store_email,
+)
 from crawler.fetcher import BaseFetcher, build_fetcher
 from crawler.registry import (
     RegistryBusy,
@@ -91,6 +97,7 @@ from database.models import now
 from database.repository import CompanyRepository
 from database.session import session_scope
 from verifier.normalize import company_name_key, comparison_text, normalize_website
+from verifier.service import CleaningService
 
 log = get_logger(LogCategory.CRAWL)
 
@@ -321,9 +328,9 @@ def _run_registry(
     :func:`crawler.registry.enrich_registrations` 的行為一致——否則每一次
     補完都會把同一批查不到的再問一遍。
 
-    :func:`~crawler.registry.apply_registration` 負責登記狀態、資本額與那些
-    只該原樣留著的自由欄位；三個「使用者也會自己填」的欄位（統編、地址、
-    負責人）在這裡另外處理，因為只有這裡知道 ``overwrite``——那一支被
+    :func:`~crawler.registry.apply_registration` 負責登記狀態、資本額、負責人
+    與那些只該原樣留著的自由欄位；兩個「使用者也會自己填」的欄位（統編、
+    地址）在這裡另外處理，因為只有這裡知道 ``overwrite``——那一支被
     ``registry`` 指令共用，它永遠只補空的。
     """
     tax_id = (company.tax_id or "").strip()
@@ -343,10 +350,11 @@ def _run_registry(
     }
 
     changed = apply_registration(company, registration)
+    if was_empty["contact_person"] and company.contact_person:
+        summary.count("contact_person")
     for name, value in (
         ("tax_id", registration.tax_id),
         ("address", registration.location),
-        ("contact_person", registration.responsible_name),
     ):
         changed |= _fill(company, name, value, overwrite)
         if was_empty[name] and (getattr(company, name, None) or "").strip():
@@ -459,6 +467,7 @@ def complete_companies(
     try:
         with session_scope() as session:
             repo = CompanyRepository(session)
+            cleaner = email_screener(config, session)
             targets = _targets(repo, company_ids, wanted_fields, overwrite, limit)
             summary.considered = len(targets)
 
@@ -476,7 +485,7 @@ def complete_companies(
                 try:
                     changed, deferred = _complete_one(
                         company, wanted_fields, overwrite, fetcher,
-                        provider, summary, settings, search_exhausted,
+                        provider, summary, settings, cleaner, search_exhausted,
                     )
                 except RobotsDisallowedError as exc:
                     summary.skipped_robots += 1
@@ -593,6 +602,7 @@ def _complete_one(
     provider: SearchProvider | None,
     summary: CompletionSummary,
     settings,
+    cleaner: CleaningService,
     search_exhausted: bool = False,
 ) -> tuple[bool, bool]:
     """一家公司的三關。回傳 ``(有沒有改到東西, 這一家算不算沒跑過)``。
@@ -680,12 +690,23 @@ def _complete_one(
                 summary.count("website")
                 changed = True
 
-        for field_name in ("email", "phone", "fax", "contact_person"):
-            if field_name not in site_wanted:
-                continue
-            if _fill(company, field_name, contacts.get(field_name), overwrite):
+        if "email" in site_wanted and (overwrite or not (company.email or "").strip()):
+            if store_email(company, contacts.email, cleaner):
+                summary.count("email")
+                changed = True
+        for field_name in ("phone", "fax"):
+            if field_name in site_wanted and _fill(
+                company, field_name, contacts.get(field_name), overwrite
+            ):
                 summary.count(field_name)
                 changed = True
+        # 網站上的聯絡人只補空的，``overwrite`` 也不蓋：商業司登記的負責人
+        # 優先，官網上的業務窗口只在查不到登記時才用。
+        if "contact_person" in site_wanted and _fill(
+            company, "contact_person", contacts.contact_person, overwrite=False
+        ):
+            summary.count("contact_person")
+            changed = True
         return changed, deferred
 
     # 讀到了，但每一個都證明不是這家公司的網站。

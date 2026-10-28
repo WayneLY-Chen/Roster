@@ -122,6 +122,10 @@ fi
 say "3/3  Installing anything newly required"
 [ -x "$root/.venv/bin/python" ] || fail "The new version is downloaded, but
 there is no .venv here yet. Run ./Linux/install.sh to finish."
+"$root/.venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 14) else 1)' \
+    || fail "The new version is downloaded, but it needs Python 3.14 and the
+.venv here was built by an older one. Install Python 3.14, then run
+./Linux/install.sh -- it rebuilds .venv without touching your data."
 
 # No --upgrade on purpose. requirements.txt uses lower bounds, so a plain
 # install adds what is missing and leaves working versions alone; with

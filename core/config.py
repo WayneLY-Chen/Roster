@@ -582,6 +582,11 @@ class VerifierSection(_Base):
     mx_cache_hours: int = Field(default=168, ge=0)
     reject_disposable: bool = True
     disposable_domains: list[str] = Field(default_factory=list)
+    #: gmail、hinet 這類免費信箱怎麼處理。見 :data:`verifier.validators.FREE_MAIL_DOMAINS`。
+    #:
+    #: ``fallback`` 公司網域的信箱優先，找不到才用免費信箱。
+    #: ``reject``   免費信箱一律不收。
+    free_mail: Literal["fallback", "reject"] = "fallback"
 
     @field_validator("disposable_domains")
     @classmethod

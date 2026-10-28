@@ -288,6 +288,7 @@ def verify(
         ("Invalid syntax", summary.invalid_syntax),
         ("Disposable", summary.disposable),
         ("Machine-generated (removed)", summary.tracking_removed),
+        ("Undeliverable / free mail (removed)", summary.unusable_removed),
         ("No email", summary.empty),
         ("Records updated", summary.updated),
     ):

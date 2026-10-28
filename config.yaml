@@ -94,6 +94,13 @@ verifier:
   mx_timeout: 5.0
   mx_cache_hours: 168      # re-check a domain's MX at most weekly
   reject_disposable: true
+  # gmail、yahoo、hinet 這類免費信箱怎麼處理（語法錯、拋棄式、網域不收信的
+  # 信箱一律不存，不受這個設定影響）。
+  #
+  #   fallback  公司網域的信箱優先；網站上只找得到免費信箱時才用它。預設。
+  #             很多小公司沒有自己的網域，全部排除會讓它們變成沒有信箱。
+  #   reject    免費信箱一律不存。「重新驗證」也會把已經存進去的清掉。
+  free_mail: "fallback"
   disposable_domains:
     - "mailinator.com"
     - "10minutemail.com"

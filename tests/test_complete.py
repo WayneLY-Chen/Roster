@@ -311,7 +311,7 @@ def test_the_registered_officer_fills_an_empty_contact_person(
 
 
 def test_existing_values_are_never_overwritten(db_session, patch_config):
-    """這一條破了整個功能就不能用了。"""
+    """這一條破了整個功能就不能用了。聯絡人是唯一的例外，見最後一行。"""
     company = Company(
         company_name="台灣積體電路製造股份有限公司",
         dedupe_key="name:tsmc",
@@ -329,8 +329,9 @@ def test_existing_values_are_never_overwritten(db_session, patch_config):
 
     db_session.refresh(company)
     assert company.address == "使用者自己填的地址"
-    assert company.contact_person == "我認識的窗口"
     assert company.email == "my-contact@tsmc.example"
+    # 唯一的例外：聯絡人以商業司登記的負責人為準。
+    assert company.contact_person == "魏哲家"
     # 空著的仍然補得到。
     assert company.tax_id == "22099131"
 
@@ -734,3 +735,42 @@ def test_the_summary_says_how_much_is_left(db_session, patch_config):
     # 補不到東西，所以四家都還「缺欄位」——但只有三家還沒跑過。
     assert summary.remaining == 4
     assert summary.remaining_untried == 3
+
+
+def test_the_website_contact_never_replaces_the_registered_officer(db_session, patch_config):
+    """連 ``overwrite`` 都不行：官網上的窗口只在查不到登記時才用。"""
+    company = Company(company_name="台灣積體電路製造股份有限公司", dedupe_key="name:tsmc")
+    db_session.add(company)
+    db_session.commit()
+
+    fetcher = _Fetcher({"https://tsmc.example": OFFICIAL_PAGE}, registry_body=TSMC_BY_NAME)
+    complete_companies(
+        fetcher=fetcher,
+        provider=_Provider([SearchHit("https://tsmc.example")]),
+        overwrite=True,
+    )
+
+    db_session.refresh(company)
+    assert company.contact_person == "魏哲家"
+
+
+def test_a_harvested_email_is_stored_with_its_own_verdict(db_session, patch_config):
+    """存進去的信箱不能帶著「沒有信箱」那個舊判定。"""
+    company = Company(
+        company_name="台灣積體電路製造股份有限公司",
+        dedupe_key="name:tsmc",
+        website="https://tsmc.example",
+        email_verdict="Empty",
+    )
+    db_session.add(company)
+    db_session.commit()
+
+    complete_companies(
+        fetcher=_Fetcher({"https://tsmc.example": OFFICIAL_PAGE}, registry_body=TSMC_BY_NAME),
+        provider=_Provider(),
+        fields=["email"],
+    )
+
+    db_session.refresh(company)
+    assert company.email == "info@tsmc.example"
+    assert company.email_verdict == "Unknown"

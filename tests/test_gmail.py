@@ -287,7 +287,7 @@ def _connected_client(monkeypatch, tmp_config, fake=None):
     monkeypatch.setenv("GMAIL_ADDRESS", "me@example.com")
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
     fake = fake or FakeIMAP(None, None)
-    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port: fake)
+    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port, **_: fake)
     client = GmailClient(tmp_config)
     client.connect()
     return client, fake
@@ -315,7 +315,7 @@ def test_gmail_client_connect_wraps_imap_login_error(monkeypatch, tmp_config):
         def login(self, address, password):
             raise imaplib.IMAP4.error("bad credentials")
 
-    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port: FailingIMAP(host, port))
+    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port, **_: FailingIMAP(host, port))
     client = GmailClient(tmp_config)
     with pytest.raises(GmailError):
         client.connect()
@@ -325,7 +325,7 @@ def test_gmail_client_connect_wraps_os_error(monkeypatch, tmp_config):
     monkeypatch.setenv("GMAIL_ADDRESS", "me@example.com")
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
 
-    def boom(host, port):
+    def boom(host, port, **_):
         raise OSError("network unreachable")
 
     monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", boom)
@@ -466,7 +466,7 @@ def test_gmail_client_context_manager_connects_and_closes(monkeypatch, tmp_confi
     monkeypatch.setenv("GMAIL_ADDRESS", "me@example.com")
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
     fake = FakeIMAP(None, None)
-    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port: fake)
+    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port, **_: fake)
 
     with GmailClient(tmp_config) as client:
         assert client._connection is fake
@@ -477,7 +477,7 @@ def test_gmail_session_context_manager(monkeypatch, tmp_config):
     monkeypatch.setenv("GMAIL_ADDRESS", "me@example.com")
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
     fake = FakeIMAP(None, None)
-    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port: fake)
+    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", lambda host, port, **_: fake)
 
     with gmail_session(tmp_config) as client:
         assert client._connection is fake
@@ -681,3 +681,23 @@ def test_two_people_from_the_same_company_show_as_one_new_and_one_merge(
         "併入「宏達精密機械股份有限公司」",
     ]
 
+
+
+def test_imap_connection_verifies_the_server_certificate(tmp_config, monkeypatch):
+    """不驗證憑證的話，公共 Wi-Fi 上的中間人就能拿到應用程式密碼。"""
+    import ssl
+
+    monkeypatch.setenv("GMAIL_ADDRESS", "me@example.com")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
+    seen = {}
+
+    def capture(host, port, ssl_context=None):
+        seen["context"] = ssl_context
+        raise OSError("stop here")
+
+    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", capture)
+    with pytest.raises(GmailError):
+        GmailClient(tmp_config).connect()
+
+    assert seen["context"].verify_mode == ssl.CERT_REQUIRED
+    assert seen["context"].check_hostname

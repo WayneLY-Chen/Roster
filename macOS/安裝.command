@@ -39,12 +39,12 @@ fi
 say "1/5  檢查 Python"
 
 python_bin=""
-for candidate in python3.14 python3.13 python3.12 python3; do
+for candidate in python3.14 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
         version="$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "0.0")"
         major="${version%%.*}"
         minor="${version##*.}"
-        if [ "$major" -eq 3 ] && [ "$minor" -ge 12 ]; then
+        if [ "$major" -eq 3 ] && [ "$minor" -ge 14 ]; then
             python_bin="$candidate"
             break
         fi
@@ -52,11 +52,11 @@ for candidate in python3.14 python3.13 python3.12 python3; do
 done
 
 if [ -z "$python_bin" ]; then
-    fail "找不到 Python 3.12 或更新的版本。
+    fail "找不到 Python 3.14 或更新的版本。
 
 macOS 內建的 Python 版本通常太舊。請先安裝：
   * 到 https://www.python.org/downloads/ 下載安裝，或
-  * 已經有 Homebrew 的話執行：brew install python@3.13
+  * 已經有 Homebrew 的話執行：brew install python@3.14
 
 裝好之後再點一次這個檔案。"
 fi
@@ -64,6 +64,13 @@ printf "   使用 %s（%s）\n" "$python_bin" "$("$python_bin" --version)"
 
 # ------------------------------------------------------------------ venv
 say "2/5  建立虛擬環境"
+# 舊版 Python 建的 .venv 直接重建。裡面只有下載的套件，資料庫、附件與設定
+# 都不在這裡。
+if [ -x "$here/.venv/bin/python" ] && ! "$here/.venv/bin/python" -c \
+        'import sys; sys.exit(0 if sys.version_info >= (3, 14) else 1)'; then
+    printf "   .venv 是舊版 Python 建的，重建\n"
+    rm -rf "$here/.venv"
+fi
 if [ -x "$here/.venv/bin/python" ]; then
     printf "   .venv 已存在，跳過\n"
 else

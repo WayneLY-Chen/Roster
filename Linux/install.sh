@@ -26,20 +26,20 @@ printf "Install location: %s\n" "$root"
 say "1/4  Checking Python"
 
 python_bin=""
-for candidate in python3.13 python3.12 python3; do
+for candidate in python3.14 python3; do
     command -v "$candidate" >/dev/null 2>&1 || continue
     version="$("$candidate" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "0.0")"
-    if [ "${version%%.*}" -eq 3 ] && [ "${version##*.}" -ge 12 ]; then
+    if [ "${version%%.*}" -eq 3 ] && [ "${version##*.}" -ge 14 ]; then
         python_bin="$candidate"
         break
     fi
 done
 
-[ -n "$python_bin" ] || fail "Python 3.12 or newer was not found.
+[ -n "$python_bin" ] || fail "Python 3.14 or newer was not found.
 
 Install it with your distribution's package manager, for example:
-    sudo apt install python3.13 python3.13-venv     # Debian / Ubuntu
-    sudo dnf install python3.13                     # Fedora
+    sudo apt install python3.14 python3.14-venv     # Debian / Ubuntu
+    sudo dnf install python3.14                     # Fedora
 
 Then run this script again."
 
@@ -47,6 +47,13 @@ printf "   Using %s (%s)\n" "$python_bin" "$("$python_bin" --version)"
 
 # ------------------------------------------------------------------ venv
 say "2/4  Creating the virtual environment"
+# A .venv built by an older Python is rebuilt. It only holds downloaded
+# packages -- the database, attachments and settings live elsewhere.
+if [ -x "$root/.venv/bin/python" ] && ! "$root/.venv/bin/python" -c \
+        'import sys; sys.exit(0 if sys.version_info >= (3, 14) else 1)'; then
+    printf "   .venv was built by an older Python, rebuilding it\n"
+    rm -rf "$root/.venv"
+fi
 if [ -x "$root/.venv/bin/python" ]; then
     printf "   .venv already exists, skipping\n"
 else

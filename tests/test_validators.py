@@ -7,6 +7,7 @@ import pytest
 from verifier.validators import (
     email_domain,
     is_disposable_email,
+    is_free_mail,
     is_role_address,
     is_tracking_address,
     is_valid_company_name,
@@ -248,3 +249,12 @@ def test_machine_generated_addresses_are_recognised(address):
 )
 def test_a_real_address_is_left_alone(address):
     assert not is_tracking_address(address)
+
+
+def test_free_mail_domains_include_isp_subdomains():
+    assert is_free_mail("a@gmail.com")
+    assert is_free_mail("a@ms12.hinet.net")
+    assert is_free_mail("A@Yahoo.com.tw")
+    assert not is_free_mail("sales@tsmc.com.tw")
+    # 只比網域結尾，不能被名字裡剛好有 gmail 的公司網域騙到。
+    assert not is_free_mail("a@notgmail.com")

@@ -22,6 +22,7 @@ import httpx
 
 from core.constants import LogCategory
 from core.logging_setup import get_logger
+from crawler.netguard import guard_httpx_request
 
 log = get_logger(LogCategory.CRAWL)
 
@@ -117,6 +118,7 @@ class RobotsPolicy:
             self._client = httpx.Client(
                 timeout=self.timeout,
                 follow_redirects=True,
+                event_hooks={"request": [guard_httpx_request]},
                 headers={"User-Agent": self.user_agent},
             )
         return self._client
