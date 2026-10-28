@@ -161,3 +161,84 @@ def test_a_crawl_started_from_the_page_runs_the_real_pipeline(client):
     assert state["error"] is None
     assert state["results"][0]["source"] == "sample"
     assert state["results"][0]["records_new"] > 0
+
+
+# ------------------------------------------------------------- 標籤篩選
+
+
+def test_the_tag_filter_narrows_the_list_and_the_export(client, db_session):
+    repo = CompanyRepository(db_session)
+    first = repo.search()[-1]
+    repo.set_tags(first.id, ["客戶"])
+    db_session.commit()
+    _log_in(client)
+
+    page = client.get("/", params={"tag": "客戶"}).text
+    assert first.company_name in page
+    assert page.count('class="company"') == 1
+
+    body = client.get("/export", params={"format": "csv", "tag": "客戶"}).content.decode("utf-8-sig")
+    assert first.company_name in body
+    assert body.strip().count("\n") == 1  # 標題列 + 一家
+
+
+# ------------------------------------------------------------- Gmail 標籤
+
+
+@pytest.fixture
+def gmail(monkeypatch):
+    from tests.test_gmail_labels import ME, FakeGmail
+
+    fake = FakeGmail()
+    monkeypatch.setattr("gmail.client.imaplib.IMAP4_SSL", fake)
+    monkeypatch.setenv("GMAIL_ADDRESS", ME)
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
+    return fake
+
+
+def test_the_gmail_page_lists_labels_and_classifies(client, gmail, db_session):
+    gmail.add(1, "sales@precision.com.tw", "me@mycompany.com.tw", labels=("客戶",))
+    _log_in(client)
+
+    assert "Gmail 標籤" in client.get("/gmail").text
+    assert client.get("/api/gmail/labels").json() == {"labels": ["供應商", "客戶"]}
+
+    scan = client.post("/api/gmail/classify/scan", json={"label": "客戶", "limit": 50}).json()
+    assert [row["company_name"] for row in scan["rows"]] == ["測試精密機械股份有限公司"]
+
+    applied = client.post("/api/gmail/classify/apply", json={"indices": [0]}).json()
+    assert "1 家" in applied["summary"]
+    assert "客戶" in client.get("/", params={"tag": "客戶"}).text
+
+
+def test_applying_without_a_preview_is_refused(client, gmail):
+    _log_in(client)
+    response = client.post("/api/gmail/classify/apply", json={"indices": [0]})
+    assert response.status_code == 409
+
+
+def test_sync_preview_does_not_touch_gmail(client, gmail, db_session):
+    repo = CompanyRepository(db_session)
+    company = next(c for c in repo.search() if c.email)
+    repo.set_tags(company.id, ["VIP"])
+    db_session.commit()
+    gmail.add(1, company.email, "me@mycompany.com.tw")
+    _log_in(client)
+
+    preview = client.post("/api/gmail/sync", json={"tags": True, "status": False}).json()
+
+    assert preview["rows"] == [{"label": "名單匠/VIP", "companies": 1, "messages": 1}]
+    assert gmail.writes == []
+
+
+def test_gmail_errors_are_explained_not_crashed(client, monkeypatch):
+    """還沒設定 Gmail 時，畫面上要看得到原因，不是一個 500。"""
+    monkeypatch.delenv("GMAIL_ADDRESS", raising=False)
+    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+    monkeypatch.setattr("core.credentials.get_secret", lambda _name: "")
+    _log_in(client)
+
+    response = client.get("/api/gmail/labels")
+
+    assert response.status_code == 400
+    assert "Gmail" in response.json()["detail"]

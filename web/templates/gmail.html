@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Gmail 標籤 - {{ app_name }}{% endblock %}
+{% block content %}
+<section class="card">
+  <h1 class="card-title">Gmail 標籤</h1>
+  <p class="muted lead">
+    讓 Gmail 的標籤跟名單匠的分類互通。每一步都是先預覽、你看過再按下去才會寫入。
+    寫回 Gmail 時<strong>只會新增標籤</strong>：不刪信、不搬信、不改已讀，全部放在「名單匠/」底下，
+    不要了在 Gmail 裡把那一層刪掉就乾淨。
+  </p>
+  <div class="toolbar">
+    <button class="button" id="load-labels" type="button">讀取我的 Gmail 標籤</button>
+    <label class="select">
+      <span>標籤</span>
+      <select id="label" disabled><option value="">先讀取標籤</option></select>
+    </label>
+    <label class="select">
+      <span>最多看</span>
+      <input class="number" id="limit" type="number" min="10" max="2000" step="10" value="200">
+      <span>封</span>
+    </label>
+  </div>
+  <div class="notice" id="labels-message" hidden></div>
+</section>
+
+<section class="card" data-panel="classify">
+  <h2 class="card-title">用標籤分類名單裡的公司</h2>
+  <p class="muted">看這個標籤裡的信，寄件者或收件者是名單裡的公司，就替它貼上同名的標籤。原本的標籤都會留著。</p>
+  <div class="toolbar">
+    <button class="button" data-action="scan" type="button" disabled>預覽</button>
+    <button class="button primary" data-action="apply" type="button" disabled>貼上標籤</button>
+  </div>
+  <div class="notice" data-role="message" hidden></div>
+  <div class="table-wrap" hidden>
+    <table class="table">
+      <thead><tr><th class="check"><input type="checkbox" data-role="all" checked aria-label="全選"></th><th>公司</th><th>對上的地址</th><th>狀態</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card" data-panel="harvest">
+  <h2 class="card-title">從標籤挖新公司</h2>
+  <p class="muted">從這個標籤裡的信件簽名檔挖出公司與聯絡人，存進名單時自動貼上同名的標籤。</p>
+  <div class="toolbar">
+    <button class="button" data-action="scan" type="button" disabled>預覽</button>
+    <button class="button primary" data-action="apply" type="button" disabled>存進名單並貼上標籤</button>
+  </div>
+  <div class="notice" data-role="message" hidden></div>
+  <div class="table-wrap" hidden>
+    <table class="table">
+      <thead><tr><th class="check"><input type="checkbox" data-role="all" checked aria-label="全選"></th><th>公司</th><th>聯絡人</th><th>信箱</th><th>會做什麼</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card" data-panel="sync">
+  <h2 class="card-title">把名單匠的分類寫回 Gmail</h2>
+  <p class="muted">替跟每家公司往來過的信貼上 Gmail 標籤。這一段不用先選上面的標籤。</p>
+  <div class="toolbar">
+    <label class="check-option"><input type="checkbox" id="sync-tags" checked> 依公司分類（例如「名單匠/客戶」）</label>
+    <label class="check-option"><input type="checkbox" id="sync-status" checked> 依狀態（已回覆、退信、不再聯絡）</label>
+  </div>
+  <div class="toolbar">
+    <button class="button" data-action="scan" type="button">預覽</button>
+    <button class="button primary" data-action="apply" type="button" disabled>貼到 Gmail</button>
+  </div>
+  <div class="notice" data-role="message" hidden></div>
+  <div class="table-wrap" hidden>
+    <table class="table">
+      <thead><tr><th>Gmail 標籤</th><th class="num">公司</th><th class="num">信件</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', path='gmail.js') }}"></script>
+{% endblock %}

@@ -335,6 +335,7 @@ def store_candidates(
     candidates: Iterable[HarvestCandidate],
     config: AppConfig | None = None,
     *,
+    tag: str | None = None,
     report: Callable[[object], None] | None = None,
     cancel_event: Any = None,
 ) -> GmailHarvestSummary:
@@ -343,6 +344,8 @@ def store_candidates(
     收到的是 :func:`scan_for_contacts` 挖出來、而且使用者勾起來的那些。清理
     在掃描時就做完了，這裡不再做一次——做兩次的話兩次的結果可以不一樣，而
     使用者看到的是第一次的。
+
+    ``tag`` 有值時（從某個 Gmail 標籤挖的），存進去的每一家都貼上這個標籤。
     """
     config = config or get_config()
     summary = GmailHarvestSummary()
@@ -368,6 +371,8 @@ def store_candidates(
             record = candidate.record
             assert record is not None
             company, merged = repo.upsert(record)
+            if tag:
+                repo.add_tags(company, [tag])
             if merged:
                 summary.records_merged += 1
             else:

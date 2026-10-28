@@ -12,6 +12,17 @@
   <form class="toolbar" method="get" action="/">
     <input class="search" type="search" name="q" value="{{ q }}"
            placeholder="搜尋公司名稱、信箱、電話、地址、負責人…" aria-label="搜尋">
+    {% if tags %}
+    <label class="select">
+      <span>標籤</span>
+      <select name="tag" onchange="this.form.submit()">
+        <option value="">全部</option>
+        {% for name in tags %}
+        <option value="{{ name }}" {{ 'selected' if name == tag }}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% endif %}
     <label class="select">
       <span>排序</span>
       <select name="sort" onchange="this.form.submit()">
@@ -23,9 +34,9 @@
     <button class="button primary" type="submit">搜尋</button>
     <div class="spacer"></div>
     <div class="export">
-      <span class="muted">匯出{{ "這 " ~ "{:,}".format(total) ~ " 家" if q else "全部" }}</span>
+      <span class="muted">匯出{{ "這 " ~ "{:,}".format(total) ~ " 家" if (q or tag) else "全部" }}</span>
       {% for fmt in formats %}
-      <a class="button" href="/export?format={{ fmt }}&q={{ q | urlencode }}">{{ {"excel": "Excel", "csv": "CSV", "json": "JSON"}.get(fmt, fmt) }}</a>
+      <a class="button" href="/export?format={{ fmt }}&q={{ q | urlencode }}&tag={{ tag | urlencode }}">{{ {"excel": "Excel", "csv": "CSV", "json": "JSON"}.get(fmt, fmt) }}</a>
       {% endfor %}
     </div>
   </form>
@@ -49,6 +60,7 @@
           <td>
             <div class="company">{{ c.company_name }}</div>
             <div class="sub">
+              {% for name in c.tags %}<span class="pill">{{ name }}</span>{% endfor %}
               {% if c.website %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website | replace("https://", "") | replace("http://", "") }}</a>{% endif %}
               {% if c.industry %}<span>{{ c.industry }}</span>{% endif %}
             </div>
@@ -74,14 +86,14 @@
   <nav class="pager" aria-label="分頁">
     <span class="muted">共 {{ "{:,}".format(total) }} 家，第 {{ page }} / {{ pages }} 頁</span>
     <div class="pager-buttons">
-      {% if page > 1 %}<a class="button" href="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page - 1 }}">上一頁</a>{% endif %}
-      {% if page < pages %}<a class="button" href="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page + 1 }}">下一頁</a>{% endif %}
+      {% if page > 1 %}<a class="button" href="/?q={{ q | urlencode }}&tag={{ tag | urlencode }}&sort={{ sort }}&page={{ page - 1 }}">上一頁</a>{% endif %}
+      {% if page < pages %}<a class="button" href="/?q={{ q | urlencode }}&tag={{ tag | urlencode }}&sort={{ sort }}&page={{ page + 1 }}">下一頁</a>{% endif %}
     </div>
   </nav>
   {% else %}
   <div class="empty">
-    {% if q %}
-    <p>找不到符合「{{ q }}」的公司。</p>
+    {% if q or tag %}
+    <p>找不到符合條件的公司。</p>
     {% else %}
     <p>名單還是空的。</p>
     <p class="muted">到「爬取」頁從名錄網站抓第一批公司。</p>

@@ -25,9 +25,11 @@ from pydantic import BaseModel
 from controllers import CompanyController, CrawlController, DashboardController, ExportController
 from core.config import AppConfig
 from core.constants import DISPLAY_NAME, VERSION
+from core.errors import CRMError
 from core.i18n import CRAWL_STATUS_LABELS, VERDICT_LABELS, label
 from core.schemas import CompanyFilter
 from core.scoring import LEAD_SCORE_LABEL, LEAD_SCORE_ORDER
+from web.gmail import gmail_router
 from web.jobs import CrawlJob
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -86,19 +88,20 @@ def create_app(config: AppConfig, token: str) -> FastAPI:
         return await call_next(request)
 
     @app.get("/")
-    def company_list(request: Request, q: str = "", sort: str = LEAD_SCORE_ORDER, page: int = 1):
+    def company_list(
+        request: Request, q: str = "", tag: str = "", sort: str = LEAD_SCORE_ORDER, page: int = 1
+    ):
         sort = sort if sort in SORT_OPTIONS else LEAD_SCORE_ORDER
         page = max(page, 1)
-        text = q.strip() or None
-        total = companies.count(CompanyFilter(text=text))
+        criteria = _criteria(q, tag)
+        total = companies.count(criteria)
         rows = companies.search(
-            CompanyFilter(
-                text=text,
+            criteria.model_copy(update=dict(
                 order_by=sort,
                 descending=sort != "company_name",
                 limit=PAGE_SIZE,
                 offset=(page - 1) * PAGE_SIZE,
-            )
+            ))
         )
         return templates.TemplateResponse(
             request,
@@ -106,6 +109,8 @@ def create_app(config: AppConfig, token: str) -> FastAPI:
             {
                 "rows": rows,
                 "q": q,
+                "tag": tag,
+                "tags": companies.all_tags(),
                 "sort": sort,
                 "sort_options": SORT_OPTIONS,
                 "page": page,
@@ -146,13 +151,23 @@ def create_app(config: AppConfig, token: str) -> FastAPI:
         return JSONResponse({"ok": True})
 
     @app.get("/export")
-    def export(format: str = "excel", q: str = ""):
+    def export(format: str = "excel", q: str = "", tag: str = ""):
         if format not in exports.formats():
             raise HTTPException(status_code=400, detail="不支援的格式")
         path, _count = exports.run(
-            format, None, CompanyFilter(text=q.strip() or None),
-            report=lambda _payload: None, cancel_event=None,
+            format, None, _criteria(q, tag), report=lambda _payload: None, cancel_event=None
         )
         return FileResponse(path, filename=path.name)
 
+    @app.exception_handler(CRMError)
+    async def explain_error(_request: Request, exc: CRMError):
+        # Gmail 沒設定、密碼錯、標籤不存在：講給使用者聽，不是 500。
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    app.include_router(gmail_router(config, templates))
     return app
+
+
+def _criteria(q: str, tag: str) -> CompanyFilter:
+    """名單頁與匯出共用的篩選條件，兩邊看到的才會是同一批。"""
+    return CompanyFilter(text=q.strip() or None, tags=[tag] if tag else [])

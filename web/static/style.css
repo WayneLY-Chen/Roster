@@ -149,7 +149,7 @@ a:hover { text-decoration: underline; }
 }
 .spacer { flex: 1; }
 
-.search, select {
+.search, select, .number {
   font: inherit;
   color: var(--text);
   background: var(--surface);
@@ -159,7 +159,7 @@ a:hover { text-decoration: underline; }
   padding: 0 12px;
 }
 .search { flex: 1 1 320px; min-width: 0; }
-.search:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.search:focus, select:focus, .number:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 
 .select { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 
@@ -196,6 +196,7 @@ a:hover { text-decoration: underline; }
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
+.table th.num { text-align: right; }
 .table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .table th:first-child, .table td:first-child { padding-left: 20px; }
 .table th:last-child, .table td:last-child { padding-right: 20px; }
@@ -240,6 +241,15 @@ a:hover { text-decoration: underline; }
 
 .empty { text-align: center; padding: 48px 0; }
 .empty p { margin: 4px 0; }
+
+/* ------------------------------------------------------------ Gmail 標籤 */
+
+.lead { margin: -8px 0 16px; max-width: 760px; }
+.card > p.muted { margin: -8px 0 12px; }
+.number { width: 88px; }
+.check { width: 36px; }
+.check-option { display: inline-flex; align-items: center; gap: 6px; }
+input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
 
 /* ------------------------------------------------------------ 爬取 */
 

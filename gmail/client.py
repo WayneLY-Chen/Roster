@@ -1,15 +1,20 @@
-"""Read-only Gmail access over IMAP.
+"""Gmail access over IMAP.
 
 Authentication uses a Google **App Password** (``GMAIL_ADDRESS`` and
 ``GMAIL_APP_PASSWORD`` in ``.env``), which is the supported way for a desktop
 program to read a mailbox the user owns. Nothing here sends mail, deletes mail,
 or marks messages as read -- ``BODY.PEEK`` keeps the unread state intact.
+
+The one write is :meth:`GmailClient.add_label`, which only *adds* a Gmail
+label (an IMAP COPY). Mailboxes are opened read-only unless a caller asks for
+that one operation.
 """
 
 from __future__ import annotations
 
 import email
 import imaplib
+import re
 import ssl
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,16 +22,23 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from email.header import decode_header, make_header
 from email.message import Message
-from email.utils import parseaddr, parsedate_to_datetime
+from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 
 from core.config import AppConfig, get_config
 from core.constants import LogCategory
 from core.errors import GmailError
 from core.logging_setup import get_logger
+from gmail.mailbox import GmailLabel, decode_mailbox, encode_mailbox, parse_list_line, quote_mailbox
 
 log = get_logger(LogCategory.CRAWL)
 
 _MAX_BODY_CHARS = 20_000
+
+#: 一次 FETCH／COPY 帶幾個 UID。太長的指令有些伺服器會拒絕。
+_FETCH_BATCH = 200
+_COPY_BATCH = 500
+
+_UID_RE = re.compile(rb"UID (\d+)")
 
 
 @dataclass(slots=True)
@@ -176,20 +188,107 @@ class GmailClient:
 
     def search(self, query: str | None = None, limit: int | None = None) -> list[str]:
         """UIDs matching an IMAP search query, newest first."""
-        if self._connection is None:
-            raise GmailError("not connected; call connect() first")
-
         criterion = (query or self.settings.search or "ALL").strip()
+        return self.search_all(criterion)[: limit or self.settings.max_messages]
+
+    def search_all(self, criterion: str) -> list[str]:
+        """符合條件的每一封信的 UID，新的排前面，不截斷。"""
+        connection = self._require_connection()
         try:
-            status, data = self._connection.uid("SEARCH", None, criterion)
+            status, data = connection.uid("SEARCH", None, criterion)
         except imaplib.IMAP4.error as exc:
             raise GmailError(f"IMAP search {criterion!r} failed: {exc}") from exc
         if status != "OK":
             raise GmailError(f"IMAP search {criterion!r} returned {status}")
 
         uids = data[0].split() if data and data[0] else []
-        ordered = [uid.decode() for uid in reversed(uids)]
-        return ordered[: limit or self.settings.max_messages]
+        return [uid.decode() for uid in reversed(uids)]
+
+    # ---------------------------------------------------------------- 標籤
+
+    def list_labels(self) -> list[GmailLabel]:
+        """Gmail 裡所有的標籤與系統信箱。"""
+        connection = self._require_connection()
+        status, data = connection.list()
+        if status != "OK":
+            raise GmailError(f"沒辦法列出 Gmail 的標籤（{status}）")
+        labels = (parse_list_line(line) for line in data if isinstance(line, bytes))
+        return [label for label in labels if label is not None]
+
+    def open_mailbox(self, mailbox: str, *, writable: bool = False) -> None:
+        """改看另一個標籤。``mailbox`` 是 IMAP 的原始名稱（已編碼、沒有引號）。
+
+        預設唯讀。``writable`` 只給貼標籤用：貼標籤是 COPY，不會改動來源的信，
+        但唯讀模式下有些伺服器會拒絕 COPY。
+        """
+        connection = self._require_connection()
+        try:
+            status, data = connection.select(quote_mailbox(mailbox), readonly=not writable)
+        except imaplib.IMAP4.error as exc:
+            raise GmailError(f"沒辦法打開「{decode_mailbox(mailbox)}」：{exc}") from exc
+        if status != "OK":
+            raise GmailError(f"沒辦法打開「{decode_mailbox(mailbox)}」：{data}")
+
+    def open_all_mail(self, *, writable: bool = False) -> None:
+        """打開「所有郵件」。它的名稱跟著 Gmail 的介面語言變，所以用旗標找。"""
+        for label in self.list_labels():
+            if label.is_all_mail:
+                self.open_mailbox(label.mailbox, writable=writable)
+                return
+        raise GmailError(
+            "找不到「所有郵件」。請到 Gmail 的設定 → 轉寄和 POP/IMAP，"
+            "確認「所有郵件」有勾選在 IMAP 中顯示。"
+        )
+
+    def fetch_addresses(self, uids: list[str]) -> dict[str, list[str]]:
+        """每封信的寄件者、收件者與副本地址（小寫）。只抓這三個標頭，不抓內文。"""
+        connection = self._require_connection()
+        found: dict[str, list[str]] = {}
+        for start in range(0, len(uids), _FETCH_BATCH):
+            batch = ",".join(uids[start:start + _FETCH_BATCH])
+            try:
+                status, data = connection.uid(
+                    "FETCH", batch, "(UID BODY.PEEK[HEADER.FIELDS (FROM TO CC)])"
+                )
+            except imaplib.IMAP4.error as exc:
+                log.warning("could not fetch headers: {}", exc)
+                continue
+            if status != "OK":
+                continue
+            for item in data:
+                if not isinstance(item, tuple):
+                    continue
+                uid = _UID_RE.search(item[0])
+                if uid is None:
+                    continue
+                headers = email.message_from_bytes(item[1])
+                values = [str(v) for key in ("From", "To", "Cc") for v in headers.get_all(key, [])]
+                found[uid.group(1).decode()] = [
+                    address.lower() for _name, address in getaddresses(values) if "@" in address
+                ]
+        return found
+
+    def add_label(self, uids: list[str], label: str) -> None:
+        """替目前打開的信箱裡這幾封信加上 Gmail 標籤，標籤不存在就先建。
+
+        用的是 COPY：在 Gmail 裡把信「複製」到一個標籤，就是替它加上那個標籤，
+        信本身不動、原本的標籤也都還在。這支程式從來不送 STORE 或 EXPUNGE，
+        所以不會刪信、不會改已讀。
+        """
+        connection = self._require_connection()
+        mailbox = quote_mailbox(encode_mailbox(label))
+        # 已經有這個標籤的話 Gmail 回 NO，那正是我們要的狀態，不算錯。
+        connection.create(mailbox)
+        for start in range(0, len(uids), _COPY_BATCH):
+            batch = ",".join(uids[start:start + _COPY_BATCH])
+            status, data = connection.uid("COPY", batch, mailbox)
+            if status != "OK":
+                raise GmailError(f"沒辦法貼上標籤「{label}」：{data}")
+
+    def _require_connection(self) -> imaplib.IMAP4_SSL:
+        if self._connection is None:
+            raise GmailError("not connected; call connect() first")
+        return self._connection
 
     def fetch_raw(self, uid: str) -> bytes | None:
         """整封信的原始位元組，不改變已讀狀態。

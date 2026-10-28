@@ -78,6 +78,7 @@ from controllers.mail import (
 from core.i18n import ALL_OPTION, STAGE_LABELS, stage_labels, to_value
 from gui_qt import theme
 from gui_qt.composer import RichTextEditor, edit_body, populate_preview
+from gui_qt.gmail_labels import GmailLabelSection
 from gui_qt.pages.base import BasePage, bump_data_version
 from gui_qt.tasks import BackgroundTask
 from gui_qt.widgets import (
@@ -256,6 +257,7 @@ class MailPage(BasePage):
         self._build_bounce_section(body_column)
         self._build_reply_section(body_column)
         self._build_harvest_section(body_column)
+        body_column.addWidget(GmailLabelSection(self, self.controller.config))
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

@@ -719,6 +719,27 @@ class CompanyRepository:
         self.session.flush()
         return company
 
+    def add_tags(self, company: Company, tag_names: Iterable[str]) -> bool:
+        """替公司加上標籤，原本的標籤都留著。回傳有沒有真的加到新的。
+
+        跟 :meth:`set_tags` 不一樣：那一支是整組換掉（使用者在畫面上編輯標籤），
+        這一支是程式自動分類用的——Gmail 標籤對到一家公司時，不能把使用者
+        自己貼的那些洗掉。
+        """
+        have = {tag.name.lower() for tag in company.tags}
+        tag_repo = TagRepository(self.session)
+        added = False
+        for name in tag_names:
+            clean = name.strip()
+            if clean and clean.lower() not in have:
+                company.tags.append(tag_repo.get_or_create(clean))
+                have.add(clean.lower())
+                added = True
+        if added:
+            company.updated_at = now()
+            self.session.flush()
+        return added
+
     # ------------------------------------------------------------ duplicates
 
     def find_duplicate_groups(self) -> list[list[Company]]:
