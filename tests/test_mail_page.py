@@ -264,7 +264,7 @@ def test_send_wraps_smtp_authentication_failure_in_chinese(
     assert plan.sendable == 1
 
     with pytest.raises(CRMError, match="寄送過程發生錯誤"):
-        controller.send(plan)
+        controller.send(plan, dry_run=False)
 
 
 def test_send_dry_run_never_touches_smtp(mail_config, db_session, monkeypatch, fake_keyring):
@@ -284,13 +284,13 @@ def test_send_dry_run_never_touches_smtp(mail_config, db_session, monkeypatch, f
 
     controller = MailController(mail_config)  # dry_run=True
     plan = controller.build_plan(CompanyFilter(), "camp-template", "camp")
-    result = controller.send(plan)
+    result = controller.send(plan, dry_run=True)
 
     assert result.dry_run is True
     assert result.sent == 1
 
 
-def test_send_force_dry_run_overrides_real_config_without_mutating_it(
+def test_the_dry_run_button_never_opens_smtp_even_when_the_config_says_send(
     mail_config, db_session, monkeypatch, fake_keyring
 ):
     import gmail.sender as sender_module
@@ -303,7 +303,7 @@ def test_send_force_dry_run_overrides_real_config_without_mutating_it(
 
     class RefusingSMTP:
         def __init__(self, *a, **k):
-            raise AssertionError("SMTP must not be used when force_dry_run=True")
+            raise AssertionError("SMTP must not be used when dry_run=True")
 
     monkeypatch.setattr(sender_module.smtplib, "SMTP", RefusingSMTP)
 
@@ -313,13 +313,59 @@ def test_send_force_dry_run_overrides_real_config_without_mutating_it(
     controller = MailController(real_config)
     plan = controller.build_plan(CompanyFilter(), "camp-template", "camp")
 
-    result = controller.send(plan, force_dry_run=True)
+    result = controller.send(plan, dry_run=True)
 
     assert result.dry_run is True
     assert result.sent == 1
-    # The controller's own config must be left untouched -- a later real send
-    # by the same controller instance should still behave as "real".
+    # The controller's own config must be left untouched.
     assert controller.config.mailer.dry_run is False
+
+
+def test_the_send_button_really_sends_even_when_the_config_says_dry_run(
+    mail_config, db_session, monkeypatch, fake_keyring
+):
+    """「開始寄送」就是真的寄。以前它跟著 mailer.dry_run 走，按了卻只是演練。"""
+    import gmail.sender as sender_module
+    from gmail import templates
+
+    templates.save_template(
+        "camp-template", subject="Hi {company_name}", body="Body", config=mail_config
+    )
+    _make_company(db_session)
+    credentials.set_secret("gmail_address", "me@example.com")
+    credentials.set_secret("gmail_app_password", "app-password")
+    sent: list = []
+
+    class RecordingSMTP:
+        def __init__(self, *a, **k):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self, *, context=None):
+            pass
+
+        def login(self, *a):
+            pass
+
+        def send_message(self, message):
+            sent.append(message)
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", RecordingSMTP)
+    dry_config = mail_config.model_copy(
+        update={"mailer": mail_config.mailer.model_copy(update={"dry_run": True})}
+    )
+    controller = MailController(dry_config)
+    plan = controller.build_plan(CompanyFilter(), "camp-template", "camp")
+
+    result = controller.send(plan, dry_run=False)
+
+    assert result.dry_run is False
+    assert len(sent) == 1
 
 
 def test_preview_first_includes_unsubscribe_note(mail_config, db_session):
@@ -400,3 +446,120 @@ def test_set_daily_limit_rejects_out_of_range_value_and_rolls_back(
 
     # A value the config validator rejects must not be left half-written.
     assert read_user_settings()["mailer"]["daily_limit"] == 500
+
+
+
+class _RecordingSMTP:
+    """記下寄出去的信，不連任何伺服器。"""
+
+    sent: list = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    def ehlo(self):
+        pass
+
+    def starttls(self, *, context=None):
+        pass
+
+    def login(self, *a):
+        pass
+
+    def send_message(self, message):
+        _RecordingSMTP.sent.append(message)
+
+    def quit(self):
+        pass
+
+
+@pytest.fixture
+def recording_smtp(monkeypatch, fake_keyring):
+    import gmail.sender as sender_module
+
+    _RecordingSMTP.sent = []
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", _RecordingSMTP)
+    credentials.set_secret("gmail_address", "me@example.com")
+    credentials.set_secret("gmail_app_password", "app-password")
+    return _RecordingSMTP
+
+
+def test_a_test_email_goes_only_to_yourself_and_leaves_no_trace(
+    mail_config, db_session, recording_smtp
+):
+    from gmail import templates
+
+    templates.save_template(
+        "camp-template", subject="您好 {company_name}", body="內容", config=mail_config
+    )
+    company = _make_company(db_session)
+    controller = MailController(mail_config)
+    plan = controller.build_plan(CompanyFilter(), "camp-template", "camp")
+
+    address = controller.send_test("camp-template", plan)
+
+    assert address == "me@example.com"
+    [message] = recording_smtp.sent
+    assert message["To"] == "me@example.com"
+    assert message["Subject"].startswith("[測試] 您好")
+    assert company.company_name in message["Subject"]
+    # 不算寄過那家公司，但算進今日已寄——Google 的每日額度也算了這一封。
+    db_session.refresh(company)
+    assert company.last_emailed_at is None
+    assert controller.daily_sent() == 1
+
+
+def test_a_test_email_is_never_mistaken_for_outreach(mail_config, db_session, recording_smtp):
+    """寄給自己的測試信會出現在自己的收件匣裡，不能被回信／退信偵測當成寄過的對象。"""
+    from controllers.mail import BounceController, ReplyController
+    from gmail import templates
+
+    templates.save_template("camp-template", subject="s", body="b", config=mail_config)
+    MailController(mail_config).send_test("camp-template")
+
+    assert BounceController(mail_config)._sent_addresses() == set()
+    assert ReplyController(mail_config)._sent_index() == (set(), {})
+
+
+def test_a_test_email_works_before_any_list_is_built(mail_config, db_session, recording_smtp):
+    from gmail import templates
+
+    templates.save_template(
+        "camp-template", subject="您好 {company_name}", body="內容", config=mail_config
+    )
+
+    MailController(mail_config).send_test("camp-template")
+
+    assert "範例股份有限公司" in recording_smtp.sent[0]["Subject"]
+
+
+def test_campaign_names_list_the_most_recent_first(mail_config, db_session):
+    from database.models import EmailMessage
+
+    company = _make_company(db_session)
+    for name in ("春季開發信", "展覽後追蹤", "春季開發信"):
+        db_session.add(
+            EmailMessage(company_id=company.id, campaign=name, to_address="a@b.tw",
+                         subject="s", body="b", status="Sent")
+        )
+    db_session.commit()
+
+    assert MailController(mail_config).campaign_names() == ["春季開發信", "展覽後追蹤"]
+
+
+def test_set_delay_seconds_persists_and_refreshes_controller_config(mail_config, user_settings_file):
+    from core.config import read_user_settings
+
+    controller = MailController(mail_config)
+    controller.set_delay_seconds(15)
+
+    assert read_user_settings()["mailer"]["delay_seconds"] == 15.0
+    assert controller.config.mailer.delay_seconds == 15.0
+
+
+def test_the_sample_template_does_not_carry_its_own_unsubscribe_line():
+    """程式寄信時會自動補退訂說明。樣板自己再寫一句（字不一樣）就會變成兩句。"""
+    from pathlib import Path
+
+    sample = Path(__file__).resolve().parent.parent / "templates" / "mail" / "範例-初次開發信.txt"
+    assert "取消訂閱" not in sample.read_text(encoding="utf-8")

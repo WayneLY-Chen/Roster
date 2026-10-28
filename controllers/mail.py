@@ -101,6 +101,23 @@ class MailController:
         except CRMError as exc:
             raise CRMError(f"產生寄送名單失敗：{exc}") from exc
 
+    def campaign_names(self, limit: int = 20) -> list[str]:
+        """以前用過的活動名稱，最近用的排前面。給郵件頁的下拉選單。"""
+        from sqlalchemy import func, select
+
+        from database.models import EmailMessage
+        from database.session import session_scope
+
+        stmt = (
+            select(EmailMessage.campaign)
+            .where(EmailMessage.campaign.is_not(None), EmailMessage.campaign != "")
+            .group_by(EmailMessage.campaign)
+            .order_by(func.max(EmailMessage.id).desc())
+            .limit(limit)
+        )
+        with session_scope() as session:
+            return list(session.execute(stmt).scalars())
+
     def follow_up_rules(self) -> tuple[int, int]:
         """``(幾天之後追, 最多追幾封)``，給畫面顯示與編輯用。"""
         return (
@@ -189,25 +206,76 @@ class MailController:
             return None
         recipient = sendable[0]
         note = self.config.mailer.unsubscribe_note
-        body = recipient.body
-        if note and note.strip() not in body:
-            body = f"{body.rstrip()}\n\n{note}"
-        return recipient.subject, body
+        return recipient.subject, campaign_module.with_unsubscribe_note(recipient.body, note)
+
+    def send_test(
+        self,
+        template_name: str,
+        plan: CampaignPlan | None = None,
+        attachments: list[str] | None = None,
+        *,
+        report: Callable[[Any], None] | None = None,
+        cancel_event: Any = None,
+    ) -> str:
+        """寄一封測試信給自己。回傳寄到的地址。
+
+        內容跟真的寄出去的一樣：有名單就用第一家可寄的公司代入，沒有就用範例
+        公司。只寄到寄件帳號自己、不動任何一家公司，所以不受「啟用郵件寄送」
+        那個總開關管。
+
+        **會算進今日已寄**：Google 的每日額度算的是帳號實際寄出的每一封，測試信
+        也是。不算的話這裡的數字會比 Google 的少，快到上限時就會超過而被停權。
+        """
+        from types import SimpleNamespace
+
+        from gmail.sender import SmtpSender
+
+        address = self.config.mailer.address
+        if not address:
+            raise CRMError("尚未設定 Gmail 寄件帳號，請先到「設定」頁填好。")
+        preview = self.preview_first(plan) if plan is not None else None
+        if preview is None:
+            if not (template_name or "").strip():
+                raise CRMError("請先選擇一個樣板。")
+            template = templates_module.load_template(template_name, self.config)
+            sample = {"company_name": "範例股份有限公司", "contact_person": "王小明"}
+            body = templates_module.render(template.body, sample)
+            preview = (
+                templates_module.render(template.subject, sample),
+                campaign_module.with_unsubscribe_note(body, self.config.mailer.unsubscribe_note),
+            )
+        subject, body = preview
+
+        loaded: list = []
+        if attachments:
+            from gmail.attachments import load_for_sending
+
+            loaded = load_for_sending(attachments, self.config)
+
+        test = SimpleNamespace(to_address=address, subject=f"[測試] {subject}", body=body)
+        sender = SmtpSender(self.config)
+        sender.connect()
+        try:
+            sender.send(test, loaded)
+        finally:
+            sender.close()
+        _record_test_email(test, attachments)
+        return address
 
     def send(
         self,
         plan: CampaignPlan,
         *,
+        dry_run: bool,
         report: Callable[[Any], None] | None = None,
         cancel_event: Any = None,
-        force_dry_run: bool = False,
     ) -> CampaignResult:
         """Execute a plan already produced by :meth:`build_plan`.
 
-        ``force_dry_run`` overrides ``mailer.dry_run`` for this one call
-        without touching the persisted configuration -- used by the page's
-        "演練（不寄出）" button, which must stay safe even when the real
-        "開始寄送" button is configured to send for real.
+        ``dry_run`` 由使用者按的那顆按鈕決定，**不看設定檔**：按「開始寄送」
+        就是真的寄、按「演練（不寄出）」就是演練。以前這裡跟著
+        ``mailer.dry_run`` 走，結果是按了「開始寄送」、確認視窗也寫著即將寄出，
+        實際上卻只是演練。設定檔那個值現在只管排程自動寄信。
         """
 
         def _report(recipient: Any, status: Any) -> None:
@@ -221,11 +289,9 @@ class MailController:
                 }
             )
 
-        config = self.config
-        if force_dry_run and not config.mailer.dry_run:
-            config = config.model_copy(
-                update={"mailer": config.mailer.model_copy(update={"dry_run": True})}
-            )
+        config = self.config.model_copy(
+            update={"mailer": self.config.mailer.model_copy(update={"dry_run": dry_run})}
+        )
 
         try:
             return campaign_module.send_campaign(
@@ -260,6 +326,16 @@ class MailController:
             raise CRMError(f"儲存每日寄送上限失敗：{exc}") from exc
         # Same reason as set_mailer_option: the saved value has to reach this
         # controller too, or mailer_status() would keep reporting the old one.
+        self.config = get_config()
+
+    def set_delay_seconds(self, value: int) -> None:
+        """儲存每封信之間的間隔秒數（``mailer.delay_seconds``）。做法同 :meth:`set_daily_limit`。"""
+        from core.config import save_user_setting
+
+        try:
+            save_user_setting("mailer", "delay_seconds", float(value))
+        except CRMError as exc:
+            raise CRMError(f"儲存寄送間隔失敗：{exc}") from exc
         self.config = get_config()
 
     def mailer_status(self) -> dict[str, str]:
@@ -307,6 +383,30 @@ class MailController:
             return campaign_module.mark_do_not_contact(company_id)
         except CRMError as exc:
             raise CRMError(f"標記請勿聯絡失敗：{exc}") from exc
+
+
+def _record_test_email(message: Any, attachments: list[str] | None) -> None:
+    """把寄給自己的測試信記成一筆「已寄出」，今日已寄才會跟 Google 的統計一致。
+
+    ``company_id`` 留空：它不屬於任何一家公司，所以不會被記成寄過誰，退信與
+    回信偵測也會跳過它。``campaign`` 也留空，活動名稱的下拉選單才不會冒出它。
+    """
+    from core.constants import EmailStatus
+    from database.models import EmailMessage, now
+    from database.session import session_scope
+
+    with session_scope() as session:
+        session.add(
+            EmailMessage(
+                company_id=None,
+                to_address=message.to_address,
+                subject=message.subject,
+                body=message.body,
+                attachments="\n".join(attachments) if attachments else None,
+                status=EmailStatus.SENT.value,
+                sent_at=now(),
+            )
+        )
 
 
 # --------------------------------------------------------------------- 退信
@@ -385,9 +485,11 @@ class BounceController:
         from database.session import session_scope
 
         with session_scope() as session:
+            # company_id 是空的是寄給自己的測試信，不是寄給哪家公司的開發信。
             rows = session.execute(
                 select(EmailMessage.to_address).where(
-                    EmailMessage.status == EmailStatus.SENT.value
+                    EmailMessage.status == EmailStatus.SENT.value,
+                    EmailMessage.company_id.is_not(None),
                 )
             ).scalars()
             return {address.strip().lower() for address in rows if address}
@@ -684,7 +786,11 @@ class ReplyController:
                     EmailMessage.id,
                     EmailMessage.to_address,
                     EmailMessage.message_id,
-                ).where(EmailMessage.status == EmailStatus.SENT.value)
+                ).where(
+                    EmailMessage.status == EmailStatus.SENT.value,
+                    # 寄給自己的測試信不算：它會出現在收件匣裡，不能被當成回信。
+                    EmailMessage.company_id.is_not(None),
+                )
             )
             for row_id, address, rfc_id in rows:
                 if address:

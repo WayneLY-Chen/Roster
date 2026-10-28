@@ -265,7 +265,7 @@ def build_plan(
     )
 
 
-def _with_unsubscribe_note(body: str, note: str) -> str:
+def with_unsubscribe_note(body: str, note: str) -> str:
     """Guarantee the opt-out sentence is present, without duplicating it.
 
     An HTML body gets an HTML note. Appending bare text to markup would leave
@@ -336,7 +336,7 @@ def send_campaign(
             if cancel_event is not None and cancel_event.is_set():
                 break
 
-            body = _with_unsubscribe_note(recipient.body, mailer.unsubscribe_note)
+            body = with_unsubscribe_note(recipient.body, mailer.unsubscribe_note)
 
             with session_scope() as session:
                 message = EmailMessage(

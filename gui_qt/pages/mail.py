@@ -44,7 +44,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -157,6 +157,8 @@ class MailPage(BasePage):
         self._harvest_candidates: list = []
         self.plan: Any = None
         self._mailer_ready = False
+        #: Gmail 帳號與應用程式密碼都填好了。寄測試信只需要這個。
+        self._account_ready = False
         self._loaded_template_name: str | None = None
         #: 正在用程式（而不是使用者操作）改開關的勾選狀態時設為 True，
         #: 避免 toggled signal 誤觸發「儲存設定」或彈出確認對話框。
@@ -170,18 +172,28 @@ class MailPage(BasePage):
         self.status_task = BackgroundTask(
             self, self._fetch_status, on_done=self._apply_status, on_error=self._handle_error
         )
+        # worker 一定要透過 self.controller 呼叫，不能直接綁 self.controller.build_plan：
+        # on_show() 每次都會換一份讀到新設定的 controller，直接綁的話這兩個工作
+        # 會一直用程式剛開時那一份——每日上限改成 2000 了，產生名單還是照 100
+        # 算；勾了實際寄出，寄送還是演練。
         self.build_task = BackgroundTask(
             self,
-            self.controller.build_plan,
+            lambda *args, **kwargs: self.controller.build_plan(*args, **kwargs),
             on_done=self._on_build_plan_done,
             on_error=self._on_build_plan_error,
         )
         self.send_task = BackgroundTask(
             self,
-            self.controller.send,
+            lambda *args, **kwargs: self.controller.send(*args, **kwargs),
             on_progress=self._on_send_progress,
             on_done=self._on_send_done,
             on_error=self._on_send_error,
+        )
+        self.test_task = BackgroundTask(
+            self,
+            lambda *args, **kwargs: self.controller.send_test(*args, **kwargs),
+            on_done=self._on_test_sent,
+            on_error=self._on_test_error,
         )
         # 退信那兩步分開成兩個工作，中間隔著使用者的勾選與確認：讀信箱是唯讀
         # 的，寫回去是另一件事。合成一個的話就沒有中間那一眼了。
@@ -275,7 +287,7 @@ class MailPage(BasePage):
         cards_row.setSpacing(8)
         self.account_card = StatCard("寄件帳號")
         self.daily_card = StatCard("今日已寄")
-        self.mode_card = StatCard("模式")
+        self.mode_card = StatCard("排程寄信")
         for card in (self.account_card, self.daily_card, self.mode_card):
             cards_row.addWidget(card, 1)
         section.body_layout.addLayout(cards_row)
@@ -285,14 +297,16 @@ class MailPage(BasePage):
         self.enabled_check.toggled.connect(self._on_enabled_toggled)
         switches_row.addWidget(self.enabled_check)
 
-        self.live_check = QCheckBox("實際寄出（關閉＝演練，不會真的寄）")
+        # 只管排程自動寄信。這頁的「開始寄送」一律真的寄、「演練」一律演練，
+        # 不看這個開關——以前看，結果按了開始寄送卻只是演練。
+        self.live_check = QCheckBox("排程自動寄信時實際寄出（關閉＝排程只演練）")
         self.live_check.toggled.connect(self._on_live_toggled)
         switches_row.addWidget(self.live_check)
         switches_row.addStretch(1)
         section.body_layout.addLayout(switches_row)
 
-        # 每日寄送上限：使用者問過為什麼是 100 不是 2000，這裡讓它可讀可改，
-        # 不必再手動編輯 config.yaml。
+        # 每日寄送上限：改了就存，不必再按一顆「儲存」。以前要按，沒按的話畫面
+        # 一重整就跳回 100，使用者以為改了、其實沒有。
         limit_row = QHBoxLayout()
         limit_row.addWidget(caption("每日寄送上限"))
         self.daily_limit_spin = QSpinBox()
@@ -301,10 +315,37 @@ class MailPage(BasePage):
         # QSpinBox 的 sizeHint 比其他控制項高 4px，QSS 改不動——見該函式說明。
         theme.match_control_height(self.daily_limit_spin)
         limit_row.addWidget(self.daily_limit_spin)
-        save_limit_button = QPushButton("儲存上限")
-        save_limit_button.clicked.connect(self._save_daily_limit)
-        limit_row.addWidget(save_limit_button, 0, Qt.AlignmentFlag.AlignBottom)
-        limit_row.addStretch(1)
+        # 停手 0.6 秒才存：按住上下鍵的時候不要每一格都寫一次設定檔。
+        self._limit_timer = QTimer(self)
+        self._limit_timer.setSingleShot(True)
+        self._limit_timer.setInterval(600)
+        self._limit_timer.timeout.connect(self._save_daily_limit)
+        self.daily_limit_spin.valueChanged.connect(self._limit_timer.start)
+
+        limit_row.addWidget(caption("每封間隔"))
+        self.delay_spin = QSpinBox()
+        # 下限 1 秒跟設定檔的驗證一致；再快就很像垃圾信的寄法。
+        self.delay_spin.setRange(1, 600)
+        self.delay_spin.setSuffix(" 秒")
+        self.delay_spin.setFixedWidth(theme.input_width(7, has_spin_buttons=True))
+        theme.match_control_height(self.delay_spin)
+        self.delay_spin.setToolTip(
+            "每寄一封之後等幾秒再寄下一封。間隔太短容易被 Gmail 當成垃圾信來源。"
+        )
+        limit_row.addWidget(self.delay_spin)
+        self._delay_timer = QTimer(self)
+        self._delay_timer.setSingleShot(True)
+        self._delay_timer.setInterval(600)
+        self._delay_timer.timeout.connect(self._save_delay)
+        self.delay_spin.valueChanged.connect(self._delay_timer.start)
+
+        limit_hint = QLabel(
+            "Google 自己的上限：一般 Gmail 帳號每天約 500 封，Google Workspace 約 2000 封，"
+            "超過會被暫時停止寄信。"
+        )
+        limit_hint.setObjectName("MutedLabel")
+        limit_hint.setWordWrap(True)
+        limit_row.addWidget(limit_hint, 1)
         section.body_layout.addLayout(limit_row)
 
         self.warning_label = QLabel("")
@@ -641,10 +682,18 @@ class MailPage(BasePage):
         self._on_follow_up_toggled(False)
 
         campaign_row = QHBoxLayout()
-        self.campaign_name_entry = LabeledEntry(
-            "活動名稱", value=f"開發信-{date.today().isoformat()}"
-        )
-        campaign_row.addWidget(self.campaign_name_entry, 1)
+        # 可以自己打新的，也可以選以前用過的（接著寄同一個活動、寄追蹤信時）。
+        campaign_box = QWidget()
+        campaign_layout = QVBoxLayout(campaign_box)
+        campaign_layout.setContentsMargins(0, 0, 0, 0)
+        campaign_layout.setSpacing(2)
+        campaign_layout.addWidget(caption("活動名稱"))
+        self.campaign_combo = WideComboBox()
+        self.campaign_combo.setEditable(True)
+        self.campaign_combo.setToolTip("同一個活動寄出的信會歸在一起。可以選以前用過的，也可以打新的。")
+        self.campaign_combo.setCurrentText(_new_campaign_name())
+        campaign_layout.addWidget(self.campaign_combo)
+        campaign_row.addWidget(campaign_box, 1)
         self.build_plan_button = QPushButton("產生名單")
         self.build_plan_button.clicked.connect(self._start_build_plan)
         # 靠下對齊。LabeledEntry 是「說明文字在上、輸入框在下」的直向堆疊，
@@ -1113,9 +1162,18 @@ class MailPage(BasePage):
         self.preview_button.clicked.connect(self._preview_first)
         footer.addWidget(self.preview_button)
 
+        self.test_button = QPushButton("寄測試信給自己")
+        self.test_button.setEnabled(False)
+        self.test_button.setToolTip(
+            "用目前的樣板寄一封到你自己的 Gmail，看收到的樣子。有名單時用第一家的資料代入。"
+            "會算進今日已寄（Google 的額度也會算），但不會記成寄過那家公司。"
+        )
+        self.test_button.clicked.connect(self._send_test)
+        footer.addWidget(self.test_button)
+
         self.dry_run_button = QPushButton("演練（不寄出）")
         self.dry_run_button.setEnabled(False)
-        self.dry_run_button.clicked.connect(lambda: self._start_send(force_dry_run=True))
+        self.dry_run_button.clicked.connect(lambda: self._start_send(dry_run=True))
         footer.addWidget(self.dry_run_button)
 
         self.send_button = QPushButton("開始寄送")
@@ -1125,7 +1183,7 @@ class MailPage(BasePage):
         # theme.py 集中管理。「預覽第一封」「演練（不寄出）」維持預設的次要
         # 樣式，不套用這個 objectName。
         self.send_button.setObjectName("PrimaryButton")
-        self.send_button.clicked.connect(lambda: self._start_send(force_dry_run=False))
+        self.send_button.clicked.connect(lambda: self._start_send(dry_run=False))
         footer.addWidget(self.send_button)
 
         self.cancel_send_button = QPushButton("取消")
@@ -1260,15 +1318,17 @@ class MailPage(BasePage):
             return  # 上一次查詢還沒回來，不要疊加第二次
         self.status_task.start()
 
-    def _fetch_status(self, *, report, cancel_event) -> tuple[dict, list[str], list[str]]:
+    def _fetch_status(self, *, report, cancel_event) -> tuple[dict, list[str], list[str], list[str]]:
         """在背景執行緒被呼叫；千萬不能在這裡碰任何 widget。"""
         status = self.controller.mailer_status()
         industries = self.company_controller.distinct("industry")
         tags = self.company_controller.all_tags()
-        return status, industries, tags
+        campaigns = self.controller.campaign_names()
+        return status, industries, tags, campaigns
 
     def _apply_status(self, result: tuple) -> None:
-        status, industries, tags = result
+        status, industries, tags, campaigns = result
+        self._refresh_campaign_names(campaigns)
 
         account_display = status["address"] or "尚未設定"
         self.account_card.update_values(
@@ -1281,8 +1341,8 @@ class MailPage(BasePage):
         dry_run = status["dry_run"] == "是"
         enabled = status["enabled"] == "是"
         self.mode_card.update_values(
-            "演練（不會寄出）" if dry_run else "實際寄送",
-            "不會真的寄信，可安心測試" if dry_run else "信件會真的送出去",
+            "只演練" if dry_run else "實際寄出",
+            "排程自動寄信時不會真的寄" if dry_run else "排程自動寄信時會真的寄出",
         )
 
         self._set_checked_silently(self.enabled_check, enabled)
@@ -1291,8 +1351,12 @@ class MailPage(BasePage):
         self.daily_limit_spin.blockSignals(True)
         self.daily_limit_spin.setValue(int(status["daily_limit"]))
         self.daily_limit_spin.blockSignals(False)
+        self.delay_spin.blockSignals(True)
+        self.delay_spin.setValue(round(float(status["delay_seconds"])))
+        self.delay_spin.blockSignals(False)
 
-        self._mailer_ready = enabled and status["account_ready"] == "是"
+        self._account_ready = status["account_ready"] == "是"
+        self._mailer_ready = enabled and self._account_ready
         if self._mailer_ready:
             self.warning_widget.hide()
         else:
@@ -1304,13 +1368,17 @@ class MailPage(BasePage):
             self.warning_label.setText("無法實際寄送：" + "；".join(reasons))
             self.warning_widget.show()
 
-        if dry_run:
-            self.result_label.setText("目前為演練模式，按下「開始寄送」也不會真的寄出。")
-        elif self.result_label.text().startswith("目前為演練模式"):
-            self.result_label.setText("")
-
         self._refresh_filter_options(industries, tags)
         self._update_action_buttons()
+
+    def _refresh_campaign_names(self, campaigns: list[str]) -> None:
+        """下拉選單換成最新的清單，使用者正在打的字不動。"""
+        typed = self.campaign_combo.currentText()
+        self.campaign_combo.blockSignals(True)
+        self.campaign_combo.clear()
+        self.campaign_combo.addItems(campaigns)
+        self.campaign_combo.setCurrentText(typed)
+        self.campaign_combo.blockSignals(False)
 
     def _handle_error(self, exc: Exception) -> None:
         self.report_error(exc)
@@ -1343,11 +1411,10 @@ class MailPage(BasePage):
             confirmed = (
                 QMessageBox.question(
                     self,
-                    "關閉演練模式",
-                    "關閉演練後，按下「開始寄送」會真的把信寄到對方的信箱。\n\n"
-                    "寄出去的信收不回來，也無法取消。\n"
-                    "建議先用「演練（不寄出）」跑過一次，確認名單與內容都正確。\n\n"
-                    "確定要關閉演練模式嗎？",
+                    "排程自動寄信要實際寄出嗎？",
+                    "打開後，排程自動寄信會真的把信寄到對方的信箱，而且是在沒有人看著的"
+                    "時候寄。\n\n寄出去的信收不回來。建議先在這一頁用「演練（不寄出）」"
+                    "與「寄測試信給自己」確認過名單與內容。\n\n確定要打開嗎？",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 )
                 == QMessageBox.StandardButton.Yes
@@ -1364,23 +1431,45 @@ class MailPage(BasePage):
             return
 
         self.status(
-            "已切換為實際寄送 -- 按下「開始寄送」會真的寄出" if checked else "已切換回演練模式",
+            "排程自動寄信會實際寄出" if checked else "排程自動寄信改回只演練",
             "error" if checked else "success",
         )
         self._refresh_status()
 
     def _save_daily_limit(self) -> None:
+        self._limit_timer.stop()  # 已經在存了，等著的那一次不用再存
         value = self.daily_limit_spin.value()
         try:
             self.controller.set_daily_limit(value)
         except CRMError as exc:
             self.report_error(exc)
             return
-        self.status(f"每日寄送上限已更新為 {value} 封", "success")
+        message = f"每日寄送上限已更新為 {value} 封"
+        if self.plan is not None and not self.build_task.running:
+            # 名單的額度是產生當下算的，上限改了要重算，不然畫面上還是舊的數字。
+            message += "，名單依新的上限重新計算中"
+            self._start_build_plan()
+        self.status(message, "success")
+        self._refresh_status()
+
+    def _save_delay(self) -> None:
+        self._delay_timer.stop()
+        value = self.delay_spin.value()
+        try:
+            self.controller.set_delay_seconds(value)
+        except CRMError as exc:
+            self.report_error(exc)
+            return
+        self.status(f"每封信之間會間隔 {value} 秒", "success")
         self._refresh_status()
 
     def _update_action_buttons(self) -> None:
         has_sendable = self.plan is not None and getattr(self.plan, "sendable", 0) > 0
+        self.test_button.setEnabled(
+            self._account_ready
+            and bool(self.template_combo.currentText().strip())
+            and not self.test_task.running
+        )
         self.preview_button.setEnabled(has_sendable)
         self.dry_run_button.setEnabled(has_sendable)
         self.send_button.setEnabled(has_sendable and self._mailer_ready)
@@ -1428,7 +1517,7 @@ class MailPage(BasePage):
         if not self._attachments_ok:
             self.status("附件總量超過上限，請先取消勾選幾個檔案", "error")
             return
-        campaign_name = self.campaign_name_entry.get() or template_name
+        campaign_name = self.campaign_combo.currentText().strip() or template_name
         criteria = self._current_filter()
         attachments = self.selected_attachments()
 
@@ -1549,14 +1638,14 @@ class MailPage(BasePage):
 
     # -------------------------------------------------------------- 寄送
 
-    def _start_send(self, *, force_dry_run: bool) -> None:
+    def _start_send(self, *, dry_run: bool) -> None:
         if self.send_task.running:
             return
         if self.plan is None or getattr(self.plan, "sendable", 0) == 0:
             self.status("請先產生一份包含可寄送對象的名單", "error")
             return
 
-        if not force_dry_run:
+        if not dry_run:
             if not self._mailer_ready:
                 self.status("寄件帳號尚未就緒，無法寄送", "error")
                 return
@@ -1570,7 +1659,8 @@ class MailPage(BasePage):
                     self,
                     "確認寄送",
                     (
-                        f"即將寄出開發信給 {self.plan.sendable} 家公司。\n"
+                        f"即將真的寄出開發信給 {self.plan.sendable} 家公司，寄出去就收不回來。\n"
+                        "（只想看看結果的話，按「演練（不寄出）」或「寄測試信給自己」。）\n\n"
                         f"寄件帳號：{status['address'] or '（尚未設定）'}\n"
                         f"每封間隔：{status['delay_seconds']} 秒\n\n"
                         "請確認你有正當來源取得這些聯絡資訊，並已遵守相關法規（例如允許收件者"
@@ -1589,10 +1679,30 @@ class MailPage(BasePage):
         self.dry_run_button.setEnabled(False)
         self.cancel_send_button.setEnabled(True)
         self.app.status_bar.start_progress()
-        self.status("演練中..." if force_dry_run else "寄送中...", "normal")
+        self.status("演練中..." if dry_run else "寄送中...", "normal")
         self.result_label.setText("")
 
-        self.send_task.start(self.plan, force_dry_run=force_dry_run)
+        self.send_task.start(self.plan, dry_run=dry_run)
+
+    def _send_test(self) -> None:
+        if self.test_task.running:
+            return
+        template_name = self.template_combo.currentText().strip()
+        if not template_name:
+            self.status("請先選擇一個樣板", "error")
+            return
+        self.test_button.setEnabled(False)
+        self.status("正在寄測試信給你自己…", "normal")
+        self.test_task.start(template_name, self.plan, self.selected_attachments())
+
+    def _on_test_sent(self, address: str) -> None:
+        self._update_action_buttons()
+        self.status(f"測試信已寄到 {address}，去收信看看收到的樣子。", "success")
+        self._refresh_status()  # 今日已寄多了這一封
+
+    def _on_test_error(self, exc: Exception) -> None:
+        self._update_action_buttons()
+        self.report_error(exc)
 
     def _cancel_send(self) -> None:
         if self.send_task.running:
@@ -1664,3 +1774,8 @@ class PreviewDialog(QDialog):
         close_button.clicked.connect(self.accept)
         footer.addWidget(close_button)
         layout.addLayout(footer)
+
+
+def _new_campaign_name() -> str:
+    """還沒選以前的活動時，預設的新名稱。"""
+    return f"開發信-{date.today().isoformat()}"

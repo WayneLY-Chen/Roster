@@ -332,6 +332,75 @@ def test_save_daily_limit_calls_controller_and_reports_success(
     assert ("每日寄送上限已更新為 250 封", "success") in app.messages
 
 
+def test_changing_the_daily_limit_saves_it_without_a_save_button(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    """以前要再按「儲存上限」，沒按的話畫面一重整就跳回 100。"""
+    app = _FakeApp()
+    page = MailPage(app)
+    page.ensure_built()
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+    calls: list[int] = []
+    monkeypatch.setattr(page.controller, "set_daily_limit", calls.append)
+
+    page.daily_limit_spin.setValue(2000)
+    deadline = time.time() + 3
+    while not calls and time.time() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.02)
+    _wait_for(qt_app, page.status_task)
+
+    assert calls == [2000]
+
+
+def test_changing_the_delay_saves_it(qt_app, db_session, mail_config, monkeypatch):
+    app = _FakeApp()
+    page = MailPage(app)
+    page.ensure_built()
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+    calls: list[int] = []
+    monkeypatch.setattr(page.controller, "set_delay_seconds", calls.append)
+
+    page.delay_spin.setValue(15)
+    deadline = time.time() + 3
+    while not calls and time.time() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.02)
+    _wait_for(qt_app, page.status_task)
+
+    assert calls == [15]
+
+
+def test_building_a_list_uses_the_controller_with_the_latest_settings(
+    qt_app, db_session, mail_config, monkeypatch
+):
+    """on_show() 會換一份讀到新設定的 controller。產生名單與寄送要用那一份，
+    不是程式剛打開時那一份——不然上限改成 2000 了，名單還是照 100 算。"""
+    _save_template(mail_config)
+    app = _FakeApp()
+    page = MailPage(app)
+    page.ensure_built()
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+
+    page.on_show()  # 換了一份新的 controller
+    _wait_for(qt_app, page.status_task)
+    page.template_combo.setCurrentText("test-template")
+    used: list[object] = []
+    current = page.controller
+    original = current.build_plan
+    monkeypatch.setattr(
+        current, "build_plan", lambda *a, **k: used.append(current) or original(*a, **k)
+    )
+
+    page._start_build_plan()
+    _wait_for(qt_app, page.build_task)
+
+    assert used == [current], app.messages
+
+
 def test_daily_limit_out_of_range_is_rejected_by_spinbox_before_it_reaches_the_controller(
     qt_app, db_session, mail_config
 ):
@@ -606,7 +675,7 @@ def test_dry_run_send_reports_success(qt_app, db_session, mail_config):
     page._start_build_plan()
     _wait_for(qt_app, page.build_task)
 
-    page._start_send(force_dry_run=True)
+    page._start_send(dry_run=True)
     _wait_for(qt_app, page.send_task)
     # _on_send_done() 結尾會再呼叫一次 _refresh_status()（背景查詢），把它也
     # 等完，才不會跟下面的斷言起競態——但斷言本身刻意檢查 app.messages
@@ -623,7 +692,7 @@ def test_send_without_a_plan_shows_error(qt_app, db_session, mail_config):
     app = _FakeApp()
     page = MailPage(app)
     page.ensure_built()
-    page._start_send(force_dry_run=True)
+    page._start_send(dry_run=True)
     assert app.messages[-1] == ("請先產生一份包含可寄送對象的名單", "error")
 
 
