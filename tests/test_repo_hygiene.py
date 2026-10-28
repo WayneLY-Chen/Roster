@@ -131,7 +131,7 @@ _IMPORT_TO_PACKAGE = {
 #: 專案自己的頂層套件，不是外部相依。
 _LOCAL_PACKAGES = {
     "ai", "app_main", "conftest", "controllers", "core", "crawler", "database",
-    "exporter", "gmail", "gui_qt", "main", "tests", "verifier",
+    "exporter", "gmail", "gui_qt", "main", "tests", "verifier", "web",
 }
 
 _SKIP_DIRS = {".venv", ".git", "build", "dist", "docs", "__pycache__", ".pytest_cache"}

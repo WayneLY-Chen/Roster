@@ -1,0 +1,262 @@
+/* 名單匠網頁版。顏色都是 :root 上的變數，深色模式只換變數。 */
+
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --border: #e3e6eb;
+  --text: #1c2330;
+  --muted: #6b7484;
+  --accent: #2f6fde;
+  --accent-text: #ffffff;
+  --accent-soft: #e6eefc;
+  --good: #1f8a5b;
+  --good-soft: #e3f4ec;
+  --warn: #a86a00;
+  --warn-soft: #fbf0db;
+  --bad: #c2413b;
+  --bad-soft: #fbe6e5;
+  --shadow: 0 1px 2px rgba(20, 30, 50, 0.06), 0 2px 8px rgba(20, 30, 50, 0.04);
+  --radius: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei",
+    "Noto Sans TC", "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b;
+    --surface: #1a1e26;
+    --surface-2: #222731;
+    --border: #2c323e;
+    --text: #e6e9ef;
+    --muted: #8d96a7;
+    --accent: #5b8ff0;
+    --accent-soft: #1f2c47;
+    --good: #4cc38a;
+    --good-soft: #17322a;
+    --warn: #e0a640;
+    --warn-soft: #3a2e17;
+    --bad: #ef6b64;
+    --bad-soft: #3d1f1f;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* .button 之類的 display 會蓋掉瀏覽器預設的 [hidden]，按鈕藏不起來。 */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ------------------------------------------------------------ 頂列 */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  padding: 0 24px;
+  height: 56px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+.brand-name { font-weight: 650; font-size: 15px; }
+.brand-version { color: var(--muted); font-size: 12px; }
+
+.nav { display: flex; gap: 4px; }
+.nav a {
+  padding: 6px 14px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+.nav a.active { background: var(--accent-soft); color: var(--accent); }
+
+/* ------------------------------------------------------------ 版面 */
+
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px;
+  display: grid;
+  gap: 20px;
+}
+/* grid 的子項目預設不會縮得比內容窄，寬表格會把整頁撐出畫面；讓表格自己捲動。 */
+.page > * { min-width: 0; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+.card-title { margin: 0 0 16px; font-size: 16px; font-weight: 650; }
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+.stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+}
+.stat-value { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat-label { color: var(--muted); font-size: 13px; }
+
+/* ------------------------------------------------------------ 表單 */
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.spacer { flex: 1; }
+
+.search, select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  height: 36px;
+  padding: 0 12px;
+}
+.search { flex: 1 1 320px; min-width: 0; }
+.search:focus, select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+
+.select { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 14px;
+  font: inherit;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.button:hover { background: var(--surface-2); text-decoration: none; }
+.button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.button.primary:hover { filter: brightness(1.08); }
+.button:disabled { opacity: 0.5; cursor: default; }
+
+.export { display: flex; align-items: center; gap: 8px; }
+
+/* ------------------------------------------------------------ 表格 */
+
+.table-wrap { overflow-x: auto; margin: 0 -20px; }
+.table { width: 100%; border-collapse: collapse; }
+.table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.table th:first-child, .table td:first-child { padding-left: 20px; }
+.table th:last-child, .table td:last-child { padding-right: 20px; }
+.table tbody tr:hover { background: var(--surface-2); }
+.table tbody tr:last-child td { border-bottom: none; }
+
+.company { font-weight: 600; }
+.sub { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.mono { font-family: var(--mono); font-size: 13px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.nowrap { white-space: nowrap; }
+.address { max-width: 280px; color: var(--muted); }
+.muted { color: var(--muted); }
+
+.score {
+  display: inline-block;
+  min-width: 36px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-align: center;
+  font-weight: 650;
+  font-size: 13px;
+}
+.score.high { background: var(--good-soft); color: var(--good); }
+.score.mid { background: var(--warn-soft); color: var(--warn); }
+.score.low { background: var(--surface-2); color: var(--muted); }
+
+.pill {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.pill-valid, .pill-success { background: var(--good-soft); color: var(--good); }
+.pill-bounced, .pill-failed { background: var(--bad-soft); color: var(--bad); }
+.pill-partial, .pill-cancelled { background: var(--warn-soft); color: var(--warn); }
+
+.pager { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; }
+.pager-buttons { display: flex; gap: 8px; }
+
+.empty { text-align: center; padding: 48px 0; }
+.empty p { margin: 4px 0; }
+
+/* ------------------------------------------------------------ 爬取 */
+
+.progress { margin-top: 4px; }
+.progress-bar { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.progress-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.4s ease; }
+
+.notice { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--surface-2); }
+.notice-success { background: var(--good-soft); color: var(--good); }
+.notice-error { background: var(--bad-soft); color: var(--bad); }
+
+/* ------------------------------------------------------------ 窄螢幕 */
+
+@media (max-width: 760px) {
+  .topbar { padding: 0 16px; gap: 16px; }
+  .brand-version { display: none; }
+  .page { padding: 16px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .table-wrap { margin: 0 -20px; }
+}

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}名單 - {{ app_name }}{% endblock %}
+{% block content %}
+<section class="stats">
+  <div class="stat"><span class="stat-value">{{ "{:,}".format(stats.total_companies) }}</span><span class="stat-label">家公司</span></div>
+  <div class="stat"><span class="stat-value">{{ "{:,}".format(stats.total_emails) }}</span><span class="stat-label">有信箱</span></div>
+  <div class="stat"><span class="stat-value">{{ "{:,}".format(stats.verified_emails) }}</span><span class="stat-label">信箱已驗證</span></div>
+  <div class="stat"><span class="stat-value">{{ "{:,}".format(stats.new_this_week) }}</span><span class="stat-label">本週新增</span></div>
+</section>
+
+<section class="card">
+  <form class="toolbar" method="get" action="/">
+    <input class="search" type="search" name="q" value="{{ q }}"
+           placeholder="搜尋公司名稱、信箱、電話、地址、負責人…" aria-label="搜尋">
+    <label class="select">
+      <span>排序</span>
+      <select name="sort" onchange="this.form.submit()">
+        {% for value, text in sort_options.items() %}
+        <option value="{{ value }}" {{ 'selected' if value == sort }}>{{ text }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="button primary" type="submit">搜尋</button>
+    <div class="spacer"></div>
+    <div class="export">
+      <span class="muted">匯出{{ "這 " ~ "{:,}".format(total) ~ " 家" if q else "全部" }}</span>
+      {% for fmt in formats %}
+      <a class="button" href="/export?format={{ fmt }}&q={{ q | urlencode }}">{{ {"excel": "Excel", "csv": "CSV", "json": "JSON"}.get(fmt, fmt) }}</a>
+      {% endfor %}
+    </div>
+  </form>
+
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>公司</th>
+          <th class="num">品質</th>
+          <th>信箱</th>
+          <th>電話</th>
+          <th>負責人／聯絡人</th>
+          <th>地址</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in rows %}
+        <tr>
+          <td>
+            <div class="company">{{ c.company_name }}</div>
+            <div class="sub">
+              {% if c.website %}<a href="{{ c.website }}" target="_blank" rel="noopener noreferrer">{{ c.website | replace("https://", "") | replace("http://", "") }}</a>{% endif %}
+              {% if c.industry %}<span>{{ c.industry }}</span>{% endif %}
+            </div>
+          </td>
+          <td class="num">
+            <span class="score {{ 'high' if c.lead_score >= 70 else ('mid' if c.lead_score >= 40 else 'low') }}">{{ c.lead_score }}</span>
+          </td>
+          <td>
+            {% if c.email %}
+            <div class="mono">{{ c.email }}</div>
+            <div class="sub"><span class="pill pill-{{ c.email_verdict | lower | replace(' ', '-') }}">{{ c.email_verdict | verdict }}</span></div>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td class="mono nowrap">{{ c.phone or "—" }}</td>
+          <td>{{ c.contact_person or "—" }}</td>
+          <td class="address">{{ c.address or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <nav class="pager" aria-label="分頁">
+    <span class="muted">共 {{ "{:,}".format(total) }} 家，第 {{ page }} / {{ pages }} 頁</span>
+    <div class="pager-buttons">
+      {% if page > 1 %}<a class="button" href="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page - 1 }}">上一頁</a>{% endif %}
+      {% if page < pages %}<a class="button" href="/?q={{ q | urlencode }}&sort={{ sort }}&page={{ page + 1 }}">下一頁</a>{% endif %}
+    </div>
+  </nav>
+  {% else %}
+  <div class="empty">
+    {% if q %}
+    <p>找不到符合「{{ q }}」的公司。</p>
+    {% else %}
+    <p>名單還是空的。</p>
+    <p class="muted">到「爬取」頁從名錄網站抓第一批公司。</p>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

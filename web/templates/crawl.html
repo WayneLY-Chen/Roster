@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}爬取 - {{ app_name }}{% endblock %}
+{% block content %}
+<section class="card">
+  <h1 class="card-title">從名錄網站抓公司</h1>
+  {% if sources %}
+  <div class="toolbar">
+    <label class="select">
+      <span>來源</span>
+      <select id="source">
+        <option value="">全部啟用的來源（{{ sources | length }} 個）</option>
+        {% for name in sources %}
+        <option value="{{ name }}">{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="button primary" id="start" type="button">開始爬取</button>
+    <button class="button" id="cancel" type="button" hidden>取消</button>
+  </div>
+  <div class="progress" id="progress" hidden>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    <p class="muted" id="progress-text"></p>
+  </div>
+  <div class="notice" id="message" hidden></div>
+  {% else %}
+  <div class="empty">
+    <p>還沒有啟用任何來源。</p>
+    <p class="muted">來源目前在桌面版的「爬取」頁設定，或直接編輯 config.yaml。</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2 class="card-title">最近幾次</h2>
+  {% if recent %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr><th>來源</th><th>狀態</th><th class="num">頁數</th><th class="num">新增</th><th class="num">更新</th><th>開始時間</th></tr>
+      </thead>
+      <tbody>
+        {% for run in recent %}
+        <tr>
+          <td>{{ run.source }}</td>
+          <td><span class="pill pill-{{ run.status | lower }}">{{ status_labels.get(run.status, run.status) }}</span></td>
+          <td class="num">{{ run.pages_crawled }}</td>
+          <td class="num">{{ run.records_new }}</td>
+          <td class="num">{{ run.records_updated }}</td>
+          <td class="mono nowrap">{{ run.started_at.strftime("%Y-%m-%d %H:%M") if run.started_at else "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">還沒有爬過。</p>
+  {% endif %}
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', path='crawl.js') }}"></script>
+{% endblock %}

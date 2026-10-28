@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">名</span>
+      <span class="brand-name">{{ app_name }}</span>
+      <span class="brand-version">v{{ version }}</span>
+    </div>
+    <nav class="nav">
+      {% set here = request.url.path %}
+      <a href="/" class="{{ 'active' if here == '/' }}">名單</a>
+      <a href="/crawl" class="{{ 'active' if here == '/crawl' }}">爬取</a>
+    </nav>
+  </header>
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

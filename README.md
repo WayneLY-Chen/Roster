@@ -42,8 +42,20 @@ macOS 還會順便產生 `Roster.app`。可以重複執行，已經裝好的部�
 | | Windows | macOS | Linux |
 |---|---|---|---|
 | 開啟程式 | `Windows/啟動.bat` | `macOS/啟動.command` 或 `Roster.app` | `Linux/start.sh` |
+| 用瀏覽器開（網頁版） | `Windows/網頁版.bat` | `macOS/網頁版.command` | `Linux/web.sh` |
 | 命令列 | `Windows/命令列.bat` | `macOS/命令列.command` | `Linux/console.sh` |
 | 更新到新版 | `Windows/更新.bat` | `macOS/更新.command` | `Linux/update.sh` |
+
+### 網頁版
+
+雙擊「網頁版」會在瀏覽器裡打開名單匠，資料庫跟桌面版是同一份，兩個可以
+輪流用。目前有名單（搜尋、排序、名單品質）、匯出（Excel／CSV／JSON）與爬取；
+其他功能（寄信、補齊資料、設定）暫時還是要用桌面版。
+
+- 跳出來的終端機視窗就是網頁伺服器：開著網頁才能用，關掉視窗網頁就停了。
+- **只有這台電腦連得到**。每次啟動都會換一組隨機通行碼，同一個網路裡的其他
+  電腦、或你在瀏覽器裡開的其他網站，都碰不到你的名單。
+- 瀏覽器沒有自動打開的話，把終端機裡印出來的網址貼到瀏覽器。
 
 ### 更新到新版本
 

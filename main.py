@@ -398,6 +398,19 @@ def gui() -> None:
     run_gui_qt()
 
 
+@app.command()
+def web(
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not open the browser."),
+) -> None:
+    """Open the web interface in your browser (only reachable from this computer)."""
+    config = _bootstrap()
+
+    from web.server import serve
+
+    get_logger(LogCategory.GUI).info("web interface starting")
+    serve(config, open_browser=not no_browser)
+
+
 # --------------------------------------------------------------------- stats
 
 
