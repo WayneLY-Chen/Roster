@@ -243,6 +243,7 @@ class MailController:
             raise CRMError("尚未設定 Gmail 寄件帳號，請先到「設定」頁填好。")
         if not (subject or body or "").strip():
             raise CRMError("樣板是空的，先寫主旨與內文。")
+        campaign_module.check_images(body, self.config)
         company = _first_sendable_company(plan) or {
             "company_name": "範例股份有限公司", "contact_person": "王小明",
         }

@@ -697,3 +697,72 @@ def test_a_timeout_is_explained_in_plain_words(mail_config, monkeypatch):
     sender.connect()
     with pytest.raises(GmailError, match="附件太大或網路上傳太慢"):
         sender.send(Msg())
+
+
+# ------------------------------------------------------------- 內文圖片
+
+
+def _images_dir(config):
+    folder = config.mailer.resolved_templates_dir / "images"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _html_parts(message):
+    return [p for p in message.walk() if p.get_content_type() == "text/html"]
+
+
+def _send_body(mail_config, monkeypatch, body):
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", FakeSMTP)
+
+    class Msg:
+        to_address = "target@example.com"
+        subject = "s"
+
+    Msg.body = body
+    sender = SmtpSender(mail_config)
+    sender.connect()
+    sender.send(Msg())
+    return FakeSMTP.instances[-1].sent_messages[-1]
+
+
+def test_a_missing_image_stops_the_list_instead_of_sending_without_it(db_session, mail_config):
+    """以前找不到的圖片會被默默拿掉照寄，收件人收到的信就是沒有圖。"""
+    templates.save_template(
+        "with-logo", subject="s", body='<p><img src="images/logo.png" />您好</p>', config=mail_config
+    )
+    _make_company(db_session)
+
+    with pytest.raises(GmailError, match="logo.png"):
+        campaign.build_plan(CompanyFilter(), "with-logo", "camp", mail_config)
+
+
+def test_an_image_is_found_whatever_order_its_attributes_are_in(mail_config, monkeypatch):
+    (_images_dir(mail_config) / "logo.png").write_bytes(b"\x89PNG fake")
+
+    message = _send_body(
+        mail_config, monkeypatch, "<p><img alt='公司' width=40 src='images/logo.png'>您好</p>"
+    )
+
+    html = _html_parts(message)[0].get_content()
+    assert "cid:" in html and "images/logo.png" not in html
+    assert any(p.get_content_type() == "image/png" for p in message.walk())
+
+
+def test_a_pasted_image_becomes_an_inline_attachment(mail_config, monkeypatch):
+    """Gmail 會把 data: 圖片擋掉，收件人看到的是破圖。"""
+    import base64
+
+    data = base64.b64encode(b"\x89PNG fake").decode()
+    message = _send_body(mail_config, monkeypatch, f'<p><img src="data:image/png;base64,{data}">您好</p>')
+
+    html = _html_parts(message)[0].get_content()
+    assert "data:image" not in html and "cid:" in html
+    image = next(p for p in message.walk() if p.get_content_type() == "image/png")
+    assert image.get_content() == b"\x89PNG fake"
+
+
+def test_images_on_the_web_are_left_as_they_are(mail_config, monkeypatch):
+    message = _send_body(mail_config, monkeypatch, '<p><img src="https://example.com/a.png">您好</p>')
+
+    assert "https://example.com/a.png" in _html_parts(message)[0].get_content()

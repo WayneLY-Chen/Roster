@@ -197,6 +197,7 @@ def build_plan(
     config = config or get_config()
     mailer = config.mailer
     template = template or load_template(template_name, config)
+    check_images(template.body, config)
 
     attachment_names = list(attachments or [])
     if attachment_names:
@@ -267,6 +268,23 @@ def build_plan(
         daily_remaining=max(remaining_today - sendable, 0),
         attachments=attachment_names,
     )
+
+
+def check_images(body: str, config: AppConfig | None = None) -> None:
+    """樣板用到的圖片都找得到嗎？找不到就停下來，講清楚是哪一張、該放哪裡。
+
+    以前找不到的圖片會在寄出時被默默拿掉，收件人收到的信就是沒有圖，而寄的人
+    完全不知道。
+    """
+    from gmail.sender import missing_images
+
+    missing = missing_images(body, config)
+    if missing:
+        raise GmailError(
+            f"樣板裡的圖片找不到：{'、'.join(missing)}。"
+            "圖片要放在名單匠資料夾的 templates/mail/images/ 裡；"
+            "或者在樣板裡把那張圖刪掉、重新插入一次。"
+        )
 
 
 def final_body(body: str, mailer) -> str:  # noqa: ANN001 - MailerSection

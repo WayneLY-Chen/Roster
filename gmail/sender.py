@@ -10,12 +10,17 @@ resend windows) belongs to :mod:`gmail.campaign`, not here.
 
 from __future__ import annotations
 
+import base64
+import mimetypes
+import re
 import smtplib
 import ssl
+import uuid
 from email.message import EmailMessage as MimeMessage
 from email.utils import formataddr, make_msgid
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import unquote
 
 from core.config import AppConfig, get_config
 from core.constants import LogCategory
@@ -55,6 +60,64 @@ def _explain(exc: smtplib.SMTPException) -> str:
     if isinstance(exc.__context__, TimeoutError) or isinstance(exc.__cause__, TimeoutError):
         return f"{exc}（信件送太久被切斷，多半是附件太大或網路上傳太慢）"
     return str(exc)
+
+
+#: 內文裡的 ``<img ...>``。src 不一定是第一個屬性（從別處貼上的 HTML 常常
+#: 是 ``<img alt="..." src="...">``），單引號雙引號都可能。
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_SRC_RE = re.compile(r"""\bsrc\s*=\s*(["'])(.*?)\1""", re.IGNORECASE | re.DOTALL)
+#: 直接貼進來的圖片會是 ``data:`` 網址。Gmail 會把它擋掉，要換成內嵌附件。
+_DATA_URI_RE = re.compile(r"^data:image/([\w.+-]+);base64,(.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def images_folder(config: AppConfig | None = None) -> Path:
+    """樣板圖片放在哪裡。編輯器插入圖片時也是存到這裡（gui_qt/composer.py）。"""
+    return (config or get_config()).mailer.resolved_templates_dir / "images"
+
+
+def _is_remote(source: str) -> bool:
+    """網路上的圖片與已經是內嵌引用的，不用處理。"""
+    return source.startswith(("http://", "https://", "cid:"))
+
+
+def _read_image(source: str, images_dir: Path) -> tuple[bytes, str]:
+    """一張內文圖片的內容與子類型（``png``、``jpeg``⋯⋯）。讀不到就丟 :class:`GmailError`。"""
+    data_uri = _DATA_URI_RE.match(source.strip())
+    if data_uri:
+        try:
+            return base64.b64decode(data_uri.group(2)), data_uri.group(1).lower()
+        except ValueError as exc:
+            raise GmailError("一張直接貼上的圖片內容壞掉了") from exc
+
+    name = Path(unquote(source)).name
+    path = (images_dir / name).resolve()
+    try:
+        # 只准讀圖片資料夾裡的檔案：樣板是可以編輯的檔案，
+        # "images/../../../.env" 不能變成一個附件。
+        path.relative_to(images_dir.resolve())
+        data = path.read_bytes()
+    except (OSError, ValueError) as exc:
+        raise GmailError(f"樣板裡的圖片「{name}」找不到") from exc
+    guessed, _ = mimetypes.guess_type(path.name)
+    return data, (guessed or "image/png").split("/")[-1]
+
+
+def missing_images(body: str, config: AppConfig | None = None) -> list[str]:
+    """內文用到、但在圖片資料夾裡找不到的圖片檔名。全部找得到就是空的。
+
+    產生名單與寄測試信之前先檢查，找不到就停下來講清楚，不要寄出一封缺圖的信。
+    """
+    images_dir = images_folder(config)
+    missing: list[str] = []
+    for tag in _IMG_TAG_RE.findall(body or ""):
+        src = _SRC_RE.search(tag)
+        if src is None or _is_remote(src.group(2)):
+            continue
+        try:
+            _read_image(src.group(2), images_dir)
+        except GmailError:
+            missing.append(Path(unquote(src.group(2))).name)
+    return missing
 
 
 class SendableMessage(Protocol):
@@ -250,41 +313,30 @@ class SmtpSender:
             )
 
     def _resolve_images(self, body: str) -> tuple[str, dict[str, tuple[bytes, str]]]:
-        """Swap ``src="images/x.png"`` for ``src="cid:..."`` and read the files.
+        """把內文圖片換成 ``cid:`` 引用，並讀出圖片內容。
 
-        A missing or unreadable image is dropped from the message rather than
-        aborting the send: one broken logo should not stop a campaign.
+        讀不到的圖片在這裡只能整個 ``<img>`` 拿掉——但正常情況走不到這一步：
+        產生名單與寄測試信之前就會用 :func:`missing_images` 擋下來，告訴使用者
+        是哪一張找不到。以前是默默拿掉照寄，收件人看到的信就是沒有圖。
         """
-        import mimetypes
-        import re
-        import uuid
-
-        images_dir = self.settings.resolved_templates_dir / "images"
+        images_dir = images_folder(self.config)
         found: dict[str, tuple[bytes, str]] = {}
 
-        def _swap(match: "re.Match[str]") -> str:
-            source = match.group(1)
-            if source.startswith(("http://", "https://", "cid:")):
-                return match.group(0)
-
-            path = (images_dir / Path(source).name).resolve()
+        def _swap(match: re.Match[str]) -> str:
+            tag = match.group(0)
+            src = _SRC_RE.search(tag)
+            if src is None or _is_remote(src.group(2)):
+                return tag
             try:
-                # Confine reads to the images folder: a template is an editable
-                # file, and "images/../../../.env" must not become an attachment.
-                path.relative_to(images_dir.resolve())
-                data = path.read_bytes()
-            except (OSError, ValueError):
-                log.warning("信件圖片讀不到，已略過：{}", source)
+                data, subtype = _read_image(src.group(2), images_dir)
+            except GmailError as exc:
+                log.warning("{}，已從信件裡拿掉", exc)
                 return ""
-
-            guessed, _ = mimetypes.guess_type(path.name)
-            subtype = (guessed or "image/png").split("/")[-1]
             cid = f"{uuid.uuid4().hex}@roster"
             found[cid] = (data, subtype)
-            return f'<img src="cid:{cid}"'
+            return tag[: src.start(2)] + f"cid:{cid}" + tag[src.end(2):]
 
-        rewritten = re.sub(r'<img\s+src="([^"]*)"', _swap, body)
-        return rewritten, found
+        return _IMG_TAG_RE.sub(_swap, body), found
 
     def __enter__(self) -> "SmtpSender":
         self.connect()
