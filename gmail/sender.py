@@ -31,6 +31,32 @@ _APP_PASSWORD_HELP = (
 )
 
 
+#: 連線、登入、一般指令最多等幾秒。
+_CONNECT_TIMEOUT = 30
+
+#: 送信時假設上傳速度至少有這麼快（位元組／秒），用來決定要等多久。
+#: 50 KB/s 是很慢的網路；實際上大多快得多，這裡只是不要太早放棄。
+_MIN_UPLOAD_BYTES_PER_SECOND = 50_000
+
+
+def _send_timeout(size: int) -> float:
+    """寄一封 ``size`` 位元組的信，最多等幾秒。
+
+    Python 的 socket 逾時算的是**整個送出動作的總時間**，不是兩次送出之間的
+    間隔。以前固定 30 秒：一封帶 10 MB 附件的信，在每秒上傳 300 KB 的網路上
+    要 30 幾秒才送得完，於是每一次都在 30 秒整被切斷，畫面上看到的是
+    「Server not connected」，重連再寄也一樣送不完。
+    """
+    return max(float(_CONNECT_TIMEOUT), size / _MIN_UPLOAD_BYTES_PER_SECOND)
+
+
+def _explain(exc: smtplib.SMTPException) -> str:
+    """寄送失敗的原因。是送太久被切斷的話，講清楚是附件太大或網路太慢。"""
+    if isinstance(exc.__context__, TimeoutError) or isinstance(exc.__cause__, TimeoutError):
+        return f"{exc}（信件送太久被切斷，多半是附件太大或網路上傳太慢）"
+    return str(exc)
+
+
 class SendableMessage(Protocol):
     """Anything with these three attributes can be sent.
 
@@ -61,7 +87,9 @@ class SmtpSender:
                 + _APP_PASSWORD_HELP
             )
         try:
-            connection = smtplib.SMTP(self.settings.smtp_host, self.settings.smtp_port, timeout=30)
+            connection = smtplib.SMTP(
+                self.settings.smtp_host, self.settings.smtp_port, timeout=_CONNECT_TIMEOUT
+            )
             connection.ehlo()
             if self.settings.use_tls:
                 # 一定要傳 context。不傳的話 smtplib 用的是**不驗證憑證**的
@@ -143,7 +171,7 @@ class SmtpSender:
         self._add_attachments(mime, attachments or [])
 
         try:
-            self._connection.send_message(mime)
+            self._deliver(mime)
         except smtplib.SMTPServerDisconnected:
             # Gmail 會把閒置一陣子的連線關掉（每封間隔設得長的時候最常見），
             # 之後每一封都會是「Server not connected」。重連一次再試；還是不行
@@ -151,12 +179,26 @@ class SmtpSender:
             log.info("SMTP 連線被關掉了，重新連線後再寄一次")
             self.connect()
             try:
-                self._connection.send_message(mime)
+                self._deliver(mime)
             except smtplib.SMTPException as exc:
-                raise GmailError(f"寄送給 {to_address} 失敗：{exc}") from exc
+                raise GmailError(f"寄送給 {to_address} 失敗：{_explain(exc)}") from exc
         except smtplib.SMTPException as exc:
-            raise GmailError(f"寄送給 {to_address} 失敗：{exc}") from exc
+            raise GmailError(f"寄送給 {to_address} 失敗：{_explain(exc)}") from exc
         return rfc_message_id
+
+    def _deliver(self, mime: MimeMessage) -> None:
+        """把組好的信交給 SMTP，送信的那段時間依信件大小放寬。"""
+        assert self._connection is not None
+        sock = getattr(self._connection, "sock", None)
+        if sock is not None:
+            sock.settimeout(_send_timeout(len(mime.as_bytes())))
+        try:
+            self._connection.send_message(mime)
+        finally:
+            # 斷線的話 sock 會變成 None；沒斷就把逾時改回一般指令用的長度。
+            sock = getattr(self._connection, "sock", None)
+            if sock is not None:
+                sock.settimeout(_CONNECT_TIMEOUT)
 
     def _set_body(self, mime: MimeMessage, body: str) -> None:
         """Attach the body, as plain text or as HTML with inline images.

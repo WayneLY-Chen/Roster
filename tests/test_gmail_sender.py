@@ -647,3 +647,53 @@ def test_a_dropped_smtp_connection_is_reconnected_once(mail_config, monkeypatch)
 
     assert len(connects) == 2
     assert FakeSMTP.instances[-1].sent_messages
+
+
+def test_a_big_message_gets_enough_time_to_upload(mail_config, monkeypatch):
+    """以前固定 30 秒：附件大一點、網路慢一點，每次都在 30 秒整被切斷。"""
+    timeouts: list[float] = []
+
+    class Sock:
+        def settimeout(self, value):
+            timeouts.append(value)
+
+    class SlowLinkSMTP(FakeSMTP):
+        def __init__(self, host, port, timeout=None):
+            super().__init__(host, port, timeout)
+            self.sock = Sock()
+
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", SlowLinkSMTP)
+
+    class Msg:
+        to_address = "target@example.com"
+        subject = "型錄"
+        body = "請參考附件"
+
+    sender = SmtpSender(mail_config)
+    sender.connect()
+    sender.send(Msg(), [("catalog.pdf", b"x" * 5_000_000, "application/pdf")])
+
+    # 5 MB 附件編碼後約 6.8 MB：以每秒 50 KB 估，至少要給 130 秒，送完再改回 30 秒。
+    assert timeouts[0] > 130
+    assert timeouts[-1] == 30
+
+
+def test_a_timeout_is_explained_in_plain_words(mail_config, monkeypatch):
+    class TimingOutSMTP(FakeSMTP):
+        def send_message(self, message):
+            try:
+                raise TimeoutError("The write operation timed out")
+            except TimeoutError:
+                raise smtplib.SMTPServerDisconnected("Server not connected")
+
+    monkeypatch.setattr(sender_module.smtplib, "SMTP", TimingOutSMTP)
+
+    class Msg:
+        to_address = "target@example.com"
+        subject = "s"
+        body = "b"
+
+    sender = SmtpSender(mail_config)
+    sender.connect()
+    with pytest.raises(GmailError, match="附件太大或網路上傳太慢"):
+        sender.send(Msg())
