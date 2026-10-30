@@ -677,7 +677,7 @@ class AISection(_Base):
 
     #: 用哪一個供應商。``auto`` 是「本機的 Ollama 跑得起來就用它，否則用
     #: OpenRouter」——本機優先是刻意的，見 :mod:`ai.provider` 的模組說明。
-    provider: Literal["auto", "openrouter", "anthropic", "ollama"] = "auto"
+    provider: Literal["auto", "maiagent", "openrouter", "anthropic", "ollama"] = "auto"
 
     #: 使用者上次選的模型代號（例如 ``gemma3:12b``）。
     #:

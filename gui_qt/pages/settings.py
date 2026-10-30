@@ -621,6 +621,12 @@ class SettingsPage(BasePage):
         section.body_layout.addLayout(model_row)
 
         key_row = QHBoxLayout()
+        self.maiagent_key_entry = LabeledEntry("MaiAgent 金鑰", placeholder="選填")
+        self.maiagent_key_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
+        self.maiagent_key_entry.entry.setToolTip(
+            "在 MaiAgent 後台「組織設定 → API Key 管理」產生。組織要開通 AI Gateway 才能用。"
+        )
+        key_row.addWidget(self.maiagent_key_entry, 1)
         self.openrouter_key_entry = LabeledEntry("OpenRouter 金鑰", placeholder="選填")
         self.openrouter_key_entry.entry.setEchoMode(QLineEdit.EchoMode.Password)
         key_row.addWidget(self.openrouter_key_entry, 1)
@@ -762,9 +768,10 @@ class SettingsPage(BasePage):
 
     def _save_ai_key(self) -> None:
         """空白一律不動，理由跟搜尋金鑰那一段一樣（金鑰不會被讀回畫面上）。"""
-        from ai.provider import ANTHROPIC_KEY_SECRET, OPENROUTER_KEY_SECRET
+        from ai.provider import ANTHROPIC_KEY_SECRET, MAIAGENT_KEY_SECRET, OPENROUTER_KEY_SECRET
 
         pending = {
+            MAIAGENT_KEY_SECRET: self.maiagent_key_entry.get().strip(),
             OPENROUTER_KEY_SECRET: self.openrouter_key_entry.get().strip(),
             ANTHROPIC_KEY_SECRET: self.anthropic_key_entry.get().strip(),
         }
@@ -778,20 +785,23 @@ class SettingsPage(BasePage):
         except CRMError as exc:
             self.report_error(exc)
             return
-        for entry in (self.openrouter_key_entry, self.anthropic_key_entry):
+        for entry in self._ai_key_entries():
             entry.set("")
         self._refresh_ai_status()
         self.status("金鑰已存進系統憑證保管庫", "success")
 
     def _clear_ai_key(self) -> None:
-        from ai.provider import ANTHROPIC_KEY_SECRET, OPENROUTER_KEY_SECRET
+        from ai.provider import ANTHROPIC_KEY_SECRET, MAIAGENT_KEY_SECRET, OPENROUTER_KEY_SECRET
 
-        for name in (OPENROUTER_KEY_SECRET, ANTHROPIC_KEY_SECRET):
+        for name in (MAIAGENT_KEY_SECRET, OPENROUTER_KEY_SECRET, ANTHROPIC_KEY_SECRET):
             self.controller.delete_credential(name)
-        for entry in (self.openrouter_key_entry, self.anthropic_key_entry):
+        for entry in self._ai_key_entries():
             entry.set("")
         self._refresh_ai_status()
         self.status("AI 金鑰已清除", "success")
+
+    def _ai_key_entries(self) -> tuple[LabeledEntry, ...]:
+        return (self.maiagent_key_entry, self.openrouter_key_entry, self.anthropic_key_entry)
 
     def _save_ai_prompt(self) -> None:
         try:

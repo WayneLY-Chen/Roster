@@ -55,6 +55,11 @@ OPENROUTER_KEY_SECRET = "openrouter_key"
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
+#: MaiAgent 的 AI Gateway：介面與 OpenAI 相容，金鑰在 MaiAgent 後台的
+#: 「組織設定 → API Key 管理」產生。組織要開通 AI Gateway 才能用。
+MAIAGENT_KEY_SECRET = "maiagent_key"
+MAIAGENT_BASE = "https://api.maiagent.ai/api/v1"
+
 ANTHROPIC_KEY_SECRET = "anthropic_key"
 ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 #: Anthropic 要求每個請求都帶版本，這個字串是他們定的常數不是我們的設定。
@@ -193,23 +198,30 @@ class BaseProvider(ABC):
 
 
 class OpenRouterProvider(BaseProvider):
-    """OpenRouter：一把金鑰通到幾百個模型，介面與 OpenAI 相容。"""
+    """OpenRouter：一把金鑰通到幾百個模型，介面與 OpenAI 相容。
+
+    其他跟 OpenAI 相容的服務（MaiAgent）繼承這一個，換掉下面三個值就好。
+    """
 
     name = "openrouter"
     label = "OpenRouter（需要金鑰）"
     sends_data_off_device = True
+    #: 錯誤訊息裡怎麼稱呼這個服務。
+    who = "OpenRouter"
+    base_url = OPENROUTER_BASE
+    key_secret = OPENROUTER_KEY_SECRET
 
     def _key(self) -> str:
-        key = get_secret(OPENROUTER_KEY_SECRET).strip()
+        key = get_secret(self.key_secret).strip()
         if not key:
             raise AINotConfigured(
-                "還沒有設定 OpenRouter 金鑰。到「設定」頁的「AI 模型」填進去，"
+                f"還沒有設定 {self.who} 金鑰。到「設定」頁的「AI 模型」填進去，"
                 "或改用本機的 Ollama。"
             )
         return key
 
     def is_configured(self) -> bool:
-        return bool(get_secret(OPENROUTER_KEY_SECRET).strip())
+        return bool(get_secret(self.key_secret).strip())
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -223,16 +235,16 @@ class OpenRouterProvider(BaseProvider):
         headers = self._headers()  # 沒金鑰時給「去設定」而不是「連線失敗」
         try:
             response = httpx.get(
-                f"{OPENROUTER_BASE}/models", headers=headers, timeout=LIST_TIMEOUT
+                f"{self.base_url}/models", headers=headers, timeout=LIST_TIMEOUT
             )
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPStatusError as exc:
-            raise AIError(_http_message("OpenRouter", exc)) from exc
+            raise AIError(_http_message(self.who, exc)) from exc
         except httpx.HTTPError as exc:
-            raise AIError(f"連不上 OpenRouter：{exc}") from exc
+            raise AIError(f"連不上 {self.who}：{exc}") from exc
         except ValueError as exc:
-            raise AIError("OpenRouter 回了看不懂的內容。") from exc
+            raise AIError(f"{self.who} 回了看不懂的內容。") from exc
 
         models: list[Model] = []
         for item in payload.get("data", []):
@@ -266,13 +278,30 @@ class OpenRouterProvider(BaseProvider):
             "temperature": settings.temperature,
             "max_tokens": max_tokens or settings.max_output_tokens,
         }
-        url = f"{OPENROUTER_BASE}/chat/completions"
+        url = f"{self.base_url}/chat/completions"
         if on_chunk is None:
             return _post_json_chat(
-                url, headers, body, self._timeout, "OpenRouter", _openrouter_content
+                url, headers, body, self._timeout, self.who, _openrouter_content
             )
         body["stream"] = True
-        return _stream_sse(url, headers, body, self._timeout, "OpenRouter", on_chunk)
+        return _stream_sse(url, headers, body, self._timeout, self.who, on_chunk)
+
+
+class MaiAgentProvider(OpenRouterProvider):
+    """MaiAgent 的 AI Gateway，介面與 OpenAI 相容。
+
+    模型名稱一律是「廠商/模型」的形式；清單只列這把金鑰實際能呼叫的模型。
+    組織沒開通 AI Gateway 的話，每個請求都會被拒絕（401）。
+    """
+
+    name = "maiagent"
+    label = "MaiAgent（需要金鑰）"
+    who = "MaiAgent"
+    base_url = MAIAGENT_BASE
+    key_secret = MAIAGENT_KEY_SECRET
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._key()}", "Content-Type": "application/json"}
 
 
 class AnthropicProvider(BaseProvider):
@@ -479,13 +508,14 @@ class OllamaProvider(BaseProvider):
 
 #: 名稱 -> 類別。加新的供應商只要在這裡多一行。
 PROVIDERS: dict[str, type[BaseProvider]] = {
+    "maiagent": MaiAgentProvider,
     "openrouter": OpenRouterProvider,
     "anthropic": AnthropicProvider,
     "ollama": OllamaProvider,
 }
 
 #: ``auto`` 的優先序：本機優先。理由見模組說明。
-AUTO_ORDER: tuple[str, ...] = ("ollama", "openrouter", "anthropic")
+AUTO_ORDER: tuple[str, ...] = ("ollama", "maiagent", "openrouter", "anthropic")
 
 
 def available_providers() -> dict[str, str]:

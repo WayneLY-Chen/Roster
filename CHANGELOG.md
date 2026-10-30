@@ -1,5 +1,15 @@
 # 更新紀錄
 
+## 1.33.0 — 2026-10-30
+
+### 新增
+
+- **AI 可以用 MaiAgent**
+
+  「設定」頁「AI 模型」多了 MaiAgent：在 MaiAgent 後台「組織設定 → API Key 管理」
+  產生金鑰填進來，選 MaiAgent、按「重新整理」就能選模型。用的是 MaiAgent 的
+  AI Gateway，組織要先開通。詳見 [AI 助手](docs/AI.md)。
+
 ## 1.32.4 — 2026-10-30
 
 ### 修正

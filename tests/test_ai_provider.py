@@ -389,3 +389,59 @@ def test_anthropic_streams_text_deltas_only(no_secrets, mock_http):
     )
     assert seen == ["你", "好"]
     assert reply == "你好"
+
+
+# ------------------------------------------------------------------ MaiAgent
+
+
+def test_maiagent_talks_to_its_gateway_with_a_bearer_key(no_secrets, mock_http):
+    """MaiAgent 的 AI Gateway 只收 Bearer；寫成 Api-Key 會被拒絕。"""
+    from ai.provider import MAIAGENT_KEY_SECRET, MaiAgentProvider
+
+    no_secrets[MAIAGENT_KEY_SECRET] = "mai-test"
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "您好"}}]})
+
+    mock_http(handler)
+    reply = MaiAgentProvider().chat([ChatMessage("user", "hi")], "openai/gpt-4o-mini")
+
+    assert reply == "您好"
+    assert seen["url"] == "https://api.maiagent.ai/api/v1/chat/completions"
+    assert seen["auth"] == "Bearer mai-test"
+    assert seen["body"]["model"] == "openai/gpt-4o-mini"
+
+
+def test_maiagent_lists_the_models_its_key_can_use(no_secrets, mock_http):
+    from ai.provider import MAIAGENT_KEY_SECRET, MaiAgentProvider
+
+    no_secrets[MAIAGENT_KEY_SECRET] = "mai-test"
+    mock_http(lambda request: httpx.Response(
+        200, json={"data": [{"id": "openai/gpt-4o-mini"}, {"id": "anthropic/claude-sonnet"}]}
+    ))
+
+    ids = {model.id for model in MaiAgentProvider().list_models()}
+
+    assert ids == {"openai/gpt-4o-mini", "anthropic/claude-sonnet"}
+
+
+def test_maiagent_without_a_key_says_where_to_put_one(no_secrets):
+    from ai.provider import MaiAgentProvider
+
+    with pytest.raises(AINotConfigured, match="MaiAgent"):
+        MaiAgentProvider().chat([ChatMessage("user", "hi")], "openai/gpt-4o-mini")
+
+
+def test_a_rejected_maiagent_key_is_explained(no_secrets, mock_http):
+    """組織沒開通 AI Gateway、或金鑰錯，都是 401。"""
+    from ai.provider import MAIAGENT_KEY_SECRET, MaiAgentProvider
+
+    no_secrets[MAIAGENT_KEY_SECRET] = "wrong"
+    mock_http(lambda request: httpx.Response(401, json={"detail": "nope"}))
+
+    with pytest.raises(AIError, match="MaiAgent 說金鑰不對"):
+        MaiAgentProvider().chat([ChatMessage("user", "hi")], "openai/gpt-4o-mini")
