@@ -1329,6 +1329,9 @@ def test_dry_run_then_test_email_then_real_send_all_work(
     assert len(_RecordingSMTP.sent) - before == sendable
     assert "畫面上改過" in _RecordingSMTP.sent[-1].get_content()
     assert any(row["status"] == "已寄出" for row in page._rows)
+    # 「今日已寄」跟著每一封跳，不是等整批寄完才更新。
+    assert any(message.startswith("正在寄給") for message, _tone in app.messages)
+    assert page.daily_card is not None and page._daily_sent >= sendable
     db_session.refresh(company)
     assert app.messages and not any(tone == "error" for _m, tone in app.messages)
 
@@ -1379,3 +1382,24 @@ def test_saving_a_builtin_sample_template_asks_for_your_own_name(
     assert templates.load_template("範例-初次開發信", mail_config).body == "b"
     assert "我自己的內容" in templates.load_template("我的開發信", mail_config).body
     assert page.template_combo.currentText() == "我的開發信"
+
+
+def test_the_daily_counter_moves_with_each_email_not_only_at_the_end(
+    qt_app, db_session, mail_config
+):
+    app = _FakeApp()
+    page = MailPage(app)
+    page.ensure_built()
+    page.on_show()
+    _wait_for(qt_app, page.status_task)
+    before = page._daily_sent
+
+    page._on_send_progress({"company_id": 1, "company_name": "A", "status": "Pending"})
+    assert page._daily_sent == before
+    assert app.messages[-1][0] == "正在寄給 A…"
+
+    page._on_send_progress({"company_id": 1, "company_name": "A", "status": "Sent"})
+    assert page._daily_sent == before + 1
+
+    page._on_send_progress({"company_id": 2, "company_name": "B", "status": "Dry Run"})
+    assert page._daily_sent == before + 1  # 演練沒有真的寄出，不算

@@ -389,6 +389,10 @@ def send_campaign(
 
             rfc_message_id: str | None = None
             if not mailer.dry_run:
+                # 先講一聲「正在寄這一家」：附件大的時候一封要傳好一陣子，畫面上
+                # 不講的話看起來就像卡住了，按取消也像沒反應。
+                if report is not None:
+                    report(recipient, EmailStatus.PENDING)
                 try:
                     assert sender is not None
                     rfc_message_id = sender.send(message, loaded_attachments)

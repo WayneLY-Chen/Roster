@@ -158,6 +158,9 @@ class MailPage(BasePage):
         self.plan: Any = None
         #: 名單表的每一列，寄送進度會寫回這裡。
         self._rows: list[dict[str, Any]] = []
+        #: 「今日已寄」卡片上的數字，寄送時每寄出一封就加一。
+        self._daily_sent = 0
+        self._daily_limit = 0
         self._mailer_ready = False
         #: Gmail 帳號與應用程式密碼都填好了。寄測試信只需要這個。
         self._account_ready = False
@@ -1366,9 +1369,9 @@ class MailPage(BasePage):
             account_display,
             "帳號已就緒" if status["account_ready"] == "是" else "尚未設定應用程式密碼",
         )
-        self.daily_card.update_values(
-            f"{status['daily_sent']} / {status['daily_limit']}", "封（今日）"
-        )
+        self._daily_sent = int(status["daily_sent"])
+        self._daily_limit = int(status["daily_limit"])
+        self.daily_card.update_values(f"{self._daily_sent} / {self._daily_limit}", "封（今日）")
         dry_run = status["dry_run"] == "是"
         enabled = status["enabled"] == "是"
         self.mode_card.update_values(
@@ -1784,12 +1787,23 @@ class MailPage(BasePage):
     def _cancel_send(self) -> None:
         if self.send_task.running:
             self.send_task.cancel()
-            self.status("取消中...", "muted")
+            # 正在上傳的那一封沒辦法安全地中途切斷（切了不知道對方收到沒），
+            # 所以是寄完這一封就停。附件大的時候要等一下，講清楚才不像卡住。
+            self.status("取消中：目前這一封寄完就停，不會再寄下一封", "muted")
             self.cancel_send_button.setEnabled(False)
 
     def _on_send_progress(self, payload: dict[str, Any]) -> None:
-        status = _SEND_STATUS_TEXT.get(payload.get("status", ""), payload.get("status", ""))
-        self.status(f"已處理 {payload.get('company_name', '')}（{status}）", "normal")
+        code = payload.get("status", "")
+        status = _SEND_STATUS_TEXT.get(code, code)
+        name = payload.get("company_name", "")
+        if code == "Pending":
+            self.status(f"正在寄給 {name}…", "normal")
+        else:
+            self.status(f"已處理 {name}（{status}）", "normal")
+        if code == "Sent":
+            # 「今日已寄」跟著跳，不必等整批寄完。
+            self._daily_sent += 1
+            self.daily_card.update_values(f"{self._daily_sent} / {self._daily_limit}", "封（今日）")
         # 寫回名單表那一列：演練完也看得到每一封的結果，點兩下就是內容。
         for row in self._rows:
             if row.get("_company_id") == payload.get("company_id"):
@@ -1865,6 +1879,7 @@ BUILTIN_TEMPLATE_PREFIX = "範例-"
 
 #: 寄送進度裡的狀態代碼 -> 名單表上顯示的字。
 _SEND_STATUS_TEXT = {
+    "Pending": "寄送中…",
     "Sent": "已寄出",
     "Dry Run": "演練（沒寄出）",
     "Failed": "失敗",
