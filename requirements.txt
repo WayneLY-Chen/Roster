@@ -10,6 +10,9 @@ tenacity>=9.2.1
 # Verify HTTPS against the OS trust store. Many Taiwanese sites use TWCA
 # certificates that Python's bundled store rejects but Windows accepts.
 truststore>=0.10.5
+# 沒走 truststore 的地方（例如 pip 本身、第三方套件自己開的連線）仍然吃
+# certifi。2026.10.19 之前的版本還信任 eMudhra 外洩私鑰的那 8 張中間 CA。
+certifi>=2026.10.19
 
 # --- data / export ---
 # 上限是刻意的：pandas 3.0 是有破壞性變更的大版本（寫時複製、字串 dtype
@@ -24,6 +27,10 @@ openpyxl>=3.1.5
 pdfplumber>=0.11.10
 python-docx>=1.2.0
 python-pptx>=1.0.2
+# pdfplumber 與 python-pptx 都靠 Pillow 解圖，而名冊 PDF 是從別人的網站抓回
+# 來的——不受信任的圖片正是 Pillow 漏洞的觸發點。12.x 有 35 筆已知漏洞，13.0.0 才修。
+# 以前沒寫這行（被 pdfplumber 間接帶進來），沒有任何東西擋住舊版。
+pillow>=13.0.0
 
 # --- persistence ---
 SQLAlchemy>=2.1.6

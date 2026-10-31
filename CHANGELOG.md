@@ -1,5 +1,24 @@
 # 更新紀錄
 
+## 1.33.1 — 2026-11-01
+
+安全修補：照 `requirements.txt` 重建環境時，不會再裝回有漏洞的版本。
+
+### 修正
+
+- **Pillow 至少 13.0.0**
+
+  名冊 PDF 是從別人的網站抓回來的，pdfplumber 與 python-pptx 都靠 Pillow 解裡面
+  的圖——不受信任的圖片正是 Pillow 漏洞的觸發點。12.x 有 35 筆已知漏洞。
+
+  之前 `requirements.txt` 根本沒寫 Pillow（是被 pdfplumber 間接帶進來的），所以
+  沒有任何東西擋住舊版。
+
+- **certifi 至少 2026.10.19**
+
+  eMudhra 有 8 張中間 CA 的私鑰外洩。爬蟲本身走 truststore（作業系統的信任庫），
+  但 pip 與部分第三方套件仍然吃 certifi。
+
 ## 1.33.0 — 2026-10-30
 
 ### 新增
